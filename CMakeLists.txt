@@ -114,6 +114,17 @@ add_lagom_library_install_rules(GenericClangPlugin)
 add_lagom_library_install_rules(JSClangPlugin)
 
 add_subdirectory(AK)
+
+if (ENABLE_WEBEXT)
+    if (NOT WEBEXT_SOURCE_DIR OR NOT EXISTS "${WEBEXT_SOURCE_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR "ENABLE_WEBEXT requires WEBEXT_SOURCE_DIR to point to a checkout of cgx-webext")
+    endif()
+    # Defines WebExt::WebExt, which LibWebView links. Run cargo from this directory so that the Rust toolchain pinned in
+    # rust-toolchain.toml is the one that builds it.
+    set(WEBEXT_CARGO_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_subdirectory("${WEBEXT_SOURCE_DIR}" cgx-webext)
+endif()
+
 add_subdirectory(Libraries)
 
 if (ENABLE_FUZZERS)

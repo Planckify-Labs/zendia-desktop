@@ -176,12 +176,21 @@ add_custom_command(
 )
 add_custom_target(generate_build_information DEPENDS ${build_information_stamp})
 
+if (ENABLE_WEBEXT)
+    # Extensions/ExtensionManager.* are copied in by cgx-webext's Integration/ladybird/apply.sh.
+    list(APPEND SOURCES Extensions/ExtensionManager.cpp)
+endif()
+
 ladybird_lib(LibWebView webview EXPLICIT_SYMBOL_EXPORT)
 add_dependencies(LibWebView generate_build_information)
 if (LADYBIRD_ENABLE_UPDATE_CHECK)
     target_compile_definitions(LibWebView PUBLIC LADYBIRD_HAS_UPDATE_CHECK)
 endif()
 
+if (ENABLE_WEBEXT)
+    target_link_libraries(LibWebView PRIVATE WebExt::WebExt)
+    target_compile_definitions(LibWebView PRIVATE ENABLE_WEBEXT)
+endif()
 target_link_libraries(LibWebView PUBLIC LibCompositing LibPlatformFeatures LibSandbox LibWebCommon)
 target_link_libraries(LibWebView PRIVATE LibCore LibCrypto LibDatabase LibDevTools LibFileSystem LibGfx LibHTTP LibImageDecoderClient LibIPC LibRequests LibMedia LibMediaClient LibUnicode LibURL LibTextCodec LibThreading)
 
