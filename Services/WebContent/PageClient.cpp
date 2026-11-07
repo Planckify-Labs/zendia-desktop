@@ -28,6 +28,7 @@
 #include <LibMedia/Sinks/AudioOutputFactory.h>
 #include <LibMediaClient/RemotePlaybackManager.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
+#include <LibWeb/Internals/ExtensionBridge.h>
 #include <LibWeb/CSS/StyleScope.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
 #include <LibWeb/CSS/StyleSheetImport.h>
@@ -2193,6 +2194,90 @@ Optional<Web::FileAPI::SerializedBlobURLEntry> PageClient::page_did_request_blob
         return {};
     }
     return response->take_entry();
+}
+
+Optional<Web::ExtensionResource> PageClient::page_did_request_extension_resource(URL::URL const& url, ByteString const& initiator_origin)
+{
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestExtensionResource>(url, initiator_origin);
+    if (!response) {
+        dbgln("WebContent client disconnected during DidRequestExtensionResource");
+        return {};
+    }
+
+    auto packed = response->take_packed_response();
+    if (packed.size() < 4)
+        return {};
+
+    u32 meta_length = 0;
+    __builtin_memcpy(&meta_length, packed.data(), 4);
+    if (meta_length > packed.size() - 4)
+        return {};
+
+    auto meta = JsonValue::from_string(StringView { packed.data() + 4, meta_length });
+    if (meta.is_error() || !meta.value().is_object())
+        return {};
+    auto const& object = meta.value().as_object();
+
+    Web::ExtensionResource resource;
+    resource.status = object.get_u16("status"sv).value_or(500);
+    resource.mime_type = object.get_string("mime"sv).value_or("application/octet-stream"_string);
+    if (auto csp = object.get_string("csp"sv); csp.has_value())
+        resource.content_security_policy = *csp;
+    auto body = ByteBuffer::copy(packed.bytes().slice(4 + meta_length));
+    if (body.is_error())
+        return {};
+    resource.body = body.release_value();
+    return resource;
+}
+
+Optional<String> PageClient::page_did_request_extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id)
+{
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestExtensionContextInit>(m_id, document_id, extension_id);
+    if (!response)
+        return {};
+    return response->take_init_json();
+}
+
+void PageClient::page_did_call_extension_api(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, String const& name, String const& args_json)
+{
+    client().async_did_call_extension_api(m_id, document_id, extension_id, request_id, name, args_json);
+}
+
+Optional<String> PageClient::page_did_call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& name, String const& args_json)
+{
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidCallExtensionApiSync>(m_id, document_id, extension_id, name, args_json);
+    if (!response)
+        return {};
+    return response->take_result_json();
+}
+
+Optional<String> PageClient::page_did_request_content_script_programs(Web::HTML::CrossProcessId document_id)
+{
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestContentScriptPrograms>(m_id, document_id);
+    if (!response)
+        return {};
+    return response->take_programs_json();
+}
+
+static GC::Ptr<Web::Internals::ExtensionBridge> extension_bridge_for(Web::Page& page, Web::HTML::CrossProcessId document_id, String const& extension_id)
+{
+    for (auto const& navigable : page.hosted_navigables()) {
+        if (auto document = navigable->active_document(); document && document->id() == document_id)
+            return document->extension_bridge(extension_id);
+    }
+    return {};
+}
+
+void PageClient::extension_api_reply(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, bool ok, String const& json)
+{
+    if (auto bridge = extension_bridge_for(page(), document_id, extension_id))
+        bridge->complete_call(request_id, ok, json);
+}
+
+void PageClient::deliver_extension_message(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& json)
+{
+    if (auto bridge = extension_bridge_for(page(), document_id, extension_id))
+        bridge->deliver(json);
 }
 
 void PageClient::page_did_request_color_picker(Color current_color)

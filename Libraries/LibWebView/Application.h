@@ -81,6 +81,9 @@ namespace WebView {
 
 struct ApplicationSettingsObserver;
 struct ApplicationPermissionManagerObserver;
+class ApplicationExtensionDelegate;
+class ExtensionManager;
+class HeadlessWebView;
 
 class WEBVIEW_API Application : public DevTools::DevToolsDelegate {
     AK_MAKE_NONCOPYABLE(Application);
@@ -189,6 +192,12 @@ public:
     // The spoofing choices in effect: what every page and worker reports from its navigator.
     String user_agent_string() const;
     Web::NavigatorCompatibilityMode navigator_compatibility_mode() const;
+
+#if defined(ENABLE_WEBEXT)
+    // Null if extension support could not start, or once the application is shutting down (pages and views are destroyed
+    // after it, and must not reach for it then).
+    static ExtensionManager* extension_manager() { return s_the ? s_the->m_extension_manager.ptr() : nullptr; }
+#endif
 
     void background_networking_settings_changed(Badge<ApplicationSettingsObserver>);
 
@@ -440,6 +449,10 @@ protected:
     explicit Application(Optional<ByteString> ladybird_binary_path = {});
 
     ErrorOr<void> initialize(Main::Arguments const&);
+#if defined(ENABLE_WEBEXT)
+    void initialize_extensions();
+    void start_extension_background_pages();
+#endif
 
     virtual void process_did_exit(Process&&, Optional<int> exit_status);
 
@@ -628,6 +641,14 @@ private:
     RefPtr<Core::Timer> m_permission_expiry_timer;
 
     MediaSessionCoordinator m_media_session_coordinator;
+
+#if defined(ENABLE_WEBEXT)
+    OwnPtr<ApplicationExtensionDelegate> m_extension_delegate;
+    OwnPtr<ExtensionManager> m_extension_manager;
+    // Hidden views hosting extensions' background pages; not tabs, and never shown.
+    Vector<NonnullOwnPtr<HeadlessWebView>> m_extension_background_views;
+    Vector<ByteString> m_loaded_extension_ids;
+#endif
 
     Main::Arguments m_arguments;
     OwnPtr<Core::StatsLog> m_stats_log;

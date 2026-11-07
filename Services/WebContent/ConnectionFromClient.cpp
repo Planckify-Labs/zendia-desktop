@@ -3889,6 +3889,18 @@ void ConnectionFromClient::did_delete_all_cookies(Web::PageId page_id, u64 reque
         page->did_delete_all_cookies(request_id);
 }
 
+void ConnectionFromClient::extension_api_reply(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, bool ok, String json)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->extension_api_reply(document_id, extension_id, request_id, ok, json);
+}
+
+void ConnectionFromClient::deliver_extension_message(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String json)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->deliver_extension_message(document_id, extension_id, json);
+}
+
 void ConnectionFromClient::toggle_media_play_state(Web::PageId page_id)
 {
     if (auto page = this->page(page_id); page.has_value())

@@ -752,6 +752,14 @@ private:
     bool m_processing_fullscreen_operations { false };
 };
 
+// AD-HOC (cgx-webext): A file of a browser extension, as served by the browser process.
+struct ExtensionResource {
+    u16 status { 0 };
+    String mime_type;
+    Optional<String> content_security_policy;
+    ByteBuffer body;
+};
+
 class WEB_API PageClient : public JS::Cell {
     GC_CELL(PageClient, JS::Cell);
 
@@ -920,6 +928,12 @@ public:
     virtual void page_did_remove_blob_url_entries(HTML::EnvironmentSettingsObject const&, [[maybe_unused]] Vector<Utf16String> const& urls) { }
     virtual void page_did_retain_blob_url_token([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] URL::BlobURLEntry::Token token) { }
     virtual Optional<FileAPI::SerializedBlobURLEntry> page_did_request_blob_url_entry([[maybe_unused]] Utf16String const& url, [[maybe_unused]] Optional<URL::BlobURLEntry::Token> token) { return {}; }
+    virtual Optional<ExtensionResource> page_did_request_extension_resource([[maybe_unused]] URL::URL const& url, [[maybe_unused]] ByteString const& initiator_origin) { return {}; }
+    // `extension_id` is empty for an extension's own page and names the extension for its content scripts in a web page.
+    virtual Optional<String> page_did_request_extension_context_init([[maybe_unused]] HTML::CrossProcessId document_id, [[maybe_unused]] String const& extension_id) { return {}; }
+    virtual void page_did_call_extension_api([[maybe_unused]] HTML::CrossProcessId document_id, [[maybe_unused]] String const& extension_id, [[maybe_unused]] u64 request_id, [[maybe_unused]] String const& name, [[maybe_unused]] String const& args_json) { }
+    virtual Optional<String> page_did_call_extension_api_sync([[maybe_unused]] HTML::CrossProcessId document_id, [[maybe_unused]] String const& extension_id, [[maybe_unused]] String const& name, [[maybe_unused]] String const& args_json) { return {}; }
+    virtual Optional<String> page_did_request_content_script_programs([[maybe_unused]] HTML::CrossProcessId document_id) { return {}; }
     virtual void page_did_update_indexed_database([[maybe_unused]] String const& url, [[maybe_unused]] IndexedDB::TransactionChanges const&) { }
     virtual void page_did_update_resource_count(i32) { }
     struct NewWebViewResult {

@@ -46,6 +46,10 @@
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/TimeoutsConfiguration.h>
 #include <LibWebView/Application.h>
+#if defined(ENABLE_WEBEXT)
+#    include <LibWebView/Extensions/ApplicationExtensionDelegate.h>
+#    include <LibWebView/Extensions/ExtensionManager.h>
+#endif
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/CompositorClient.h>
 #include <LibWebView/CompositorPresentationClient.h>
@@ -223,6 +227,81 @@ OwnPtr<MediaSessionPlatformBackend> Application::create_media_session_platform_b
     return {};
 }
 
+#if defined(ENABLE_WEBEXT)
+void Application::initialize_extensions()
+{
+    m_extension_delegate = make<ApplicationExtensionDelegate>(LexicalPath::join(profile().paths().data, "Extensions"sv).string());
+    m_extension_manager = ExtensionManager::create(*m_extension_delegate);
+    m_extension_delegate->set_manager(*m_extension_manager);
+
+    for (auto const& path : m_browser_options.extension_paths) {
+        ErrorOr<Variant<ExtensionManager::InstalledExtension, ExtensionManager::InstallFailure>> result = Error::from_string_literal("unreachable");
+
+        if (FileSystem::is_directory(path)) {
+            result = m_extension_manager->install_directory(path, {}, "auto"sv);
+        } else {
+            auto file = Core::File::open(path, Core::File::OpenMode::Read);
+            auto contents = file.is_error() ? ErrorOr<ByteBuffer> { file.release_error() } : file.value()->read_until_eof();
+            if (contents.is_error()) {
+                warnln("Could not read extension '{}': {}", path, contents.error());
+                continue;
+            }
+            result = m_extension_manager->install_package(contents.value().bytes(), {}, "auto"sv);
+        }
+
+        if (result.is_error()) {
+            warnln("Could not load extension '{}': {}", path, result.error());
+            continue;
+        }
+
+        result.value().visit(
+            [&](ExtensionManager::InstalledExtension const& extension) {
+                outln("Loaded extension: {} {} at {}", extension.display_name, extension.version, extension.base_url);
+                m_loaded_extension_ids.append(extension.id.to_byte_string());
+            },
+            [&](ExtensionManager::InstallFailure const& failure) {
+                warnln("Could not load extension '{}': {}", path, failure.message);
+            });
+    }
+}
+#endif
+
+#if defined(ENABLE_WEBEXT)
+// Background pages run in hidden views. They start once the event loop runs, when the processes they need are up.
+void Application::start_extension_background_pages()
+{
+    if (!m_extension_manager)
+        return;
+
+    auto theme_path = LexicalPath::join(WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
+    auto theme = Gfx::load_system_theme(theme_path.string());
+    if (theme.is_error()) {
+        warnln("Extensions: cannot load the theme for background pages: {}", theme.error());
+        return;
+    }
+
+    for (auto const& id : m_loaded_extension_ids) {
+        auto url_string = m_extension_manager->background_url(id);
+        if (!url_string.has_value())
+            continue;
+        auto url = URL::Parser::basic_parse(*url_string);
+        if (!url.has_value()) {
+            warnln("Extensions: invalid background URL {}", *url_string);
+            continue;
+        }
+        auto view = HeadlessWebView::create(theme.value(), { 800, 600 });
+        // The background page's listeners must exist before the install and startup events fire.
+        view->on_load_finish = [this, id](URL::URL const&) {
+            m_extension_manager->notify_installed(id, "install"sv);
+            m_extension_manager->notify_startup(id);
+        };
+        view->load(*url);
+        dbgln("Extensions: started background page {}", *url_string);
+        m_extension_background_views.append(move(view));
+    }
+}
+#endif
+
 Application::~Application()
 {
 #if !defined(AK_OS_WINDOWS)
@@ -264,6 +343,11 @@ Application::~Application()
     m_spare_web_content_process = nullptr;
 
     PictureInPictureManager::the().destroy_all_windows();
+
+#if defined(ENABLE_WEBEXT)
+    // Views talk to the application while they close, so they go while it is still whole.
+    m_extension_background_views.clear();
+#endif
 
     // Connection die() handlers use the process manager, so destroy the processes while it is still reachable.
     if (m_process_manager)
@@ -384,9 +468,14 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool disable_scrollbar_painting = false;
     bool file_scheme_urls_have_tuple_origins = false;
 
+    Vector<ByteString> extension_paths;
+
     Core::ArgsParser args_parser;
     args_parser.set_general_help("The Ladybird web browser :^)");
     args_parser.add_positional_argument(raw_urls, "URLs to open", "url", Core::ArgsParser::Required::No);
+#if defined(ENABLE_WEBEXT)
+    args_parser.add_option(extension_paths, "Load an extension: an unpacked directory or a .crx/.xpi/.zip file. May be given more than once.", "load-extension", 0, "path");
+#endif
 
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Optional,
@@ -581,6 +670,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     m_explicit_content_blocker_list_paths = move(content_blocker_list_paths);
 
     m_browser_options = {
+        .extension_paths = move(extension_paths),
         .urls = {},
         .raw_urls = move(raw_urls),
         .headless_mode = headless_mode,
@@ -698,6 +788,9 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     // A browser that crashed left a report that was recovered before the settings were read.
     if (m_settings->crash_report_sending() == CrashReportSending::NeverSend)
         CrashReportOutbox::the().discard_all();
+#if defined(ENABLE_WEBEXT)
+    initialize_extensions();
+#endif
 
     if (m_web_content_options.is_test_mode == IsTestMode::Yes) {
         TRY(m_settings->complete_first_run());
@@ -756,6 +849,11 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     if (m_stats_log)
         m_stats_log->start_sampling();
     TRY(launch_services());
+
+#if defined(ENABLE_WEBEXT)
+    // Background pages need the services and run once the event loop does.
+    Core::deferred_invoke([this] { start_extension_background_pages(); });
+#endif
 
     if (m_browser_options.enable_content_blocker == EnableContentBlocker::Yes) {
         m_content_blocker_list_update_timer = Core::Timer::create_repeating(AK::Duration::from_seconds(24 * 60 * 60), [this] {

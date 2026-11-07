@@ -883,6 +883,7 @@ class IDBFactory;
 
 namespace Web::Internals {
 
+class ExtensionBridge;
 class Internals;
 class InternalGamepad;
 class WebUI;

@@ -89,6 +89,8 @@ enum class ProfileTool {
 };
 
 struct BrowserOptions {
+    // Unpacked directories or packed files (.crx/.xpi/.zip) to load as extensions at startup. Needs ENABLE_WEBEXT.
+    Vector<ByteString> extension_paths;
     Vector<String> additional_font_directories {};
     Vector<URL::URL> urls;
     Vector<ByteString> raw_urls;

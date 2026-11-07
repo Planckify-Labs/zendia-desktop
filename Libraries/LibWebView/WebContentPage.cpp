@@ -6,6 +6,7 @@
 
 #include <AK/Debug.h>
 #include <AK/JsonArray.h>
+#include <AK/ScopeGuard.h>
 #include <AK/JsonObject.h>
 #include <LibCore/ElapsedTimer.h>
 #include <LibCore/EventLoop.h>
@@ -16,6 +17,9 @@
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/SecureContexts/AbstractOperations.h>
 #include <LibWebCommon/WebDriver/Error.h>
+#if defined(ENABLE_WEBEXT)
+#    include <LibWebView/Extensions/ExtensionManager.h>
+#endif
 #include <LibWebView/Application.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/BrowsingSession.h>
@@ -167,7 +171,15 @@ WebContentPage::WebContentPage(WebContentClient& client, Web::PageId id, Canonic
 {
 }
 
-WebContentPage::~WebContentPage() = default;
+WebContentPage::~WebContentPage()
+{
+#if defined(ENABLE_WEBEXT)
+    // The page's documents go with it, so do the extension contexts they were.
+    auto documents = m_extension_contexts.keys();
+    for (auto document_id : documents)
+        extension_contexts_destroyed(document_id);
+#endif
+}
 
 WebContentServerProxy* WebContentPage::routed_proxy() const
 {
@@ -2963,6 +2975,9 @@ void WebContentPage::did_forward_pinch_event_to_child_frame(Web::HTML::CrossProc
 
 void WebContentPage::did_destroy_child_frame(Web::HTML::CrossProcessId frame_id)
 {
+#if defined(ENABLE_WEBEXT)
+    ScopeGuard sweep_contexts = [this] { sweep_extension_contexts(); };
+#endif
     auto child_frame = traversable().find(frame_id);
     if (!child_frame.has_value() || !holds_container_of(*child_frame, "did_destroy_child_frame"sv))
         return;
@@ -3088,6 +3103,9 @@ void WebContentPage::did_fail_download(u64 download_id, String error)
 
 void WebContentPage::did_finish_loading(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId document_id)
 {
+#if defined(ENABLE_WEBEXT)
+    sweep_extension_contexts();
+#endif
     // NB: Only the page hosting the active document finishes loading it. A page standing in for a document the
     //     navigable lost, as the page displaying the tab after its process crashed does, finishes loading the stand-in;
     //     that must not surface in the view.
@@ -3947,5 +3965,276 @@ Messages::WebContentClient::DidRequestCookieResponse WebContentPage::did_request
         cookie.cookie_version = view().document_cookie_version(url);
     return cookie;
 }
+
+
+#if defined(ENABLE_WEBEXT)
+static bool is_extension_scheme(Optional<String> const& scheme)
+{
+    return scheme.has_value() && scheme->is_one_of("chrome-extension"sv, "moz-extension"sv);
+}
+
+// A document this page really hosts, as the UI process knows it (never as the renderer describes it), with its navigable.
+struct HostedDocumentInfo {
+    URL::URL url;
+    URL::Origin origin;
+    bool is_top_frame { false };
+    i64 frame_id { 0 };
+};
+
+static Optional<HostedDocumentInfo> find_hosted_document(WebContentPage const& page, Web::HTML::CrossProcessId document_id)
+{
+    Optional<HostedDocumentInfo> info;
+    page.traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable const& navigable) {
+        if (!page.traversable().hosts(navigable, page) || !page.hosts_active_document_of(navigable))
+            return IterationDecision::Continue;
+        auto const& document = navigable.active_document();
+        if (document.id() != document_id)
+            return IterationDecision::Continue;
+        auto top = navigable.is_top_level_traversable();
+        info = HostedDocumentInfo { .url = document.creation_url(), .origin = document.origin(), .is_top_frame = top, .frame_id = top ? 0 : static_cast<i64>(navigable.id().local_id) };
+        return IterationDecision::Break;
+    });
+    return info;
+}
+
+// The extension a hosted document is a page of, judged by its origin.
+static Optional<ByteString> extension_of_page(HostedDocumentInfo const& document, ExtensionManager& manager)
+{
+    if (document.origin.is_opaque() || !is_extension_scheme(document.origin.scheme()))
+        return {};
+    return manager.extension_for_url(ByteString::formatted("{}/", document.origin.serialize()));
+}
+
+static u64 next_extension_context_id()
+{
+    static u64 s_next_id = 1;
+    return s_next_id++;
+}
+
+// Contexts are known to the core by id; this maps them back to the page and document that host them.
+struct ExtensionContextLocation {
+    WeakPtr<WebContentClient> client;
+    Web::PageId page_id { 0 };
+    Web::HTML::CrossProcessId document_id;
+    ByteString bridge_key; // Empty for extension pages, the extension id for content scripts.
+    ByteString extension_id;
+};
+
+static HashMap<u64, ExtensionContextLocation>& extension_context_locations()
+{
+    static HashMap<u64, ExtensionContextLocation> s_locations;
+    return s_locations;
+}
+
+void deliver_to_extension_context(u64 context_id, StringView json)
+{
+    auto location = extension_context_locations().get(context_id);
+    if (!location.has_value())
+        return;
+    auto client = location->client.strong_ref();
+    if (!client)
+        return;
+    if (auto* page = client->page(location->page_id))
+        page->async_deliver_extension_message(location->document_id, MUST(String::from_byte_string(location->bridge_key)), MUST(String::from_utf8(json)));
+}
+
+void deliver_event_to_extension(StringView extension_id, StringView json)
+{
+    // Collect first: delivering may create or destroy contexts.
+    Vector<u64> targets;
+    for (auto const& [context_id, location] : extension_context_locations()) {
+        if (location.extension_id == extension_id)
+            targets.append(context_id);
+    }
+    for (auto context_id : targets)
+        deliver_to_extension_context(context_id, json);
+}
+
+Optional<WebContentPage::ExtensionContextRecord> WebContentPage::verified_extension_context(Web::HTML::CrossProcessId document_id, ByteString const& bridge_key) const
+{
+    auto documents = m_extension_contexts.get(document_id);
+    if (!documents.has_value())
+        return {};
+    auto record = documents->get(bridge_key);
+    if (!record.has_value())
+        return {};
+    // The document must still be one this page hosts.
+    if (!find_hosted_document(*this, document_id).has_value())
+        return {};
+    return *record;
+}
+
+Optional<String> WebContentPage::extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty)
+{
+    auto* manager = Application::extension_manager();
+    if (!manager)
+        return {};
+    auto document = find_hosted_document(*this, document_id);
+    if (!document.has_value())
+        return {};
+
+    auto bridge_key = extension_id_or_empty.to_byte_string();
+    if (auto existing = m_extension_contexts.get(document_id); existing.has_value()) {
+        if (auto record = existing->get(bridge_key); record.has_value())
+            return manager->init_data_for_context(record->context_id).map([](auto const& json) { return MUST(String::from_byte_string(json)); });
+    }
+
+    ByteString extension_id;
+    ExtensionManager::ContextKind kind;
+    auto serialized_url = document->url.serialize();
+    if (bridge_key.is_empty()) {
+        // An extension's own page.
+        auto owner = extension_of_page(*document, *manager);
+        if (!owner.has_value()) {
+            client().did_misbehave("did_request_extension_context_init"sv, "not an extension page"sv);
+            return {};
+        }
+        extension_id = owner.release_value();
+        kind = manager->is_background_url(extension_id, serialized_url) ? ExtensionManager::ContextKind::Background : ExtensionManager::ContextKind::ExtensionPage;
+    } else {
+        // Content scripts of an extension in a web page: only if that extension's content scripts match the document.
+        extension_id = bridge_key;
+        auto scripts = manager->content_scripts_for(extension_id, serialized_url, document->is_top_frame);
+        if (!scripts.has_value() || *scripts == "[]"sv || extension_of_page(*document, *manager).has_value()) {
+            client().did_misbehave("did_request_extension_context_init"sv, "no content scripts of that extension match the document"sv);
+            return {};
+        }
+        kind = ExtensionManager::ContextKind::ContentScript;
+    }
+
+    Optional<i64> tab_id;
+    if (kind != ExtensionManager::ContextKind::Background && displays_tab())
+        tab_id = static_cast<i64>(view().view_id());
+    Optional<i64> frame_id;
+    if (kind == ExtensionManager::ContextKind::ContentScript)
+        frame_id = document->frame_id;
+
+    auto context_id = next_extension_context_id();
+    auto created = manager->context_created({ .id = context_id, .extension_id = extension_id, .kind = kind, .tab_id = tab_id, .frame_id = frame_id, .url = serialized_url });
+    if (created.is_error() || !created.value())
+        return {};
+
+    m_extension_contexts.ensure(document_id).set(bridge_key, { .context_id = context_id, .extension_id = extension_id, .kind = kind });
+    extension_context_locations().set(context_id, { .client = client(), .page_id = id(), .document_id = document_id, .bridge_key = bridge_key, .extension_id = extension_id });
+
+    auto init = manager->init_data_for_context(context_id);
+    if (!init.has_value())
+        return {};
+    return MUST(String::from_byte_string(*init));
+}
+
+static StringView context_kind_name(ExtensionManager::ContextKind kind)
+{
+    switch (kind) {
+    case ExtensionManager::ContextKind::Background:
+        return "background"sv;
+    case ExtensionManager::ContextKind::ExtensionPage:
+        return "extension_page"sv;
+    case ExtensionManager::ContextKind::ContentScript:
+        return "content_script"sv;
+    case ExtensionManager::ContextKind::Other:
+        break;
+    }
+    return "other"sv;
+}
+
+static ByteString api_call_json(WebContentPage::ExtensionContextRecord const& record, String const& name, String const& args_json)
+{
+    auto args = JsonValue::from_string(args_json);
+    JsonObject caller;
+    caller.set("context"sv, context_kind_name(record.kind));
+    caller.set("contextId"sv, record.context_id);
+    JsonObject call;
+    call.set("extensionId"sv, MUST(String::from_byte_string(record.extension_id)));
+    call.set("function"sv, name);
+    call.set("args"sv, args.is_error() || !args.value().is_array() ? JsonValue { JsonArray {} } : args.release_value());
+    call.set("caller"sv, move(caller));
+    return call.serialized().to_byte_string();
+}
+
+void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId document_id, String extension_id_or_empty, u64 request_id, String name, String args_json)
+{
+    auto* manager = Application::extension_manager();
+    auto record = verified_extension_context(document_id, extension_id_or_empty.to_byte_string());
+    if (!manager || !record.has_value()) {
+        async_extension_api_reply(document_id, extension_id_or_empty, request_id, false, "Extension context invalidated."_string);
+        return;
+    }
+
+    manager->dispatch(api_call_json(*record, name, args_json), [weak_client = WeakPtr<WebContentClient> { client() }, page_id = id(), document_id, bridge_key = extension_id_or_empty, request_id](bool ok, StringView result) {
+        auto client = weak_client.strong_ref();
+        if (!client)
+            return;
+        auto* page = client->page(page_id);
+        if (!page)
+            return;
+        // Errors arrive as {kind, message}; the page only needs the message.
+        auto text = MUST(String::from_utf8(result));
+        if (!ok) {
+            if (auto parsed = JsonValue::from_string(result); !parsed.is_error() && parsed.value().is_object())
+                text = parsed.value().as_object().get_string("message"sv).value_or(text);
+        }
+        page->async_extension_api_reply(document_id, bridge_key, request_id, ok, text);
+    });
+}
+
+Optional<String> WebContentPage::call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty, String const& name, String const& args_json)
+{
+    auto* manager = Application::extension_manager();
+    auto record = verified_extension_context(document_id, extension_id_or_empty.to_byte_string());
+    if (!manager || !record.has_value())
+        return {};
+
+    Optional<String> result;
+    manager->dispatch(api_call_json(*record, name, args_json), [&](bool ok, StringView text) {
+        if (ok)
+            result = MUST(String::from_utf8(text));
+    });
+    // Synchronous APIs are answered synchronously by the core; anything else yields no value.
+    return result;
+}
+
+String WebContentPage::content_script_programs(Web::HTML::CrossProcessId document_id)
+{
+    auto* manager = Application::extension_manager();
+    if (!manager)
+        return "[]"_string;
+    auto document = find_hosted_document(*this, document_id);
+    // Extension pages do not get content scripts, and only documents this page hosts get any.
+    if (!document.has_value() || extension_of_page(*document, *manager).has_value())
+        return "[]"_string;
+    return MUST(String::from_byte_string(manager->content_script_programs(document->url.serialize(), document->is_top_frame)));
+}
+
+void WebContentPage::sweep_extension_contexts()
+{
+    if (m_extension_contexts.is_empty())
+        return;
+    Vector<Web::HTML::CrossProcessId> gone;
+    for (auto const& [document_id, records] : m_extension_contexts) {
+        if (!find_hosted_document(*this, document_id).has_value())
+            gone.append(document_id);
+    }
+    for (auto document_id : gone)
+        extension_contexts_destroyed(document_id);
+}
+
+void WebContentPage::extension_contexts_destroyed(Web::HTML::CrossProcessId document_id)
+{
+    auto records = m_extension_contexts.take(document_id);
+    if (!records.has_value())
+        return;
+    auto* manager = Application::extension_manager();
+    for (auto const& [key, record] : *records) {
+        extension_context_locations().remove(record.context_id);
+        if (manager)
+            manager->context_destroyed(record.context_id);
+    }
+}
+#else
+void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId, String, u64, String, String)
+{
+}
+#endif
 
 }

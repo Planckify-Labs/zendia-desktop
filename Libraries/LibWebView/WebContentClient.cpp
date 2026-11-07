@@ -23,6 +23,9 @@
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/Error.h>
 #include <LibWebView/Application.h>
+#if defined(ENABLE_WEBEXT)
+#    include <LibWebView/Extensions/ExtensionManager.h>
+#endif
 #include <LibWebView/AudioServerControlClient.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/CanonicalBrowsingContext.h>
@@ -186,6 +189,75 @@ void WebContentClient::did_retain_blob_url_token(Web::HTML::CrossProcessId navig
 Messages::WebContentClient::DidRequestBlobUrlEntryResponse WebContentClient::did_request_blob_url_entry(Utf16String url, Optional<URL::BlobURLEntry::Token> token)
 {
     return m_session->blob_url_store->resolve(url, token);
+}
+
+Messages::WebContentClient::DidRequestExtensionResourceResponse WebContentClient::did_request_extension_resource(URL::URL url, ByteString initiator_origin)
+{
+#if defined(ENABLE_WEBEXT)
+    if (auto* manager = Application::extension_manager()) {
+        // The initiator comes from the renderer, so it is only a hint for web_accessible_resources, which the core enforces
+        // against it. A compromised renderer can claim any origin; process-level identification of the requester is a TODO.
+        auto serialized_url = url.serialize();
+        if (auto served = manager->serve(serialized_url, initiator_origin); served.has_value()) {
+            JsonObject meta;
+            meta.set("status"sv, served->status);
+            meta.set("mime"sv, MUST(String::from_byte_string(served->mime_type)));
+            if (served->content_security_policy.has_value())
+                meta.set("csp"sv, MUST(String::from_byte_string(*served->content_security_policy)));
+            auto meta_json = meta.serialized().to_byte_string();
+
+            ByteBuffer buffer;
+            u32 length = static_cast<u32>(meta_json.length());
+            if (buffer.try_append(&length, 4).is_error() || buffer.try_append(meta_json.bytes()).is_error() || buffer.try_append(served->body.bytes()).is_error())
+                return ByteBuffer {};
+            return buffer;
+        }
+    }
+#else
+    (void)url;
+    (void)initiator_origin;
+#endif
+    return ByteBuffer {};
+}
+
+Messages::WebContentClient::DidRequestExtensionContextInitResponse WebContentClient::did_request_extension_context_init(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id)
+{
+#if defined(ENABLE_WEBEXT)
+    if (auto* page = this->page(page_id))
+        return page->extension_context_init(document_id, extension_id);
+#else
+    (void)page_id;
+    (void)document_id;
+    (void)extension_id;
+#endif
+    return Optional<String> {};
+}
+
+Messages::WebContentClient::DidCallExtensionApiSyncResponse WebContentClient::did_call_extension_api_sync(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String name, String args_json)
+{
+#if defined(ENABLE_WEBEXT)
+    if (auto* page = this->page(page_id))
+        return page->call_extension_api_sync(document_id, extension_id, name, args_json);
+#else
+    (void)page_id;
+    (void)document_id;
+    (void)extension_id;
+    (void)name;
+    (void)args_json;
+#endif
+    return Optional<String> {};
+}
+
+Messages::WebContentClient::DidRequestContentScriptProgramsResponse WebContentClient::did_request_content_script_programs(Web::PageId page_id, Web::HTML::CrossProcessId document_id)
+{
+#if defined(ENABLE_WEBEXT)
+    if (auto* page = this->page(page_id))
+        return page->content_script_programs(document_id);
+#else
+    (void)page_id;
+    (void)document_id;
+#endif
+    return "[]"_string;
 }
 
 void WebContentClient::connect_test_endpoint(NonnullOwnPtr<IPC::Transport> transport)

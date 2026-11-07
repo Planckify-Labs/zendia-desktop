@@ -49,6 +49,9 @@ class PageClient final : public Web::PageClient {
     GC_DECLARE_ALLOCATOR(PageClient);
 
 public:
+    // AD-HOC (cgx-webext): from the browser process, for the extension bridges of this page's documents.
+    void extension_api_reply(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, bool ok, String const& json);
+    void deliver_extension_message(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& json);
     static GC::Ref<PageClient> create(PageHost& page_host, Web::PageId id, Optional<Web::HTML::CrossProcessId> pending_root_navigable_id = {});
 
     virtual ~PageClient() override;
@@ -370,6 +373,11 @@ private:
     virtual void page_did_remove_blob_url_entries(Web::HTML::EnvironmentSettingsObject const&, Vector<Utf16String> const& urls) override;
     virtual void page_did_retain_blob_url_token(Web::HTML::CrossProcessId navigable_id, URL::BlobURLEntry::Token) override;
     virtual Optional<Web::FileAPI::SerializedBlobURLEntry> page_did_request_blob_url_entry(Utf16String const& url, Optional<URL::BlobURLEntry::Token> token) override;
+    virtual Optional<Web::ExtensionResource> page_did_request_extension_resource(URL::URL const& url, ByteString const& initiator_origin) override;
+    virtual Optional<String> page_did_request_extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id) override;
+    virtual void page_did_call_extension_api(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, String const& name, String const& args_json) override;
+    virtual Optional<String> page_did_call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& name, String const& args_json) override;
+    virtual Optional<String> page_did_request_content_script_programs(Web::HTML::CrossProcessId document_id) override;
     virtual void page_did_request_color_picker(Color current_color) override;
     virtual void page_did_request_date_picker(Utf16String input_type, Utf16String value, Utf16String minimum, Utf16String maximum) override;
     virtual void page_did_request_file_picker(Web::HTML::FileFilter const& accepted_file_types, Web::HTML::AllowMultipleFiles) override;

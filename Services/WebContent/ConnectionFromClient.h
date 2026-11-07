@@ -288,6 +288,8 @@ private:
     virtual void handle_file_return(Web::PageId page_id, i32 error, Optional<IPC::File> file, i32 request_id) override;
     virtual void blob_url_entry_removed(Utf16String url) override;
     virtual void did_delete_all_cookies(Web::PageId page_id, u64 request_id) override;
+    virtual void extension_api_reply(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, bool ok, String json) override;
+    virtual void deliver_extension_message(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String json) override;
     virtual void set_system_visibility_state(Web::PageId page_id, Web::HTML::VisibilityState) override;
     virtual void set_browsing_context_group(Web::PageId page_id, u64 browsing_context_group_id) override;
     virtual void update_visibility_state(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::VisibilityState) override;

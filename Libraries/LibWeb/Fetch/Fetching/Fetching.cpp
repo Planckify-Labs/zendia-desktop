@@ -1702,6 +1702,35 @@ GC::Ref<PendingResponse> scheme_fetch(JS::Realm& realm, Infrastructure::FetchPar
         response->set_body(Infrastructure::byte_sequence_as_response_body(data_url_struct.value().body));
         return PendingResponse::create(fetch_params, response);
     }
+    // -> "chrome-extension"
+    // -> "moz-extension"
+    // AD-HOC (cgx-webext): The pages and files of browser extensions are served by the browser process, which also decides
+    //                      whether the requester may have them (web_accessible_resources).
+    else if (request->current_url().scheme() == "chrome-extension"sv || request->current_url().scheme() == "moz-extension"sv) {
+        auto& page = Bindings::principal_host_defined_page(realm);
+
+        // A navigation that the browser itself started (typed URL, command line) has no client; everything else names the
+        // origin it comes from.
+        bool browser_initiated_navigation = !request->client_snapshot() && request->mode() == Infrastructure::Request::Mode::Navigate;
+        ByteString initiator_origin;
+        if (!browser_initiated_navigation) {
+            auto const* origin = request->origin().get_pointer<URL::Origin>();
+            initiator_origin = origin ? origin->serialize().to_byte_string() : ByteString { "null"sv };
+        }
+
+        auto resource = page.client().page_did_request_extension_resource(request->current_url(), initiator_origin);
+        if (!resource.has_value())
+            return PendingResponse::create(fetch_params, Infrastructure::Response::network_error("Request URL does not belong to an installed extension"_string));
+
+        auto response = Infrastructure::Response::create();
+        response->set_status(resource->status);
+        response->set_status_message(resource->status == 200 ? "OK"sv : "Error"sv);
+        response->header_list()->append(HTTP::Header::isomorphic_encode("Content-Type"sv, resource->mime_type.bytes_as_string_view()));
+        if (resource->content_security_policy.has_value())
+            response->header_list()->append(HTTP::Header::isomorphic_encode("Content-Security-Policy"sv, resource->content_security_policy->bytes_as_string_view()));
+        response->set_body(Infrastructure::byte_sequence_as_response_body(resource->body.bytes()));
+        return PendingResponse::create(fetch_params, response);
+    }
     // -> "file"
     // AD-HOC: "resource"
     else if (request->current_url().scheme() == "file"sv || request->current_url().scheme() == "resource"sv) {

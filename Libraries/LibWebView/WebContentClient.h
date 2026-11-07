@@ -94,6 +94,10 @@ public:
     virtual void close_worker_agent(Web::PageId page_id, Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token) override;
     virtual void did_retain_blob_url_token(Web::HTML::CrossProcessId navigable_id, URL::BlobURLEntry::Token token) override;
     virtual Messages::WebContentClient::DidRequestBlobUrlEntryResponse did_request_blob_url_entry(Utf16String url, Optional<URL::BlobURLEntry::Token> token) override;
+    virtual Messages::WebContentClient::DidRequestExtensionResourceResponse did_request_extension_resource(URL::URL url, ByteString initiator_origin) override;
+    virtual Messages::WebContentClient::DidRequestExtensionContextInitResponse did_request_extension_context_init(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id) override;
+    virtual Messages::WebContentClient::DidCallExtensionApiSyncResponse did_call_extension_api_sync(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String name, String args_json) override;
+    virtual Messages::WebContentClient::DidRequestContentScriptProgramsResponse did_request_content_script_programs(Web::PageId page_id, Web::HTML::CrossProcessId document_id) override;
 
     WebContentClient(NonnullOwnPtr<IPC::Transport>, BrowsingSession&, Web::PageId initial_page_id, Web::HTML::CrossProcessId root_navigable_id);
     ~WebContentClient();

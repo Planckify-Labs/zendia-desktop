@@ -7,6 +7,9 @@
 #pragma once
 
 #include <AK/HashTable.h>
+#if defined(ENABLE_WEBEXT)
+#    include <LibWebView/Extensions/ExtensionManager.h>
+#endif
 #include <AK/Noncopyable.h>
 #include <AK/Optional.h>
 #include <AK/RefCounted.h>
@@ -31,6 +34,13 @@
 #include <WebContent/WebContentTestClientEndpoint.h>
 
 namespace WebView {
+
+#if defined(ENABLE_WEBEXT)
+// Sends a message from the extension core to the extension page (context) it is addressed to.
+void deliver_to_extension_context(u64 context_id, StringView json);
+// Sends a browser event (storage.onChanged, alarms.onAlarm, ...) to every page of an extension.
+void deliver_event_to_extension(StringView extension_id, StringView json);
+#endif
 
 // A reply a page owes its traversable for a message the traversable sent it.
 struct OwedReply {
@@ -74,6 +84,13 @@ class WEBVIEW_API WebContentPage final
     friend class WebContentTestClient;
 
 public:
+#if defined(ENABLE_WEBEXT)
+    struct ExtensionContextRecord {
+        u64 context_id { 0 };
+        ByteString extension_id;
+        ExtensionManager::ContextKind kind { ExtensionManager::ContextKind::Other };
+    };
+#endif
     WebContentPage(WebContentClient&, Web::PageId, CanonicalTraversable&);
     virtual ~WebContentPage() override;
 
@@ -398,6 +415,19 @@ private:
     virtual void did_request_prompt(Utf16String message, Utf16String default_) override;
     virtual void did_change_favicon(Gfx::ShareableBitmap favicon) override;
     virtual void did_request_delete_all_cookies(u64 request_id, URL::URL url) override;
+    virtual void did_call_extension_api(Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, String name, String args_json) override;
+
+#if defined(ENABLE_WEBEXT)
+    // AD-HOC (cgx-webext): extension pages and content scripts in documents this page hosts. `extension_id_or_empty` is
+    // empty for an extension's own page and names the extension for content scripts.
+    Optional<String> extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty);
+    Optional<String> call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty, String const& name, String const& args_json);
+    String content_script_programs(Web::HTML::CrossProcessId document_id);
+    void extension_contexts_destroyed(Web::HTML::CrossProcessId document_id);
+    // Ends the contexts of documents this page no longer hosts (navigated away, frame removed).
+    void sweep_extension_contexts();
+
+#endif
     Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints, Web::HTML::CrossProcessId current_navigable_id, Utf16String name, bool no_opener, Optional<URL::URL> current_document_base_url);
     void did_close_browsing_context();
     virtual void did_complete_close_preflight(u64 request_id, bool approved) override;
@@ -467,6 +497,12 @@ private:
         Web::Permissions::PermissionName name;
     };
     Vector<FilePermissionGrant> m_file_permission_grants;
+
+#if defined(ENABLE_WEBEXT)
+    // Extension contexts this page hosts: document -> bridge key ("" for the extension's page, extension id for content scripts).
+    HashMap<Web::HTML::CrossProcessId, HashMap<ByteString, ExtensionContextRecord>> m_extension_contexts;
+    Optional<ExtensionContextRecord> verified_extension_context(Web::HTML::CrossProcessId document_id, ByteString const& bridge_key) const;
+#endif
 };
 
 }

@@ -99,6 +99,7 @@
 #include <LibWeb/DOM/CustomEvent.h>
 #include <LibWeb/DOM/DOMImplementation.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Internals/ExtensionBridge.h>
 #include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/DocumentObserver.h>
 #include <LibWeb/DOM/DocumentOrShadowRoot.h>
@@ -594,6 +595,11 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
 
     // 10. Set window's associated Document to document.
     window->set_associated_document(*document);
+
+    // AD-HOC (cgx-webext): The pages of browser extensions talk to the extension core through a bridge object, defined
+    //                      here so that it exists before any script of the page runs.
+    if (Internals::ExtensionBridge::is_extension_origin(document->origin()))
+        Internals::ExtensionBridge::install_for_extension_page(HTML::relevant_realm(*window), *window);
 
     // https://w3c.github.io/webappsec-upgrade-insecure-requests/#nesting
     // AD-HOC: A Document in a child navigable inherits the insecure requests policy of its container's node document
@@ -1151,6 +1157,8 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_deferred_parser_start);
     visitor.visit(m_custom_element_registry);
     visitor.visit(m_ancestor_origins_list);
+    for (auto& [id, bridge] : m_extension_bridges)
+        visitor.visit(bridge);
 }
 
 bool Document::content_blocking_enabled() const
@@ -5001,6 +5009,12 @@ void Document::update_readiness(HTML::DocumentReadyState readiness_value)
         }
     }
 
+    // AD-HOC (cgx-webext): document_end content scripts run once the DOM is complete, document_idle ones once loading is.
+    if (readiness_value == HTML::DocumentReadyState::Interactive)
+        Internals::ExtensionBridge::run_content_script_stage(*this, "document_end"sv);
+    else if (readiness_value == HTML::DocumentReadyState::Complete)
+        Internals::ExtensionBridge::run_content_script_stage(*this, "document_idle"sv);
+
     // 4. Fire an event named readystatechange at document.
     dispatch_event(Event::create(
         HTML::EventNames::readystatechange,
@@ -8408,6 +8422,11 @@ void Document::update_for_history_step_application(NonnullRefPtr<HTML::SessionHi
 void Document::set_ready_to_run_scripts()
 {
     m_ready_to_run_scripts = true;
+
+    // AD-HOC (cgx-webext): document_start content scripts of browser extensions run now: the document may run script, and
+    //                      its parser has not started.
+    Internals::ExtensionBridge::inject_content_scripts(*this);
+
     if (auto callback = m_deferred_parser_start) {
         m_deferred_parser_start = nullptr;
         callback->function()();

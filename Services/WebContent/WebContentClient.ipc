@@ -88,6 +88,16 @@ endpoint WebContentClient routed by Web::PageId page_id
     did_request_blob_url_entry(Utf16String url, Optional<URL::BlobURLEntry::Token> token) => (Optional<Web::FileAPI::SerializedBlobURLEntry> entry)
     did_retain_blob_url_token(Web::HTML::CrossProcessId navigable_id, URL::BlobURLEntry::Token token) =|
 
+    // AD-HOC (cgx-webext): Extension pages and files live in the browser process. The answer is packed as
+    // u32 LE meta_length | meta JSON {status, mime, csp} | body; empty if the URL belongs to no installed extension.
+    did_request_extension_resource(URL::URL url, ByteString initiator_origin) => (ByteBuffer packed_response)
+    // The browser process judges a document by what it knows of it (origin, URL, frame), never by what the renderer says.
+    // extension_id is empty for an extension's own page and names the extension for its content scripts in a web page.
+    [NotRouted] did_request_extension_context_init(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id) => (Optional<String> init_json)
+    did_call_extension_api(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, String name, String args_json) =|
+    [NotRouted] did_call_extension_api_sync(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String name, String args_json) => (Optional<String> result_json)
+    [NotRouted] did_request_content_script_programs(Web::PageId page_id, Web::HTML::CrossProcessId document_id) => (String programs_json)
+
     [NotRouted] allocate_compositor_context_id(Web::PageId page_id, Web::PagePresentationRegistration page_presentation_registration) => (Web::CompositorContextId context_id)
     did_destroy_compositor_context(Web::CompositorContextId context_id) =|
 

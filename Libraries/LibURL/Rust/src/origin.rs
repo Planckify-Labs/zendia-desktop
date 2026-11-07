@@ -247,6 +247,9 @@ impl<Serialization: AsRef<str>, BlobUrlEntrySlot> Url<Serialization, BlobUrlEntr
             // AD-HOC: resource:// URLs are internal browser resources; give them a shared tuple origin
             // so that same-origin checks pass between any two resource:// documents or worker scripts.
             "resource" => Origin::new_tuple("resource", empty_host(), None),
+            // AD-HOC: Extension pages (chrome-extension://<id>/, moz-extension://<uuid>/) each have a tuple origin of their own,
+            // so that they get storage, same-origin checks and a CSP "self", and so that one extension cannot read another.
+            "chrome-extension" | "moz-extension" => Origin::new_tuple(self.scheme(), self.host(), self.port()),
             // -> "file"
             "file" => {
                 // Unfortunate as it is, this is left as an exercise to the reader. When in doubt, return a new opaque origin.

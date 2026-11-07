@@ -1,0 +1,11 @@
+// AD-HOC (cgx-webext): Connects the JavaScript of a browser extension's own pages (background page, popup, options page)
+// to the extension core in the browser process. Only documents with an extension origin get one.
+callback ExtensionBridgeMessageHandler = undefined (DOMString message);
+
+[Exposed=Nobody]
+interface ExtensionBridge {
+    DOMString contextInit();
+    Promise<DOMString> call(DOMString name, DOMString argsJson);
+    DOMString callSync(DOMString name, DOMString argsJson);
+    undefined setMessageHandler(ExtensionBridgeMessageHandler handler);
+};

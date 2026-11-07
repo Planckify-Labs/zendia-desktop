@@ -1175,6 +1175,20 @@ public:
     void set_mute_iframe_load(bool value) { m_mute_iframe_load = value; }
 
     HTML::CrossProcessId id() const { return m_id.value(); }
+
+    // AD-HOC (cgx-webext): Extension bridges of this document: "" for an extension's own page, else one per extension
+    //                      whose content scripts run in it.
+    GC::Ptr<Internals::ExtensionBridge> extension_bridge(String const& extension_id) const { return m_extension_bridges.get(extension_id).value_or(nullptr); }
+    void set_extension_bridge(String const& extension_id, GC::Ref<Internals::ExtensionBridge> bridge) { m_extension_bridges.set(extension_id, bridge); }
+    Vector<GC::Ref<Internals::ExtensionBridge>> content_script_bridges() const
+    {
+        Vector<GC::Ref<Internals::ExtensionBridge>> bridges;
+        for (auto const& [id, bridge] : m_extension_bridges) {
+            if (!id.is_empty())
+                bridges.append(*bridge);
+        }
+        return bridges;
+    }
     void set_id(HTML::CrossProcessId);
 
     // https://html.spec.whatwg.org/multipage/dom.html#concept-document-about-base-url
@@ -2688,6 +2702,7 @@ private:
 
     // https://html.spec.whatwg.org/multipage/dom.html#concept-document-ancestor-origins-list
     GC::Ptr<HTML::DOMStringList> m_ancestor_origins_list;
+    HashMap<String, GC::Ptr<Internals::ExtensionBridge>> m_extension_bridges;
 };
 
 template<>

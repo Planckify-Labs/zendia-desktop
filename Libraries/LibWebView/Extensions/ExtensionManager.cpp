@@ -15,6 +15,13 @@
 namespace WebView {
 
 struct ExtensionCallbackContext {
+    AK_ALLOC_WITH_KMALLOC;
+
+    explicit ExtensionCallbackContext(ExtensionManager::Delegate& delegate)
+        : delegate(delegate)
+    {
+    }
+
     ExtensionManager::Delegate& delegate;
     WebExtHandle* handle { nullptr };
 };
@@ -79,6 +86,19 @@ void dispatch_event(void* user, WebExtStr id, WebExtStr event, WebExtStr args)
     static_cast<Context*>(user)->delegate.dispatch_event(to_view(id), to_view(event), to_view(args));
 }
 
+void deliver_to_context(void* user, u64 context_id, WebExtStr envelope)
+{
+    static_cast<Context*>(user)->delegate.deliver_to_context(context_id, to_view(envelope));
+}
+
+WebExtString describe_tab(void* user, i64 tab_id)
+{
+    auto tab = static_cast<Context*>(user)->delegate.describe_tab(tab_id);
+    if (!tab.has_value())
+        return { nullptr, 0, 0 };
+    return make_library_string(tab->view());
+}
+
 void call_browser(void* user, WebExtStr call, u64 token)
 {
     auto* context = static_cast<Context*>(user);
@@ -118,7 +138,7 @@ NonnullOwnPtr<ExtensionManager> ExtensionManager::create(Delegate& delegate)
 }
 
 ExtensionManager::ExtensionManager(Delegate& delegate)
-    : m_context(make<ExtensionCallbackContext>(ExtensionCallbackContext { delegate, nullptr }))
+    : m_context(make<ExtensionCallbackContext>(delegate))
 {
     VERIFY(webext_abi_version() == WEBEXT_ABI_VERSION);
 
@@ -129,6 +149,8 @@ ExtensionManager::ExtensionManager(Delegate& delegate)
         .now_ms = now_ms,
         .ui_locale = ui_locale,
         .dispatch_event = dispatch_event,
+        .deliver_to_context = deliver_to_context,
+        .describe_tab = describe_tab,
         .call_browser = call_browser,
         .request_permissions = request_permissions,
         .schedule_alarm_check = schedule_alarm_check,
@@ -143,9 +165,11 @@ ExtensionManager::~ExtensionManager()
     webext_destroy(m_handle);
 }
 
-ErrorOr<Variant<ExtensionManager::InstalledExtension, ExtensionManager::InstallFailure>> ExtensionManager::install_package(ReadonlyBytes package, StringView id_override, StringView base_url)
+static ErrorOr<Variant<ExtensionManager::InstalledExtension, ExtensionManager::InstallFailure>> parse_install_result(Optional<ByteString> raw)
 {
-    auto raw = take(webext_install_package(m_handle, package.data(), package.size(), to_c(id_override), to_c(base_url)));
+    using InstalledExtension = ExtensionManager::InstalledExtension;
+    using InstallFailure = ExtensionManager::InstallFailure;
+
     if (!raw.has_value())
         return Error::from_string_literal("The extension core returned no result");
 
@@ -171,8 +195,74 @@ ErrorOr<Variant<ExtensionManager::InstalledExtension, ExtensionManager::InstallF
         .id = object.get_string("id"sv).value_or({}),
         .display_name = object.get_string("displayName"sv).value_or({}),
         .version = object.get_string("version"sv).value_or({}),
+        .base_url = object.get_string("baseUrl"sv).value_or({}),
         .result_json = raw.release_value(),
     } };
+}
+
+ErrorOr<Variant<ExtensionManager::InstalledExtension, ExtensionManager::InstallFailure>> ExtensionManager::install_package(ReadonlyBytes package, StringView id_override, StringView base_url)
+{
+    return parse_install_result(take(webext_install_package(m_handle, package.data(), package.size(), to_c(id_override), to_c(base_url))));
+}
+
+ErrorOr<Variant<ExtensionManager::InstalledExtension, ExtensionManager::InstallFailure>> ExtensionManager::install_directory(StringView path, StringView id_override, StringView base_url)
+{
+    return parse_install_result(take(webext_install_directory(m_handle, to_c(path), to_c(id_override), to_c(base_url))));
+}
+
+Optional<ExtensionManager::ServedResource> ExtensionManager::serve(StringView url, StringView initiator)
+{
+    WebExtString body { nullptr, 0, 0 };
+    auto meta = take(webext_serve(m_handle, to_c(url), to_c(initiator), &body));
+    if (!meta.has_value())
+        return {};
+
+    auto json = JsonValue::from_string(meta->view());
+    if (json.is_error() || !json.value().is_object()) {
+        webext_string_free(body);
+        return {};
+    }
+    auto const& object = json.value().as_object();
+
+    ServedResource resource;
+    resource.status = object.get_u16("status"sv).value_or(500);
+    resource.mime_type = object.get_string("mime"sv).value_or({}).to_byte_string();
+    if (auto csp = object.get_string("csp"sv); csp.has_value())
+        resource.content_security_policy = csp->to_byte_string();
+    resource.extension_id = object.get_string("extensionId"sv).value_or({}).to_byte_string();
+    if (body.ptr) {
+        auto copy = ByteBuffer::copy(body.ptr, body.len);
+        webext_string_free(body);
+        if (copy.is_error())
+            return {};
+        resource.body = copy.release_value();
+    }
+    return resource;
+}
+
+ByteString ExtensionManager::content_script_bundles(StringView url, bool is_top_frame, StringView fallback_url)
+{
+    return take(webext_content_script_bundles(m_handle, to_c(url), is_top_frame, to_c(fallback_url))).value_or("[]"sv);
+}
+
+ByteString ExtensionManager::content_script_programs(StringView url, bool is_top_frame, StringView fallback_url)
+{
+    return take(webext_content_script_programs(m_handle, to_c(url), is_top_frame, to_c(fallback_url))).value_or("[]"sv);
+}
+
+Optional<ByteString> ExtensionManager::background_url(StringView extension_id)
+{
+    return take(webext_background_url(m_handle, to_c(extension_id)));
+}
+
+bool ExtensionManager::is_background_url(StringView extension_id, StringView url)
+{
+    return webext_is_background_url(m_handle, to_c(extension_id), to_c(url));
+}
+
+Optional<ByteString> ExtensionManager::extension_for_url(StringView url)
+{
+    return take(webext_extension_for_url(m_handle, to_c(url)));
 }
 
 bool ExtensionManager::uninstall(StringView extension_id)
@@ -190,6 +280,49 @@ void ExtensionManager::dispatch(StringView call_json, Function<void(bool, String
             (*owned)(ok, to_view(json));
         },
         callback);
+}
+
+ErrorOr<bool> ExtensionManager::context_created(ContextDescription const& context)
+{
+    StringView kind;
+    switch (context.kind) {
+    case ContextKind::Background:
+        kind = "background"sv;
+        break;
+    case ContextKind::ExtensionPage:
+        kind = "extension_page"sv;
+        break;
+    case ContextKind::ContentScript:
+        kind = "content_script"sv;
+        break;
+    case ContextKind::Other:
+        kind = "other"sv;
+        break;
+    }
+
+    JsonObject json;
+    json.set("id"sv, context.id);
+    json.set("extensionId"sv, TRY(String::from_utf8(context.extension_id)));
+    json.set("kind"sv, TRY(String::from_utf8(kind)));
+    if (context.tab_id.has_value())
+        json.set("tabId"sv, *context.tab_id);
+    if (context.frame_id.has_value())
+        json.set("frameId"sv, *context.frame_id);
+    if (!context.url.is_empty())
+        json.set("url"sv, TRY(String::from_utf8(context.url)));
+
+    auto serialized = json.serialized();
+    return webext_context_created(m_handle, to_c(serialized.bytes_as_string_view()));
+}
+
+void ExtensionManager::context_destroyed(u64 context_id)
+{
+    webext_context_destroyed(m_handle, context_id);
+}
+
+Optional<ByteString> ExtensionManager::init_data_for_context(u64 context_id)
+{
+    return take(webext_init_data_for_context(m_handle, context_id));
 }
 
 Optional<ByteString> ExtensionManager::extension_info(StringView extension_id)

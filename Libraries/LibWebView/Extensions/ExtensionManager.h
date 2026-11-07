@@ -32,6 +32,7 @@ struct ExtensionCallbackContext;
 //
 // Single-threaded: use on the thread that created it (the Browser process main thread).
 class WEBVIEW_API ExtensionManager {
+    AK_ALLOC_WITH_KMALLOC;
     AK_MAKE_NONCOPYABLE(ExtensionManager);
     AK_MAKE_NONMOVABLE(ExtensionManager);
 
@@ -47,6 +48,14 @@ public:
         // Deliver an event to every context of the extension (background, popup, content scripts). `args_json` is a JSON
         // array of the listener arguments. Hand it to `api.dispatchEvent(event, args)` of Shim/webext-shim.js.
         virtual void dispatch_event(StringView extension_id, StringView event, StringView args_json) = 0;
+
+        // Carries an envelope produced by the core's message bus to one context, which hands it to `handleHostMessage` of its
+        // Shim/webext-shim.js. Envelopes to one context must be delivered in order. Delivering to a context that is gone is
+        // not an error.
+        virtual void deliver_to_context(u64 context_id, StringView envelope_json) = 0;
+
+        // The full `tabs.Tab` JSON object for `MessageSender.tab`; without it the sender only carries the tab id.
+        virtual Optional<ByteString> describe_tab(i64 tab_id) { (void)tab_id; return {}; }
 
         // Implement an API the core delegates (tabs.*, windows.*, action.*, cookies.*, ...). `call_json` is an ApiCall.
         // Call `reply` exactly once with the result JSON, or an error message. Must not outlive the ExtensionManager.
@@ -71,6 +80,8 @@ public:
         String id;
         String display_name;
         String version;
+        // Where the extension is served from, e.g. "chrome-extension://<id>/" (chosen by the core when "auto" was passed).
+        String base_url;
         // The raw result JSON of the core, including warnings.
         ByteString result_json;
     };
@@ -84,7 +95,30 @@ public:
     // origin the extension is served from and must end in '/', e.g. "chrome-extension://<id>/".
     // A package that fails validation is an InstallFailure; the ErrorOr is for allocation failures only.
     ErrorOr<Variant<InstalledExtension, InstallFailure>> install_package(ReadonlyBytes package, StringView id_override, StringView base_url);
+    // Installs an unpacked extension directory ("Load unpacked"). Same result as install_package.
+    ErrorOr<Variant<InstalledExtension, InstallFailure>> install_directory(StringView path, StringView id_override, StringView base_url);
     bool uninstall(StringView extension_id);
+
+    // The answer to a request for an extension URL; see webext_serve. `initiator` is the serialized origin of the requester,
+    // or empty for a navigation the browser started itself.
+    struct ServedResource {
+        u16 status { 0 };
+        ByteString mime_type;
+        Optional<ByteString> content_security_policy;
+        ByteString extension_id;
+        ByteBuffer body;
+    };
+    Optional<ServedResource> serve(StringView url, StringView initiator);
+    // The content scripts of all extensions that match a document, with sources inlined (see webext_content_script_bundles).
+    ByteString content_script_bundles(StringView url, bool is_top_frame, StringView fallback_url = {});
+    // Per-extension content-script programs for a document (see webext_content_script_programs).
+    ByteString content_script_programs(StringView url, bool is_top_frame, StringView fallback_url = {});
+    // Where to load the extension's background context from, if it has one.
+    Optional<ByteString> background_url(StringView extension_id);
+    // Whether a document at `url` is the extension's background context rather than a popup, options page or tab.
+    bool is_background_url(StringView extension_id, StringView url);
+    // The id of the extension that owns `url`, if it is an installed extension's URL.
+    Optional<ByteString> extension_for_url(StringView url);
 
     // Runs an API call (ApiCall JSON). `on_reply(ok, json)` is called exactly once, possibly before this returns.
     void dispatch(StringView call_json, Function<void(bool ok, StringView json)> on_reply);
@@ -92,6 +126,28 @@ public:
     // What to host the extension with, as JSON: background context to start, CSP for extension pages, toolbar action, options
     // page, icons, permissions. See Dispatcher::info_for in the core.
     Optional<ByteString> extension_info(StringView extension_id);
+
+    // A place extension code runs. Register every context before it makes an API call and unregister it when it goes away
+    // (tab closed, frame navigated, background shut down): that is what lets the core route messages and close ports.
+    enum class ContextKind {
+        Background,
+        ExtensionPage,
+        ContentScript,
+        Other,
+    };
+    struct ContextDescription {
+        u64 id { 0 };
+        StringView extension_id;
+        ContextKind kind { ContextKind::Other };
+        Optional<i64> tab_id;
+        Optional<i64> frame_id;
+        StringView url;
+    };
+    ErrorOr<bool> context_created(ContextDescription const&);
+    void context_destroyed(u64 context_id);
+
+    // Like init_data() for one registered context; for content scripts the API is trimmed to what they may use.
+    Optional<ByteString> init_data_for_context(u64 context_id);
 
     // JSON the page-side shim needs to build chrome.* / browser.* (see Shim/webext-shim.js).
     Optional<ByteString> init_data(StringView extension_id);
