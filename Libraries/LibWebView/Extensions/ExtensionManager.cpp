@@ -372,4 +372,34 @@ void ExtensionManager::notify_startup(StringView extension_id)
     webext_notify_startup(m_handle, to_c(extension_id));
 }
 
+Optional<ByteString> ExtensionManager::store_for_url(StringView url)
+{
+    return take(webext_store_for_url(to_c(url)));
+}
+
+Optional<ByteString> ExtensionManager::management_info(StringView extension_id)
+{
+    return take(webext_store_management_info(m_handle, to_c(extension_id)));
+}
+
+Optional<ByteString> ExtensionManager::amo_addon(StringView extension_id)
+{
+    return take(webext_store_amo_addon(m_handle, to_c(extension_id)));
+}
+
+ByteString ExtensionManager::preview_store_manifest(StringView manifest_json, StringView localized_name, StringView extension_id)
+{
+    return take(webext_store_preview_manifest(m_handle, to_c(manifest_json), to_c(localized_name), to_c(extension_id))).value_or("{\"ok\":false,\"error\":\"internal error\"}"sv);
+}
+
+ByteString ExtensionManager::check_store_package(ReadonlyBytes package, StringView expected_id, StringView expected_hash, StringView approved_manifest)
+{
+    return take(webext_store_check_package(package.data(), package.size(), to_c(expected_id), to_c(expected_hash), to_c(approved_manifest))).value_or("{\"ok\":false,\"error\":\"internal error\"}"sv);
+}
+
+Optional<ByteString> ExtensionManager::chrome_web_store_download_url(StringView extension_id, StringView chrome_version)
+{
+    return take(webext_store_chrome_download_url(to_c(extension_id), to_c(chrome_version)));
+}
+
 }

@@ -172,6 +172,24 @@ public:
     void notify_installed(StringView extension_id, StringView reason, StringView previous_version = {});
     void notify_startup(StringView extension_id);
 
+    // Extension stores (the Chrome Web Store and addons.mozilla.org); see docs/STORES.md in cgx-webext.
+    // content_script_programs() also returns the store program, under the bridge key "__store__", for store pages.
+    static constexpr StringView store_bridge_key = "__store__"sv;
+    // "chrome" or "firefox" for a store page URL.
+    static Optional<ByteString> store_for_url(StringView url);
+    // chrome.management.ExtensionInfo JSON of every installed extension (an array) or, given an id, of one.
+    Optional<ByteString> management_info(StringView extension_id = {});
+    // addons.mozilla.org Addon JSON of an installed extension.
+    Optional<ByteString> amo_addon(StringView extension_id);
+    // {"ok","name","version","warnings"} for the install prompt, from a manifest a store sent, or for an installed extension
+    // when `manifest_json` is empty.
+    ByteString preview_store_manifest(StringView manifest_json, StringView localized_name, StringView extension_id = {});
+    // Checks a downloaded store package against what the store asked for (empty = no expectation):
+    // {"ok":true,"id","name","version","warnings"} or {"ok":false,"error"}.
+    static ByteString check_store_package(ReadonlyBytes package, StringView expected_id, StringView expected_hash, StringView approved_manifest);
+    // The Chrome Web Store URL that redirects to an extension's .crx.
+    static Optional<ByteString> chrome_web_store_download_url(StringView extension_id, StringView chrome_version);
+
 private:
     explicit ExtensionManager(Delegate&);
 

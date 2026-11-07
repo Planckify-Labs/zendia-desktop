@@ -26,5 +26,13 @@
         "user_agent": [
             "hide_Chromium"
         ]
+    },
+    {
+        "sites": [
+            "https://addons.mozilla.org"
+        ],
+        "user_agent": [
+            "as_Firefox"
+        ]
     }
 ]

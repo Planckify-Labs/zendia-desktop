@@ -49,6 +49,7 @@
 #if defined(ENABLE_WEBEXT)
 #    include <LibWebView/Extensions/ApplicationExtensionDelegate.h>
 #    include <LibWebView/Extensions/ExtensionManager.h>
+#    include <LibWebView/Extensions/StoreInstaller.h>
 #endif
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/CompositorClient.h>
@@ -234,6 +235,18 @@ void Application::initialize_extensions()
     m_extension_manager = ExtensionManager::create(*m_extension_delegate);
     m_extension_delegate->set_manager(*m_extension_manager);
 
+    // Extensions installed from the Chrome Web Store or addons.mozilla.org, kept in the profile.
+    m_store_installer = make<StoreInstaller>(*m_extension_manager, LexicalPath::join(profile().paths().data, "ExtensionPackages"sv).string());
+    m_store_installer->on_installed = [this](ByteString const& id, bool is_update) {
+        stop_extension_background_page(id);
+        start_extension_background_page(id, is_update ? ExtensionStartReason::Update : ExtensionStartReason::Install);
+    };
+    m_store_installer->on_uninstalled = [this](ByteString const& id) {
+        stop_extension_background_page(id);
+        m_extension_delegate->remove_extension_data(id);
+    };
+    m_kept_extension_ids = m_store_installer->load_installed_packages();
+
     for (auto const& path : m_browser_options.extension_paths) {
         ErrorOr<Variant<ExtensionManager::InstalledExtension, ExtensionManager::InstallFailure>> result = Error::from_string_literal("unreachable");
 
@@ -273,6 +286,31 @@ void Application::start_extension_background_pages()
     if (!m_extension_manager)
         return;
 
+    for (auto const& id : m_kept_extension_ids) {
+        // --load-extension of the same extension wins.
+        if (!m_loaded_extension_ids.contains_slow(id))
+            start_extension_background_page(id, ExtensionStartReason::Startup);
+    }
+    for (auto const& id : m_loaded_extension_ids)
+        start_extension_background_page(id, ExtensionStartReason::Install);
+}
+
+void Application::start_extension_background_page(ByteString const& id, ExtensionStartReason reason)
+{
+    if (!m_extension_manager || m_extension_background_views.contains(id))
+        return;
+    auto url_string = m_extension_manager->background_url(id);
+    if (!url_string.has_value()) {
+        if (reason != ExtensionStartReason::Startup)
+            m_extension_manager->notify_installed(id, reason == ExtensionStartReason::Update ? "update"sv : "install"sv);
+        return;
+    }
+    auto url = URL::Parser::basic_parse(*url_string);
+    if (!url.has_value()) {
+        warnln("Extensions: invalid background URL {}", *url_string);
+        return;
+    }
+
     auto theme_path = LexicalPath::join(WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
     auto theme = Gfx::load_system_theme(theme_path.string());
     if (theme.is_error()) {
@@ -280,25 +318,37 @@ void Application::start_extension_background_pages()
         return;
     }
 
-    for (auto const& id : m_loaded_extension_ids) {
-        auto url_string = m_extension_manager->background_url(id);
-        if (!url_string.has_value())
-            continue;
-        auto url = URL::Parser::basic_parse(*url_string);
-        if (!url.has_value()) {
-            warnln("Extensions: invalid background URL {}", *url_string);
-            continue;
-        }
-        auto view = HeadlessWebView::create(theme.value(), { 800, 600 });
-        // The background page's listeners must exist before the install and startup events fire.
-        view->on_load_finish = [this, id](URL::URL const&) {
-            m_extension_manager->notify_installed(id, "install"sv);
+    auto view = HeadlessWebView::create(theme.value(), { 800, 600 });
+    // The background page's listeners must exist before the install and startup events fire.
+    view->on_load_finish = [this, id, reason, fired = false](URL::URL const&) mutable {
+        if (exchange(fired, true))
+            return;
+        if (reason != ExtensionStartReason::Startup)
+            m_extension_manager->notify_installed(id, reason == ExtensionStartReason::Update ? "update"sv : "install"sv);
+        if (reason == ExtensionStartReason::Startup || (reason == ExtensionStartReason::Install && m_loaded_extension_ids.contains_slow(id)))
             m_extension_manager->notify_startup(id);
-        };
-        view->load(*url);
-        dbgln("Extensions: started background page {}", *url_string);
-        m_extension_background_views.append(move(view));
+    };
+    view->load(*url);
+    dbgln("Extensions: started background page {}", *url_string);
+    m_extension_background_views.set(id, move(view));
+}
+
+void Application::stop_extension_background_page(ByteString const& id)
+{
+    m_extension_background_views.remove(id);
+}
+
+void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
+{
+    if (m_browser_options.auto_accept_extension_prompts) {
+        outln("Extensions: {} (accepted by --auto-accept-extension-prompts)", prompt.title);
+        for (auto const& detail : prompt.details)
+            outln("    - {}", detail);
+        on_answer(true);
+        return;
     }
+    warnln("Extensions: {} Declined: this browser has no window to ask in (pass --auto-accept-extension-prompts to accept).", prompt.title);
+    on_answer(false);
 }
 #endif
 
@@ -345,7 +395,9 @@ Application::~Application()
     PictureInPictureManager::the().destroy_all_windows();
 
 #if defined(ENABLE_WEBEXT)
-    // Views talk to the application while they close, so they go while it is still whole.
+    // Views talk to the application while they close, so they go while it is still whole. Store installs in flight would
+    // start views, so they go first.
+    m_store_installer = nullptr;
     m_extension_background_views.clear();
 #endif
 
@@ -469,12 +521,14 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool file_scheme_urls_have_tuple_origins = false;
 
     Vector<ByteString> extension_paths;
+    bool auto_accept_extension_prompts = false;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("The Ladybird web browser :^)");
     args_parser.add_positional_argument(raw_urls, "URLs to open", "url", Core::ArgsParser::Required::No);
 #if defined(ENABLE_WEBEXT)
     args_parser.add_option(extension_paths, "Load an extension: an unpacked directory or a .crx/.xpi/.zip file. May be given more than once.", "load-extension", 0, "path");
+    args_parser.add_option(auto_accept_extension_prompts, "Accept extension install and removal prompts without asking (for automated tests)", "auto-accept-extension-prompts");
 #endif
 
     args_parser.add_option(Core::ArgsParser::Option {
@@ -671,6 +725,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
 
     m_browser_options = {
         .extension_paths = move(extension_paths),
+        .auto_accept_extension_prompts = auto_accept_extension_prompts,
         .urls = {},
         .raw_urls = move(raw_urls),
         .headless_mode = headless_mode,

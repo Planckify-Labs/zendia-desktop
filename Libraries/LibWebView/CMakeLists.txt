@@ -178,7 +178,7 @@ add_custom_target(generate_build_information DEPENDS ${build_information_stamp})
 
 if (ENABLE_WEBEXT)
     # Extensions/ExtensionManager.* are copied in by cgx-webext's Integration/ladybird/apply.sh.
-    list(APPEND SOURCES Extensions/ApplicationExtensionDelegate.cpp Extensions/ExtensionManager.cpp)
+    list(APPEND SOURCES Extensions/ApplicationExtensionDelegate.cpp Extensions/ExtensionManager.cpp Extensions/StoreInstaller.cpp)
 endif()
 
 ladybird_lib(LibWebView webview EXPLICIT_SYMBOL_EXPORT)

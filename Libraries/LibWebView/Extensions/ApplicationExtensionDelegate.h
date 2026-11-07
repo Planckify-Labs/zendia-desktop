@@ -33,6 +33,9 @@ public:
     virtual void request_permissions(StringView extension_id, StringView request_json, Function<void(bool)> reply) override;
     virtual void schedule_alarm_check(i64 at_ms) override;
 
+    // Deletes what the extension stored (storage areas, granted permissions), when it is uninstalled.
+    void remove_extension_data(StringView extension_id);
+
 private:
     ByteString path_for(StringView extension_id, StringView key) const;
 

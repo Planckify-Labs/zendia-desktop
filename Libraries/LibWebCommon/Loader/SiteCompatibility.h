@@ -19,6 +19,8 @@ namespace Web {
 enum class UserAgentTransformation : u8 {
     HideLadybird,
     HideChromium,
+    // AD-HOC (cgx-webext): Present as Firefox, for addons.mozilla.org, which only offers its add-ons to Firefox.
+    AsFirefox,
 };
 
 class WEBCOMMON_API SiteCompatibilityRule {

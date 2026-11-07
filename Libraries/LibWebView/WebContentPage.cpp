@@ -19,6 +19,7 @@
 #include <LibWebCommon/WebDriver/Error.h>
 #if defined(ENABLE_WEBEXT)
 #    include <LibWebView/Extensions/ExtensionManager.h>
+#    include <LibWebView/Extensions/StoreInstaller.h>
 #endif
 #include <LibWebView/Application.h>
 #include <LibWebView/BlobURLStore.h>
@@ -4082,6 +4083,25 @@ Optional<String> WebContentPage::extension_context_init(Web::HTML::CrossProcessI
     ByteString extension_id;
     ExtensionManager::ContextKind kind;
     auto serialized_url = document->url.serialize();
+
+    if (bridge_key == ExtensionManager::store_bridge_key) {
+        // The private store APIs, for a page of the Chrome Web Store or addons.mozilla.org. Both the document's URL and its
+        // origin, as this process knows them, must be the store's.
+        auto store = ExtensionManager::store_for_url(serialized_url);
+        auto origin_store = document->origin.is_opaque() ? Optional<ByteString> {} : ExtensionManager::store_for_url(ByteString::formatted("{}/", document->origin.serialize()));
+        if (!store.has_value() || store != origin_store) {
+            client().did_misbehave("did_request_extension_context_init"sv, "store APIs requested outside a store page"sv);
+            return {};
+        }
+        auto context_id = next_extension_context_id();
+        auto store_key = ByteString::formatted("{}{}", ExtensionManager::store_bridge_key, *store);
+        m_extension_contexts.ensure(document_id).set(bridge_key, { .context_id = context_id, .extension_id = store_key, .kind = ExtensionManager::ContextKind::Other });
+        extension_context_locations().set(context_id, { .client = client(), .page_id = id(), .document_id = document_id, .bridge_key = bridge_key, .extension_id = store_key });
+        JsonObject init;
+        init.set("store"sv, MUST(String::from_byte_string(*store)));
+        return init.serialized();
+    }
+
     if (bridge_key.is_empty()) {
         // An extension's own page.
         auto owner = extension_of_page(*document, *manager);
@@ -4161,6 +4181,23 @@ void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId document_i
         return;
     }
 
+    if (record->extension_id.starts_with(ExtensionManager::store_bridge_key)) {
+        auto* installer = Application::store_installer();
+        if (!installer) {
+            async_extension_api_reply(document_id, extension_id_or_empty, request_id, false, "Extension installs are not available."_string);
+            return;
+        }
+        StoreInstaller::Caller caller { .context_id = record->context_id, .store = record->extension_id.substring(ExtensionManager::store_bridge_key.length()) };
+        installer->handle_call(caller, name, args_json, [weak_client = WeakPtr<WebContentClient> { client() }, page_id = id(), document_id, bridge_key = extension_id_or_empty, request_id](bool ok, String json) {
+            auto client = weak_client.strong_ref();
+            if (!client)
+                return;
+            if (auto* page = client->page(page_id))
+                page->async_extension_api_reply(document_id, bridge_key, request_id, ok, json);
+        });
+        return;
+    }
+
     manager->dispatch(api_call_json(*record, name, args_json), [weak_client = WeakPtr<WebContentClient> { client() }, page_id = id(), document_id, bridge_key = extension_id_or_empty, request_id](bool ok, StringView result) {
         auto client = weak_client.strong_ref();
         if (!client)
@@ -4182,7 +4219,8 @@ Optional<String> WebContentPage::call_extension_api_sync(Web::HTML::CrossProcess
 {
     auto* manager = Application::extension_manager();
     auto record = verified_extension_context(document_id, extension_id_or_empty.to_byte_string());
-    if (!manager || !record.has_value())
+    // The store APIs have no synchronous functions.
+    if (!manager || !record.has_value() || record->extension_id.starts_with(ExtensionManager::store_bridge_key))
         return {};
 
     Optional<String> result;

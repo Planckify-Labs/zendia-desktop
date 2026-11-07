@@ -84,6 +84,7 @@ struct ApplicationPermissionManagerObserver;
 class ApplicationExtensionDelegate;
 class ExtensionManager;
 class HeadlessWebView;
+class StoreInstaller;
 
 class WEBVIEW_API Application : public DevTools::DevToolsDelegate {
     AK_MAKE_NONCOPYABLE(Application);
@@ -197,6 +198,17 @@ public:
     // Null if extension support could not start, or once the application is shutting down (pages and views are destroyed
     // after it, and must not reach for it then).
     static ExtensionManager* extension_manager() { return s_the ? s_the->m_extension_manager.ptr() : nullptr; }
+    static StoreInstaller* store_installer() { return s_the ? s_the->m_store_installer.ptr() : nullptr; }
+
+    // A yes/no question about installing or removing an extension, asked by the browser (not by a page).
+    struct ExtensionPrompt {
+        String title;
+        String message;
+        Vector<String> details;
+        String accept_label;
+    };
+    // Calls `on_answer` exactly once. Without a UI (headless) the answer is no, unless --auto-accept-extension-prompts.
+    virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const;
 #endif
 
     void background_networking_settings_changed(Badge<ApplicationSettingsObserver>);
@@ -452,6 +464,13 @@ protected:
 #if defined(ENABLE_WEBEXT)
     void initialize_extensions();
     void start_extension_background_pages();
+    enum class ExtensionStartReason {
+        Startup,   // Loaded from the profile.
+        Install,   // --load-extension, or freshly installed from a store.
+        Update,    // Replaced an installed version.
+    };
+    void start_extension_background_page(ByteString const& extension_id, ExtensionStartReason);
+    void stop_extension_background_page(ByteString const& extension_id);
 #endif
 
     virtual void process_did_exit(Process&&, Optional<int> exit_status);
@@ -646,8 +665,11 @@ private:
     OwnPtr<ApplicationExtensionDelegate> m_extension_delegate;
     OwnPtr<ExtensionManager> m_extension_manager;
     // Hidden views hosting extensions' background pages; not tabs, and never shown.
-    Vector<NonnullOwnPtr<HeadlessWebView>> m_extension_background_views;
+    HashMap<ByteString, NonnullOwnPtr<HeadlessWebView>> m_extension_background_views;
+    OwnPtr<StoreInstaller> m_store_installer;
+    // Extensions to start once the event loop runs, and why.
     Vector<ByteString> m_loaded_extension_ids;
+    Vector<ByteString> m_kept_extension_ids;
 #endif
 
     Main::Arguments m_arguments;

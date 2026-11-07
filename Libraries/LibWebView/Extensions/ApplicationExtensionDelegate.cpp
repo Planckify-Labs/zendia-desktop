@@ -68,6 +68,15 @@ void ApplicationExtensionDelegate::write_extension_data(StringView extension_id,
         warnln("Unable to persist extension data '{}': {}", path, result.error());
 }
 
+void ApplicationExtensionDelegate::remove_extension_data(StringView extension_id)
+{
+    auto directory = LexicalPath::join(m_data_directory, sanitize_path_component(extension_id)).string();
+    if (!FileSystem::is_directory(directory))
+        return;
+    if (auto result = FileSystem::remove(directory, FileSystem::RecursionMode::Allowed); result.is_error())
+        warnln("Unable to remove extension data '{}': {}", directory, result.error());
+}
+
 void ApplicationExtensionDelegate::dispatch_event(StringView extension_id, StringView event, StringView args_json)
 {
     JsonObject message;

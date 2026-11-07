@@ -285,6 +285,9 @@ private:
     void display_update_check_result(WebView::UpdateCheckResult::Kind, Optional<String> const& version, WebView::InstallMethod, WebView::UpdateCheckTrigger);
 #endif
     void open_file(String const& path) const;
+#if defined(ENABLE_WEBEXT)
+    virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const override;
+#endif
 
     virtual void crash_reports_changed() override;
 

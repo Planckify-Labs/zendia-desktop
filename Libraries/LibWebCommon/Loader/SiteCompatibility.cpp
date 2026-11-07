@@ -6,6 +6,7 @@
 
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/Platform.h>
 #include <AK/StringBuilder.h>
 #include <LibURL/Parser.h>
 #include <LibWebCommon/Loader/SiteCompatibility.h>
@@ -68,6 +69,8 @@ static ErrorOr<Vector<UserAgentTransformation>> parse_user_agent_transformations
             TRY(result.try_append(UserAgentTransformation::HideLadybird));
         else if (transformation.as_string() == "hide_Chromium"sv)
             TRY(result.try_append(UserAgentTransformation::HideChromium));
+        else if (transformation.as_string() == "as_Firefox"sv)
+            TRY(result.try_append(UserAgentTransformation::AsFirefox));
         else
             return Error::from_string_literal("Unknown User-Agent transformation");
     }
@@ -154,6 +157,20 @@ static String remove_product(StringView user_agent, StringView name)
     return MUST(builder.to_string());
 }
 
+// The User-Agent string of a current Firefox on this platform.
+static StringView firefox_user_agent()
+{
+#if defined(AK_OS_MACOS) || defined(AK_OS_IOS)
+    return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:156.0) Gecko/20100101 Firefox/156.0"sv;
+#elif defined(AK_OS_ANDROID)
+    return "Mozilla/5.0 (Android 13; Mobile; rv:156.0) Gecko/156.0 Firefox/156.0"sv;
+#elif defined(AK_OS_WINDOWS)
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0"sv;
+#else
+    return "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0"sv;
+#endif
+}
+
 String SiteCompatibilityRule::apply_user_agent_transformations(StringView user_agent) const
 {
     auto transformed_user_agent = MUST(String::from_utf8(user_agent));
@@ -164,6 +181,9 @@ String SiteCompatibilityRule::apply_user_agent_transformations(StringView user_a
             break;
         case UserAgentTransformation::HideChromium:
             transformed_user_agent = remove_product(transformed_user_agent, "Chrome"sv);
+            break;
+        case UserAgentTransformation::AsFirefox:
+            transformed_user_agent = MUST(String::from_utf8(firefox_user_agent()));
             break;
         }
     }
