@@ -304,6 +304,8 @@ endpoint WebContentServer routed by Web::PageId page_id
     // AD-HOC (cgx-webext): Replies to did_call_extension_api, and messages for an extension page's chrome.*/browser.*.
     extension_api_reply(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, bool ok, String json) =|
     deliver_extension_message(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String json) =|
+    // Code an extension injects (scripting.executeScript, insertCSS, ...); the result comes back as "__inject.result".
+    run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, u64 token) =|
 
     set_system_visibility_state(Web::PageId page_id, Web::HTML::VisibilityState system_visibility_state) =|
     update_visibility_state(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::VisibilityState visibility_state) =|

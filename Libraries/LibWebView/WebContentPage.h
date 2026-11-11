@@ -40,6 +40,10 @@ namespace WebView {
 void deliver_to_extension_context(u64 context_id, StringView json);
 // Sends a browser event (storage.onChanged, alarms.onAlarm, ...) to every page of an extension.
 void deliver_event_to_extension(StringView extension_id, StringView json);
+// host.tabs.frames: the frames of the tab (view) with this id, as [{frameId, parentFrameId, url, documentId}].
+ErrorOr<ByteString> extension_tab_frames(u64 tab_id);
+// host.scripting.inject: runs code an extension injects in frames of a tab; replies with [{frameId, documentId, result|error}].
+void run_extension_injection_in_tab(StringView extension_id, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply);
 #endif
 
 // A reply a page owes its traversable for a message the traversable sent it.
@@ -423,6 +427,12 @@ private:
     Optional<String> extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty);
     Optional<String> call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty, String const& name, String const& args_json);
     String content_script_programs(Web::HTML::CrossProcessId document_id);
+public:
+    // Runs code an extension injects in one of this page's documents, which may then start the extension's content-script
+    // context there although no content script of it matches.
+    void run_extension_injection(Web::HTML::CrossProcessId document_id, ByteString const& extension_id, String const& setup_program, String const& kind, String const& code, String const& binding, String const& run_at, u64 token);
+
+private:
     void extension_contexts_destroyed(Web::HTML::CrossProcessId document_id);
     // Ends the contexts of documents this page no longer hosts (navigated away, frame removed).
     void sweep_extension_contexts();
@@ -501,6 +511,9 @@ private:
 #if defined(ENABLE_WEBEXT)
     // Extension contexts this page hosts: document -> bridge key ("" for the extension's page, extension id for content scripts).
     HashMap<Web::HTML::CrossProcessId, HashMap<ByteString, ExtensionContextRecord>> m_extension_contexts;
+    // Extensions that injected code into a document (scripting.executeScript, ...), which may have a content-script context
+    // there.
+    HashMap<Web::HTML::CrossProcessId, Vector<ByteString>> m_extension_injection_grants;
     Optional<ExtensionContextRecord> verified_extension_context(Web::HTML::CrossProcessId document_id, ByteString const& bridge_key) const;
 #endif
 };

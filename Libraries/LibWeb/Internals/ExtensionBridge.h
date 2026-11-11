@@ -42,6 +42,19 @@ public:
     // Tells the content scripts of the document that a later stage ("document_end", "document_idle") was reached.
     static void run_content_script_stage(DOM::Document&, StringView stage);
 
+    // Code an extension injects with scripting.executeScript, tabs.executeScript or insertCSS.
+    struct Injection {
+        String kind;    // "js", "css" or "removeCss"
+        String code;    // The script (a classic script, run for its completion value) or the stylesheet.
+        String binding; // For "js": the global property the code reads the extension's API from, and deletes at once.
+        String run_at;  // "document_start", "document_end" or "document_idle".
+        u64 token { 0 };
+    };
+    // Runs an injection in the document, in the extension's content-script context. If the extension has none there yet,
+    // `setup_program` (a content-script program without scripts) creates it first. The result goes back to the browser
+    // process through the bridge, as "__inject.result".
+    static void run_injection(DOM::Document&, String const& extension_id, String const& setup_program, Injection);
+
     Utf16String context_init();
     GC::Ref<WebIDL::Promise> call(Utf16String const& name, Utf16String const& args_json);
     Utf16String call_sync(Utf16String const& name, Utf16String const& args_json);
@@ -58,6 +71,11 @@ private:
     virtual void visit_edges(GC::Cell::Visitor&) override;
 
     HTML::CrossProcessId document_id() const;
+    // Evaluates a content-script program and calls it with a new bridge for the extension.
+    static GC::Ptr<ExtensionBridge> start_program(DOM::Document&, String const& extension_id, String const& program);
+    void execute(Injection const&);
+    void run_due_injections();
+    Vector<Injection> m_deferred_injections;
 
     String m_extension_id;
     GC::Ptr<WebIDL::CallbackType> m_message_handler;

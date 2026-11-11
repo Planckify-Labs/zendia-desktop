@@ -2280,6 +2280,16 @@ void PageClient::deliver_extension_message(Web::HTML::CrossProcessId document_id
         bridge->deliver(json);
 }
 
+void PageClient::run_extension_injection(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& setup_program, Web::Internals::ExtensionBridge::Injection injection)
+{
+    for (auto const& navigable : page().hosted_navigables()) {
+        if (auto document = navigable->active_document(); document && document->id() == document_id) {
+            Web::Internals::ExtensionBridge::run_injection(*document, extension_id, setup_program, move(injection));
+            return;
+        }
+    }
+}
+
 void PageClient::page_did_request_color_picker(Color current_color)
 {
     client().async_did_request_color_picker(m_id, current_color);

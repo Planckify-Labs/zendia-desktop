@@ -3901,6 +3901,12 @@ void ConnectionFromClient::deliver_extension_message(Web::PageId page_id, Web::H
         page->deliver_extension_message(document_id, extension_id, json);
 }
 
+void ConnectionFromClient::run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, u64 token)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->run_extension_injection(document_id, extension_id, setup_program, { .kind = move(kind), .code = move(code), .binding = move(binding), .run_at = move(run_at), .token = token });
+}
+
 void ConnectionFromClient::toggle_media_play_state(Web::PageId page_id)
 {
     if (auto page = this->page(page_id); page.has_value())

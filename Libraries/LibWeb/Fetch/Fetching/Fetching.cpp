@@ -781,6 +781,14 @@ GC::Ptr<PendingResponse> main_fetch(JS::Realm& realm, Infrastructure::FetchParam
             return scheme_fetch(realm, *fetch_params);
         }
 
+        // AD-HOC (cgx-webext): Files of browser extensions may be fetched from other origins, as in Chrome and Firefox:
+        //                      content scripts fetch their web-accessible files from the page. Whether the requester may
+        //                      have the file is decided when the browser serves it (web_accessible_resources).
+        if (request->current_url().scheme().is_one_of("chrome-extension"sv, "moz-extension"sv)) {
+            request->set_response_tainting(Infrastructure::Request::ResponseTainting::Basic);
+            return scheme_fetch(realm, *fetch_params);
+        }
+
         // -> request’s current URL’s scheme is not an HTTP(S) scheme
         // AD-HOC: We allow CORS requests for resource:// URLs from opaque origins to enable requesting JS modules from internal pages.
         if (!Infrastructure::is_http_or_https_scheme(request->current_url().scheme())

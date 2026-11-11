@@ -12,6 +12,9 @@
 #include <LibWebView/Application.h>
 #include <LibWebView/CrashReportOutbox.h>
 #include <LibWebView/WebCompatReport.h>
+#if defined(ENABLE_WEBEXT)
+#    include <UI/Qt/ExtensionsUI.h>
+#endif
 #include <UI/Qt/Application.h>
 #include <UI/Qt/ApplicationActions.h>
 #include <UI/Qt/BrowserWindow.h>
@@ -1437,6 +1440,10 @@ void WindowToolbar::lay_out_as_row()
     m_navigation_buttons->show();
     toolbar_layout->addWidget(&field_slot(), 1);
     toolbar_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
+#if defined(ENABLE_WEBEXT)
+    m_extensions_area = new ExtensionsToolbarArea(m_toolbar);
+    toolbar_layout->addWidget(m_extensions_area, 0, Qt::AlignVCenter);
+#endif
     if (m_feedback_button)
         toolbar_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
     toolbar_layout->addWidget(m_trailing_sidebar_slot, 0, Qt::AlignVCenter);
@@ -1756,6 +1763,10 @@ void WindowToolbar::bind(Tab* tab)
     if (m_tab)
         QObject::disconnect(m_tab, nullptr, this, nullptr);
     m_tab = tab;
+#if defined(ENABLE_WEBEXT)
+    if (m_extensions_area)
+        m_extensions_area->set_tab(tab);
+#endif
 
     // A tab that hasn't loaded has no page yet, so it is shown once it has one.
     if (!tab || !tab->is_loaded()) {

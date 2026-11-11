@@ -13,6 +13,8 @@
 #    include <AK/LexicalPath.h>
 #    include <AK/StringBuilder.h>
 #    include <LibFileSystem/FileSystem.h>
+#    include <LibCore/EventLoop.h>
+#    include <LibWebView/Application.h>
 #    include <LibWebView/Extensions/ApplicationExtensionDelegate.h>
 #    include <LibWebView/Utilities.h>
 #    include <LibWebView/WebContentPage.h>
@@ -79,6 +81,19 @@ void ApplicationExtensionDelegate::remove_extension_data(StringView extension_id
 
 void ApplicationExtensionDelegate::dispatch_event(StringView extension_id, StringView event, StringView args_json)
 {
+    // Not for the extension: the core asks the browser UI to redraw its toolbar button, menus or shortcuts.
+    if (event.starts_with("__ui."sv)) {
+        auto args = JsonValue::from_string(args_json);
+        StringView what;
+        String what_storage;
+        if (!args.is_error() && args.value().is_array() && args.value().as_array().size() > 0 && args.value().as_array().at(0).is_string()) {
+            what_storage = args.value().as_array().at(0).as_string();
+            what = what_storage.bytes_as_string_view();
+        }
+        Application::the().extension_ui_changed(extension_id, what);
+        return;
+    }
+
     JsonObject message;
     message.set("kind"sv, "event"sv);
     message.set("name"sv, MUST(String::from_utf8(event)));
@@ -96,9 +111,42 @@ void ApplicationExtensionDelegate::deliver_to_context(u64 context_id, StringView
 
 void ApplicationExtensionDelegate::call_browser(StringView call_json, Function<void(ErrorOr<ByteString>)> reply)
 {
-    // TODO: tabs.*, windows.*, action.*, cookies.*, scripting.*, contextMenus.*.
-    dbgln_if(false, "extension: unimplemented browser call {}", call_json);
-    reply(Error::from_string_literal("This browser extension API is not implemented yet"));
+    auto parsed = JsonValue::from_string(call_json);
+    if (parsed.is_error() || !parsed.value().is_object()) {
+        reply(Error::from_string_literal("Malformed browser call"));
+        return;
+    }
+    auto const& call = parsed.value().as_object();
+    auto function = call.get_string("function"sv).value_or({}).to_byte_string();
+    auto extension_id = call.get_string("extensionId"sv).value_or({}).to_byte_string();
+    JsonObject args;
+    if (auto list = call.get_array("args"sv); list.has_value() && list->size() > 0 && list->at(0).is_object())
+        args = list->at(0).as_object();
+
+    // Primitives the core asks of the browser (see crates/webext/src/browser_api.rs). Frames and injection work on pages,
+    // which any UI has; the rest needs windows and tabs, which the UI provides.
+    if (function == "host.tabs.frames"sv) {
+        reply(extension_tab_frames(static_cast<u64>(args.get_integer<i64>("tabId"sv).value_or(-1))));
+        return;
+    }
+    if (function == "host.scripting.inject"sv) {
+        run_extension_injection_in_tab(extension_id, args, move(reply));
+        return;
+    }
+    if (function == "host.runtime.reload"sv) {
+        // Reloading stops the context that asked; answer first.
+        reply(ByteString { "null"sv });
+        Core::deferred_invoke([extension_id] { Application::the().reload_extension(extension_id); });
+        return;
+    }
+    if (function.starts_with("host."sv)) {
+        Application::the().extension_host_call(extension_id, function, args, move(reply));
+        return;
+    }
+
+    // Requirement: the error names the API that is missing.
+    auto message = ByteString::formatted("{} is not implemented yet in Ladybird", function);
+    reply(Error::from_string_view(message.view()));
 }
 
 void ApplicationExtensionDelegate::request_permissions(StringView, StringView, Function<void(bool)> reply)

@@ -9,6 +9,7 @@
 #include <AK/ScopeGuard.h>
 #include <AK/JsonObject.h>
 #include <LibCore/ElapsedTimer.h>
+#include <LibCore/Timer.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/StatsLog.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
@@ -4027,8 +4028,25 @@ static HashMap<u64, ExtensionContextLocation>& extension_context_locations()
     return s_locations;
 }
 
+// WEBEXT_TRACE=1 logs every extension API call, its answer, and every message delivered to an extension context.
+static bool extension_trace_enabled()
+{
+    static bool s_enabled = [] {
+        auto const* value = getenv("WEBEXT_TRACE");
+        return value && *value && *value != '0';
+    }();
+    return s_enabled;
+}
+
+static StringView trace_excerpt(StringView text)
+{
+    return text.length() > 300 ? text.substring_view(0, 300) : text;
+}
+
 void deliver_to_extension_context(u64 context_id, StringView json)
 {
+    if (extension_trace_enabled())
+        warnln("[webext] -> context {}: {}", context_id, trace_excerpt(json));
     auto location = extension_context_locations().get(context_id);
     if (!location.has_value())
         return;
@@ -4115,15 +4133,17 @@ Optional<String> WebContentPage::extension_context_init(Web::HTML::CrossProcessI
         // Content scripts of an extension in a web page: only if that extension's content scripts match the document.
         extension_id = bridge_key;
         auto scripts = manager->content_scripts_for(extension_id, serialized_url, document->is_top_frame);
-        if (!scripts.has_value() || *scripts == "[]"sv || extension_of_page(*document, *manager).has_value()) {
+        auto injected = m_extension_injection_grants.get(document_id).map([&](auto const& ids) { return ids.contains_slow(extension_id); }).value_or(false);
+        if ((!injected && (!scripts.has_value() || *scripts == "[]"sv)) || extension_of_page(*document, *manager).has_value()) {
             client().did_misbehave("did_request_extension_context_init"sv, "no content scripts of that extension match the document"sv);
             return {};
         }
         kind = ExtensionManager::ContextKind::ContentScript;
     }
 
+    auto is_popup = kind == ExtensionManager::ContextKind::ExtensionPage && Application::the().is_extension_popup_view(view().view_id());
     Optional<i64> tab_id;
-    if (kind != ExtensionManager::ContextKind::Background && displays_tab())
+    if (kind != ExtensionManager::ContextKind::Background && !is_popup && displays_tab())
         tab_id = static_cast<i64>(view().view_id());
     Optional<i64> frame_id;
     if (kind == ExtensionManager::ContextKind::ContentScript)
@@ -4140,6 +4160,14 @@ Optional<String> WebContentPage::extension_context_init(Web::HTML::CrossProcessI
     auto init = manager->init_data_for_context(context_id);
     if (!init.has_value())
         return {};
+    if (is_popup) {
+        // The popup's boot script reports its size and closes it through the browser (see Shim/boot.js).
+        if (auto parsed = JsonValue::from_string(*init); !parsed.is_error() && parsed.value().is_object()) {
+            auto object = parsed.release_value().as_object();
+            object.set("isPopup"sv, true);
+            return object.serialized();
+        }
+    }
     return MUST(String::from_byte_string(*init));
 }
 
@@ -4172,12 +4200,215 @@ static ByteString api_call_json(WebContentPage::ExtensionContextRecord const& re
     return call.serialized().to_byte_string();
 }
 
+// ---- Injected code (scripting.executeScript, tabs.executeScript, insertCSS) ----------------------------------------------
+
+namespace {
+
+struct ExtensionFrame {
+    RefPtr<WebContentPage> page;
+    Web::HTML::CrossProcessId document_id;
+    i64 frame_id { 0 };
+    i64 parent_frame_id { -1 };
+    URL::URL url;
+};
+
+struct PendingInjection {
+    AK_ALLOC_WITH_KMALLOC;
+    AK_MAKE_NONCOPYABLE(PendingInjection);
+    AK_MAKE_NONMOVABLE(PendingInjection);
+
+public:
+    PendingInjection() = default;
+    ByteString extension_id;
+    // The documents still to answer, and their frame ids.
+    HashMap<Web::HTML::CrossProcessId, i64> waiting;
+    JsonArray results;
+    Function<void(ErrorOr<ByteString>)> reply;
+    RefPtr<Core::Timer> timeout;
+};
+
+}
+
+static HashMap<u64, NonnullOwnPtr<PendingInjection>>& pending_injections()
+{
+    static HashMap<u64, NonnullOwnPtr<PendingInjection>> s_pending;
+    return s_pending;
+}
+
+static Optional<ViewImplementation&> view_with_id(u64 id)
+{
+    Optional<ViewImplementation&> found;
+    ViewImplementation::for_each_view([&](ViewImplementation& view) {
+        if (view.view_id() != id)
+            return IterationDecision::Continue;
+        found = view;
+        return IterationDecision::Break;
+    });
+    return found;
+}
+
+static i64 frame_id_of(CanonicalNavigable const& navigable)
+{
+    return navigable.is_top_level_traversable() ? 0 : static_cast<i64>(navigable.id().local_id);
+}
+
+// Every frame of a tab whose document a page hosts, whichever process that page is in.
+static Vector<ExtensionFrame> frames_of_view(ViewImplementation& view)
+{
+    Vector<ExtensionFrame> frames;
+    if (!view.has_traversable())
+        return frames;
+    CanonicalTraversable const& traversable = view.traversable();
+    traversable.for_each_in_inclusive_subtree([&](CanonicalNavigable const& navigable) {
+        RefPtr<WebContentPage> host;
+        traversable.for_each_hosting_page([&](WebContentPage& page) {
+            if (!host && traversable.hosts(navigable, page) && page.hosts_active_document_of(navigable))
+                host = page;
+        });
+        if (!host)
+            return IterationDecision::Continue;
+        auto const* parent = navigable.parent();
+        frames.append({ .page = host, .document_id = navigable.active_document().id(), .frame_id = frame_id_of(navigable), .parent_frame_id = parent ? frame_id_of(*parent) : -1, .url = navigable.active_document_url() });
+        return IterationDecision::Continue;
+    });
+    return frames;
+}
+
+ErrorOr<ByteString> extension_tab_frames(u64 tab_id)
+{
+    auto view = view_with_id(tab_id);
+    if (!view.has_value())
+        return Error::from_string_literal("No tab with that id");
+    JsonArray list;
+    for (auto const& frame : frames_of_view(*view)) {
+        JsonObject entry;
+        entry.set("frameId"sv, frame.frame_id);
+        entry.set("parentFrameId"sv, frame.parent_frame_id);
+        entry.set("url"sv, frame.url.serialize());
+        entry.set("documentId"sv, MUST(String::formatted("{}", frame.document_id.local_id)));
+        TRY(list.append(move(entry)));
+    }
+    return list.serialized().to_byte_string();
+}
+
+static void finish_injection(u64 token)
+{
+    auto pending = pending_injections().take(token);
+    if (!pending.has_value())
+        return;
+    // Frames that went away, or never reached the stage the code waited for.
+    for (auto const& [document_id, frame_id] : (*pending)->waiting) {
+        JsonObject entry;
+        entry.set("frameId"sv, frame_id);
+        entry.set("error"sv, "The frame was removed before the script could run."sv);
+        MUST((*pending)->results.append(move(entry)));
+    }
+    (*pending)->reply((*pending)->results.serialized().to_byte_string());
+}
+
+void run_extension_injection_in_tab(StringView extension_id, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
+{
+    static u64 s_next_token = 1;
+
+    auto tab_id = args.get_integer<i64>("tabId"sv);
+    auto view = tab_id.has_value() ? view_with_id(static_cast<u64>(*tab_id)) : Optional<ViewImplementation&> {};
+    if (!view.has_value()) {
+        reply(Error::from_string_literal("No tab with that id"));
+        return;
+    }
+    HashTable<i64> wanted;
+    if (auto ids = args.get_array("frameIds"sv); ids.has_value()) {
+        ids->for_each([&](JsonValue const& id) {
+            if (auto number = id.get_integer<i64>(); number.has_value())
+                wanted.set(*number);
+        });
+    }
+
+    auto token = s_next_token++;
+    auto pending = make<PendingInjection>();
+    pending->extension_id = extension_id;
+    pending->reply = move(reply);
+    auto setup = args.get_string("setupProgram"sv).value_or({});
+    auto kind = args.get_string("kind"sv).value_or("js"_string);
+    auto code = args.get_string("code"sv).value_or({});
+    auto binding = args.get_string("binding"sv).value_or({});
+    auto run_at = args.get_string("runAt"sv).value_or("document_idle"_string);
+
+    Vector<ExtensionFrame> targets;
+    for (auto& frame : frames_of_view(*view)) {
+        if (wanted.contains(frame.frame_id)) {
+            pending->waiting.set(frame.document_id, frame.frame_id);
+            targets.append(move(frame));
+        }
+    }
+    if (targets.is_empty()) {
+        pending->reply(ByteString { "[]"sv });
+        return;
+    }
+    // A script waiting for a document that never finishes loading is reported as not run, rather than waited for forever.
+    pending->timeout = Core::Timer::create_single_shot(AK::Duration::from_seconds(30), [token] { finish_injection(token); });
+    pending->timeout->start();
+    pending_injections().set(token, move(pending));
+
+    for (auto const& frame : targets)
+        frame.page->run_extension_injection(frame.document_id, extension_id, setup, kind, code, binding, run_at, token);
+}
+
+// "__inject.result" [token, ok, value]: the answer of one document.
+static void extension_injection_result(ByteString const& extension_id, Web::HTML::CrossProcessId document_id, String const& args_json)
+{
+    auto args = JsonValue::from_string(args_json);
+    if (args.is_error() || !args.value().is_array() || args.value().as_array().size() < 3)
+        return;
+    auto const& list = args.value().as_array();
+    auto token = list.at(0).get_integer<u64>();
+    if (!token.has_value())
+        return;
+    auto pending = pending_injections().get(*token);
+    // Only the extension that injected the code may answer for it, and only for a document it was sent to.
+    if (!pending.has_value() || (*pending)->extension_id != extension_id)
+        return;
+    auto frame_id = (*pending)->waiting.take(document_id);
+    if (!frame_id.has_value())
+        return;
+    JsonObject entry;
+    entry.set("frameId"sv, *frame_id);
+    entry.set("documentId"sv, MUST(String::formatted("{}", document_id.local_id)));
+    if (list.at(1).is_bool() && list.at(1).as_bool())
+        entry.set("result"sv, list.at(2));
+    else
+        entry.set("error"sv, list.at(2).is_string() ? list.at(2).as_string() : "Script failed"_string);
+    MUST((*pending)->results.append(move(entry)));
+    if ((*pending)->waiting.is_empty())
+        finish_injection(*token);
+}
+
+void WebContentPage::run_extension_injection(Web::HTML::CrossProcessId document_id, ByteString const& extension_id, String const& setup_program, String const& kind, String const& code, String const& binding, String const& run_at, u64 token)
+{
+    auto& grants = m_extension_injection_grants.ensure(document_id);
+    if (!grants.contains_slow(extension_id))
+        grants.append(extension_id);
+    async_run_extension_injection(document_id, MUST(String::from_byte_string(extension_id)), setup_program, kind, code, binding, run_at, token);
+}
+
 void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId document_id, String extension_id_or_empty, u64 request_id, String name, String args_json)
 {
     auto* manager = Application::extension_manager();
     auto record = verified_extension_context(document_id, extension_id_or_empty.to_byte_string());
     if (!manager || !record.has_value()) {
         async_extension_api_reply(document_id, extension_id_or_empty, request_id, false, "Extension context invalidated."_string);
+        return;
+    }
+
+    if (name == "__inject.result"sv) {
+        async_extension_api_reply(document_id, extension_id_or_empty, request_id, true, "null"_string);
+        extension_injection_result(record->extension_id, document_id, args_json);
+        return;
+    }
+    if (name.starts_with_bytes("__ui."sv)) {
+        async_extension_api_reply(document_id, extension_id_or_empty, request_id, true, "null"_string);
+        if (record->kind == ExtensionManager::ContextKind::ExtensionPage)
+            Application::the().extension_popup_request(view().view_id(), name.bytes_as_string_view(), args_json.bytes_as_string_view());
         return;
     }
 
@@ -4198,7 +4429,11 @@ void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId document_i
         return;
     }
 
-    manager->dispatch(api_call_json(*record, name, args_json), [weak_client = WeakPtr<WebContentClient> { client() }, page_id = id(), document_id, bridge_key = extension_id_or_empty, request_id](bool ok, StringView result) {
+    if (extension_trace_enabled())
+        warnln("[webext] {} {} context {}: {}({})", record->extension_id.substring_view(0, min<size_t>(8, record->extension_id.length())), context_kind_name(record->kind), record->context_id, name, trace_excerpt(args_json));
+    manager->dispatch(api_call_json(*record, name, args_json), [weak_client = WeakPtr<WebContentClient> { client() }, page_id = id(), document_id, bridge_key = extension_id_or_empty, request_id, name](bool ok, StringView result) {
+        if (extension_trace_enabled())
+            warnln("[webext]   {} {}: {}", name, ok ? "=>"sv : "FAILED"sv, trace_excerpt(result));
         auto client = weak_client.strong_ref();
         if (!client)
             return;
@@ -4253,12 +4488,14 @@ void WebContentPage::sweep_extension_contexts()
         if (!find_hosted_document(*this, document_id).has_value())
             gone.append(document_id);
     }
+    m_extension_injection_grants.remove_all_matching([&](auto document_id, auto const&) { return !find_hosted_document(*this, document_id).has_value(); });
     for (auto document_id : gone)
         extension_contexts_destroyed(document_id);
 }
 
 void WebContentPage::extension_contexts_destroyed(Web::HTML::CrossProcessId document_id)
 {
+    m_extension_injection_grants.remove(document_id);
     auto records = m_extension_contexts.take(document_id);
     if (!records.has_value())
         return;

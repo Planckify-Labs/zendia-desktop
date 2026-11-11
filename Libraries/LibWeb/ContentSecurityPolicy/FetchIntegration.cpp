@@ -101,8 +101,21 @@ void report_content_security_policy_violations_for_request(Fetch::Infrastructure
 }
 
 // https://w3c.github.io/webappsec-csp/#should-block-request
+// AD-HOC (cgx-webext): Files of browser extensions are not governed by the page's policy, as in Chrome and Firefox: content
+//                      scripts insert <link> and <script> elements for their web-accessible files into pages whose CSP
+//                      does not list the extension. Whether the page may have the file is decided when it is served
+//                      (web_accessible_resources).
+static bool is_extension_resource(Fetch::Infrastructure::Request const& request)
+{
+    auto const& scheme = request.current_url().scheme();
+    return scheme == "chrome-extension"sv || scheme == "moz-extension"sv;
+}
+
 Directives::Directive::Result should_request_be_blocked_by_content_security_policy(Fetch::Infrastructure::Request const& request, ViolationReporter const& report_violation)
 {
+    if (is_extension_resource(request))
+        return Directives::Directive::Result::Allowed;
+
     // 1. Let CSP list be request’s policy container's CSP list.
     auto const& csp_list = csp_list_governing_request(request);
 
@@ -136,6 +149,9 @@ Directives::Directive::Result should_request_be_blocked_by_content_security_poli
 // https://w3c.github.io/webappsec-csp/#should-block-response
 Directives::Directive::Result should_response_to_request_be_blocked_by_content_security_policy(Fetch::Infrastructure::Response const& response, Fetch::Infrastructure::Request const& request, ViolationReporter const& report_violation)
 {
+    if (is_extension_resource(request))
+        return Directives::Directive::Result::Allowed;
+
     // 1. Let CSP list be request’s policy container's CSP list.
     auto const& csp_list = csp_list_governing_request(request);
 

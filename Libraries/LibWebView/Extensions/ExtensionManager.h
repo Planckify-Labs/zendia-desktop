@@ -169,6 +169,11 @@ public:
     // Fires due alarms. Call when the timer requested through Delegate::schedule_alarm_check elapses.
     void tick();
 
+    // What the browser tells the core about itself or asks it outside an extension's API call: "browserState" (windows and
+    // tabs), "uiState", "actionClicked", "contextMenuItems", "contextMenuClicked", "commands", "command", "setShortcut",
+    // "setActionPinned", "grantActiveTab". See webext_host_event in webext.h. Returns JSON.
+    ByteString host_event(StringView name, StringView args_json);
+
     void notify_installed(StringView extension_id, StringView reason, StringView previous_version = {});
     void notify_startup(StringView extension_id);
 

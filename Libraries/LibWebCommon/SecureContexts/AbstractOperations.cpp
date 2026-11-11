@@ -46,6 +46,12 @@ Trustworthiness is_origin_potentially_trustworthy(URL::Origin const& origin)
     // 7. If origin’s scheme component is one which the user agent considers to be authenticated, return "Potentially Trustworthy".
     // Note: See § 7.1 Packaged Applications for detail here.
 
+    // AD-HOC (cgx-webext): Browser extensions are packaged applications served by the browser itself, as in Chrome and
+    //                      Firefox: their pages are secure contexts, and secure pages may load their web-accessible files
+    //                      without mixed-content blocking.
+    if (origin.scheme().has_value() && origin.scheme()->is_one_of("chrome-extension"sv, "moz-extension"sv))
+        return Trustworthiness::PotentiallyTrustworthy;
+
     // 8. If origin has been configured as a trustworthy origin, return "Potentially Trustworthy".
     // Note: See § 7.2 Development Environments for detail here.
 

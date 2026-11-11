@@ -149,6 +149,10 @@ enum class ActionID {
     NavigatorCompatibilityMode,
     EnableScripting,
     BlockPopUps,
+#if defined(ENABLE_WEBEXT)
+    // An item an extension added with contextMenus.create.
+    ExtensionMenuItem,
+#endif
 };
 
 using ActionText = Variant<StringView, String>;

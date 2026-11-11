@@ -54,6 +54,9 @@
 #include <LibWebView/Utilities.h>
 #include <LibWebView/WebCompatReport.h>
 #include <LibWebView/WebContentPage.h>
+#if defined(ENABLE_WEBEXT)
+#    include <UI/Qt/ExtensionsUI.h>
+#endif
 #include <UI/Qt/Application.h>
 #include <UI/Qt/BookmarkDialog.h>
 #include <UI/Qt/Bookmarks.h>
@@ -2518,6 +2521,26 @@ void Application::display_error_dialog(StringView error_message) const
 }
 
 #if defined(ENABLE_WEBEXT)
+void Application::extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
+{
+    Extensions::host_call(extension_id, function, args, move(reply));
+}
+
+void Application::extension_ui_changed(StringView extension_id, StringView what)
+{
+    Extensions::ui_changed(extension_id, what);
+}
+
+bool Application::is_extension_popup_view(u64 view_id) const
+{
+    return Extensions::is_popup_view(view_id);
+}
+
+void Application::extension_popup_request(u64 view_id, StringView name, StringView args_json)
+{
+    Extensions::popup_request(view_id, name, args_json);
+}
+
 void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
 {
     if (browser_options().headless_mode.has_value() || browser_options().auto_accept_extension_prompts) {

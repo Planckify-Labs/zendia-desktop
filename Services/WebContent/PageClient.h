@@ -24,6 +24,7 @@
 #include <LibWeb/HTML/Scripting/ConsoleInputCompletion.h>
 #include <LibWeb/HTML/Scripting/ScriptRegistry.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
+#include <LibWeb/Internals/ExtensionBridge.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWebCommon/Forward.h>
 #include <LibWebCommon/HTML/CrossProcessId.h>
@@ -52,6 +53,7 @@ public:
     // AD-HOC (cgx-webext): from the browser process, for the extension bridges of this page's documents.
     void extension_api_reply(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, bool ok, String const& json);
     void deliver_extension_message(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& json);
+    void run_extension_injection(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& setup_program, Web::Internals::ExtensionBridge::Injection);
     static GC::Ref<PageClient> create(PageHost& page_host, Web::PageId id, Optional<Web::HTML::CrossProcessId> pending_root_navigable_id = {});
 
     virtual ~PageClient() override;

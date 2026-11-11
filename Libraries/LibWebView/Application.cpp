@@ -240,10 +240,12 @@ void Application::initialize_extensions()
     m_store_installer->on_installed = [this](ByteString const& id, bool is_update) {
         stop_extension_background_page(id);
         start_extension_background_page(id, is_update ? ExtensionStartReason::Update : ExtensionStartReason::Install);
+        extension_ui_changed(id, "installed"sv);
     };
     m_store_installer->on_uninstalled = [this](ByteString const& id) {
         stop_extension_background_page(id);
         m_extension_delegate->remove_extension_data(id);
+        extension_ui_changed(id, "removed"sv);
     };
     m_kept_extension_ids = m_store_installer->load_installed_packages();
 
@@ -336,6 +338,53 @@ void Application::start_extension_background_page(ByteString const& id, Extensio
 void Application::stop_extension_background_page(ByteString const& id)
 {
     m_extension_background_views.remove(id);
+}
+
+void Application::extension_host_call(ByteString const&, StringView function, JsonObject const&, Function<void(ErrorOr<ByteString>)> reply)
+{
+    auto message = ByteString::formatted("{} needs a browser window, and this Ladybird has none", function.substring_view(min<size_t>(5, function.length())));
+    reply(Error::from_string_view(message.view()));
+}
+
+void Application::reload_extension(ByteString const& extension_id)
+{
+    stop_extension_background_page(extension_id);
+    start_extension_background_page(extension_id, ExtensionStartReason::Startup);
+    ViewImplementation::for_each_view([&](ViewImplementation& view) {
+        if (m_extension_manager && m_extension_manager->extension_for_url(view.url().serialize().bytes_as_string_view()) == extension_id && !is_extension_popup_view(view.view_id()))
+            view.reload();
+        return IterationDecision::Continue;
+    });
+}
+
+void Application::remove_extension(ByteString const& extension_id)
+{
+    if (!m_extension_manager)
+        return;
+    auto info = m_extension_manager->extension_info(extension_id);
+    String name = "this extension"_string;
+    if (info.has_value()) {
+        if (auto parsed = JsonValue::from_string(*info); !parsed.is_error() && parsed.value().is_object())
+            name = parsed.value().as_object().get_string("name"sv).value_or(name);
+    }
+    ExtensionPrompt prompt {
+        .title = MUST(String::formatted("Remove \"{}\"?", name)),
+        .message = "The extension and the data it stored will be removed."_string,
+        .details = {},
+        .accept_label = "Remove"_string,
+    };
+    display_extension_prompt(prompt, [this, extension_id](bool accepted) {
+        if (!accepted || !m_extension_manager)
+            return;
+        // A store install is removed through the store installer, which also tells the store pages; an extension loaded
+        // from a file is only removed for this session, as it loads again from the command line.
+        if (m_store_installer && m_store_installer->uninstall(extension_id))
+            return;
+        stop_extension_background_page(extension_id);
+        m_extension_manager->uninstall(extension_id);
+        m_loaded_extension_ids.remove_all_matching([&](auto const& id) { return id == extension_id; });
+        extension_ui_changed(extension_id, "removed"sv);
+    });
 }
 
 void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const

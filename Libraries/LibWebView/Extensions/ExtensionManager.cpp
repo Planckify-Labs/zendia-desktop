@@ -362,6 +362,11 @@ void ExtensionManager::tick()
     webext_tick(m_handle);
 }
 
+ByteString ExtensionManager::host_event(StringView name, StringView args_json)
+{
+    return take(webext_host_event(m_handle, to_c(name), to_c(args_json))).value_or("null"sv);
+}
+
 void ExtensionManager::notify_installed(StringView extension_id, StringView reason, StringView previous_version)
 {
     webext_notify_installed(m_handle, to_c(extension_id), to_c(reason), to_c(previous_version));

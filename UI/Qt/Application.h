@@ -287,6 +287,10 @@ private:
     void open_file(String const& path) const;
 #if defined(ENABLE_WEBEXT)
     virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const override;
+    virtual void extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply) override;
+    virtual void extension_ui_changed(StringView extension_id, StringView what) override;
+    virtual bool is_extension_popup_view(u64 view_id) const override;
+    virtual void extension_popup_request(u64 view_id, StringView name, StringView args_json) override;
 #endif
 
     virtual void crash_reports_changed() override;

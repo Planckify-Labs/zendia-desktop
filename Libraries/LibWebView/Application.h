@@ -209,6 +209,20 @@ public:
     };
     // Calls `on_answer` exactly once. Without a UI (headless) the answer is no, unless --auto-accept-extension-prompts.
     virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const;
+
+    // The browser UI's part of extensions. The defaults suit a browser without windows (headless).
+    // A host.* primitive of the extension core that needs windows and tabs (host.tabs.create, host.windows.update, ...).
+    virtual void extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply);
+    // An extension's toolbar button, menu items or shortcuts changed ("action", "commands").
+    virtual void extension_ui_changed(StringView extension_id, StringView what) { (void)extension_id, (void)what; }
+    // Whether the view shows an extension's popup (which is not a tab).
+    virtual bool is_extension_popup_view(u64 view_id) const { (void)view_id; return false; }
+    // "__ui.popupSize" [width, height] and "__ui.closePopup" from a popup page.
+    virtual void extension_popup_request(u64 view_id, StringView name, StringView args_json) { (void)view_id, (void)name, (void)args_json; }
+    // runtime.reload: restarts the background context and reloads the extension's open pages.
+    void reload_extension(ByteString const& extension_id);
+    // Removes an extension (asking the user first) and everything it stored.
+    void remove_extension(ByteString const& extension_id);
 #endif
 
     void background_networking_settings_changed(Badge<ApplicationSettingsObserver>);
