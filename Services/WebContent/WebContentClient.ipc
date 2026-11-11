@@ -96,6 +96,9 @@ endpoint WebContentClient routed by Web::PageId page_id
     [NotRouted] did_request_extension_context_init(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id) => (Optional<String> init_json)
     did_call_extension_api(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, String name, String args_json) =|
     [NotRouted] did_call_extension_api_sync(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String name, String args_json) => (Optional<String> result_json)
+    // A stage of a network request, for webRequest and declarativeNetRequest. A non-zero token wants an answer
+    // (extension_network_answer).
+    did_report_extension_network_stage(Web::PageId page_id, u64 token, String stage, Optional<Web::HTML::CrossProcessId> navigable_id, String details_json) =|
     [NotRouted] did_request_content_script_programs(Web::PageId page_id, Web::HTML::CrossProcessId document_id) => (String programs_json)
 
     [NotRouted] allocate_compositor_context_id(Web::PageId page_id, Web::PagePresentationRegistration page_presentation_registration) => (Web::CompositorContextId context_id)

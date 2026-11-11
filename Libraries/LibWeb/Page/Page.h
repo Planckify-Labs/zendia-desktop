@@ -933,6 +933,9 @@ public:
     virtual Optional<String> page_did_request_extension_context_init([[maybe_unused]] HTML::CrossProcessId document_id, [[maybe_unused]] String const& extension_id) { return {}; }
     virtual void page_did_call_extension_api([[maybe_unused]] HTML::CrossProcessId document_id, [[maybe_unused]] String const& extension_id, [[maybe_unused]] u64 request_id, [[maybe_unused]] String const& name, [[maybe_unused]] String const& args_json) { }
     virtual Optional<String> page_did_call_extension_api_sync([[maybe_unused]] HTML::CrossProcessId document_id, [[maybe_unused]] String const& extension_id, [[maybe_unused]] String const& name, [[maybe_unused]] String const& args_json) { return {}; }
+    // Reports a stage of a network request to the extension core. A non-zero token wants an answer, which comes back
+    // through ExtensionNetwork::did_receive_answer.
+    virtual void page_did_report_extension_network_stage([[maybe_unused]] u64 token, [[maybe_unused]] StringView stage, [[maybe_unused]] Optional<HTML::CrossProcessId> navigable_id, [[maybe_unused]] String const& details_json) { }
     virtual Optional<String> page_did_request_content_script_programs([[maybe_unused]] HTML::CrossProcessId document_id) { return {}; }
     virtual void page_did_update_indexed_database([[maybe_unused]] String const& url, [[maybe_unused]] IndexedDB::TransactionChanges const&) { }
     virtual void page_did_update_resource_count(i32) { }

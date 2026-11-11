@@ -174,6 +174,10 @@ public:
     // "setActionPinned", "grantActiveTab". See webext_host_event in webext.h. Returns JSON.
     ByteString host_event(StringView name, StringView args_json);
 
+    // One stage of a network request, for declarativeNetRequest and webRequest (see webext_network_event in webext.h).
+    // `on_reply(ok, json)` gets the instruction for the browser: at once, or when blocking listeners have answered.
+    void network_event(StringView stage, StringView details_json, Function<void(bool ok, StringView json)> on_reply);
+
     void notify_installed(StringView extension_id, StringView reason, StringView previous_version = {});
     void notify_startup(StringView extension_id);
 

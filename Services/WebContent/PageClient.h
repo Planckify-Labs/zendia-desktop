@@ -377,6 +377,7 @@ private:
     virtual Optional<Web::FileAPI::SerializedBlobURLEntry> page_did_request_blob_url_entry(Utf16String const& url, Optional<URL::BlobURLEntry::Token> token) override;
     virtual Optional<Web::ExtensionResource> page_did_request_extension_resource(URL::URL const& url, ByteString const& initiator_origin) override;
     virtual Optional<String> page_did_request_extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id) override;
+    virtual void page_did_report_extension_network_stage(u64 token, StringView stage, Optional<Web::HTML::CrossProcessId> navigable_id, String const& details_json) override;
     virtual void page_did_call_extension_api(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, String const& name, String const& args_json) override;
     virtual Optional<String> page_did_call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& name, String const& args_json) override;
     virtual Optional<String> page_did_request_content_script_programs(Web::HTML::CrossProcessId document_id) override;

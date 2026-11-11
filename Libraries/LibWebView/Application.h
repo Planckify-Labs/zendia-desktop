@@ -219,6 +219,11 @@ public:
     virtual bool is_extension_popup_view(u64 view_id) const { (void)view_id; return false; }
     // "__ui.popupSize" [width, height] and "__ui.closePopup" from a popup page.
     virtual void extension_popup_request(u64 view_id, StringView name, StringView args_json) { (void)view_id, (void)name, (void)args_json; }
+    // Whether the view hosts an extension's background page (which is not a tab either).
+    bool is_extension_background_view(u64 view_id) const;
+    // The stages of a network request extensions care about (Web::ExtensionNetwork::Stage bits); every renderer is told.
+    void extension_network_interest_changed();
+    u32 extension_network_interest() const { return m_extension_network_interest; }
     // runtime.reload: restarts the background context and reloads the extension's open pages.
     void reload_extension(ByteString const& extension_id);
     // Removes an extension (asking the user first) and everything it stored.
@@ -681,6 +686,9 @@ private:
     // Hidden views hosting extensions' background pages; not tabs, and never shown.
     HashMap<ByteString, NonnullOwnPtr<HeadlessWebView>> m_extension_background_views;
     OwnPtr<StoreInstaller> m_store_installer;
+    u32 m_extension_network_interest { 0 };
+    bool m_extension_network_interest_update_pending { false };
+    bool m_extensions_started { false };
     // Extensions to start once the event loop runs, and why.
     Vector<ByteString> m_loaded_extension_ids;
     Vector<ByteString> m_kept_extension_ids;

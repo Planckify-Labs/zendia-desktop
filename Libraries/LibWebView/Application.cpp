@@ -241,6 +241,7 @@ void Application::initialize_extensions()
         stop_extension_background_page(id);
         start_extension_background_page(id, is_update ? ExtensionStartReason::Update : ExtensionStartReason::Install);
         extension_ui_changed(id, "installed"sv);
+        extension_network_interest_changed();
     };
     m_store_installer->on_uninstalled = [this](ByteString const& id) {
         stop_extension_background_page(id);
@@ -295,6 +296,10 @@ void Application::start_extension_background_pages()
     }
     for (auto const& id : m_loaded_extension_ids)
         start_extension_background_page(id, ExtensionStartReason::Install);
+
+    // Rules that came with the packages were loaded before there was an event loop to tell the renderers on.
+    m_extensions_started = true;
+    extension_network_interest_changed();
 }
 
 void Application::start_extension_background_page(ByteString const& id, ExtensionStartReason reason)
@@ -344,6 +349,54 @@ void Application::extension_host_call(ByteString const&, StringView function, Js
 {
     auto message = ByteString::formatted("{} needs a browser window, and this Ladybird has none", function.substring_view(min<size_t>(5, function.length())));
     reply(Error::from_string_view(message.view()));
+}
+
+bool Application::is_extension_background_view(u64 view_id) const
+{
+    for (auto const& [id, view] : m_extension_background_views) {
+        if (view->view_id() == view_id)
+            return true;
+    }
+    return false;
+}
+
+void Application::extension_network_interest_changed()
+{
+    // Extensions add listeners and rules in bursts (a background page starting up); one update covers them.
+    if (!m_extensions_started || m_extension_network_interest_update_pending)
+        return;
+    m_extension_network_interest_update_pending = true;
+    Core::deferred_invoke([this] {
+        m_extension_network_interest_update_pending = false;
+        if (!m_extension_manager)
+            return;
+        u32 stages = 0;
+        auto interest = JsonValue::from_string(m_extension_manager->host_event("networkInterest"sv, "{}"sv));
+        if (!interest.is_error() && interest.value().is_object()) {
+            if (auto names = interest.value().as_object().get_array("stages"sv); names.has_value()) {
+                names->for_each([&](JsonValue const& name) {
+                    if (!name.is_string())
+                        return;
+                    // The bits of Web::ExtensionNetwork::Stage, in its order.
+                    static constexpr Array stage_names = { "beforeRequest"sv, "beforeSendHeaders"sv, "sendHeaders"sv, "headersReceived"sv, "authRequired"sv, "beforeRedirect"sv, "responseStarted"sv, "completed"sv, "errorOccurred"sv };
+                    for (size_t i = 0; i < stage_names.size(); ++i) {
+                        if (name.as_string() == stage_names[i])
+                            stages |= 1u << i;
+                    }
+                });
+            }
+        }
+        // Bit 16 is Web::ExtensionNetwork::navigation_interest.
+        if (!interest.is_error() && interest.value().is_object() && interest.value().as_object().get_bool("navigation"sv).value_or(false))
+            stages |= 1u << 16;
+        if (stages == m_extension_network_interest)
+            return;
+        m_extension_network_interest = stages;
+        WebContentClient::for_each_client([&](WebContentClient& client) {
+            client.async_set_extension_network_interest(stages);
+            return IterationDecision::Continue;
+        });
+    });
 }
 
 void Application::reload_extension(ByteString const& extension_id)

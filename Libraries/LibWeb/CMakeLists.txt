@@ -642,6 +642,7 @@ set(SOURCES
     Layout/UpdateLayout.cpp
     Layout/Viewport.cpp
     Loader/ContentBlocker.cpp
+    Loader/ExtensionNetwork.cpp
     Loader/FileRequest.cpp
     Loader/GeneratedPagesLoader.cpp
     Loader/LoaderConfig.cpp

@@ -17,6 +17,7 @@
 #include <LibGC/Heap.h>
 #include <LibGC/RootVector.h>
 #include <LibTextCodec/Decoder.h>
+#include <LibWeb/Loader/ExtensionNetwork.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleEngineInput.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
@@ -995,6 +996,8 @@ void HTMLParserEndState::advance_to_dom_content_loaded_phase()
             HighResolutionTime::current_high_resolution_time(relevant_global_object(*document)));
         content_loaded_event->set_bubbles(true);
         document->dispatch_event(content_loaded_event);
+        // AD-HOC (cgx-webext): webNavigation.onDOMContentLoaded.
+        ExtensionNetwork::notify_navigation(*document, "domContentLoaded"sv);
 
         // https://wicg.github.io/scroll-to-text-fragment/#invoking-text-directives
         // If the document has no parser, or its parser has stopped parsing, then:
@@ -1119,6 +1122,8 @@ void HTMLParserEndState::complete()
 
         // 5. Fire an event named load at window, with legacy target override flag set.
         DOM::EventDispatcher::dispatch(window, DOM::Event::create(HTML::EventNames::load, HighResolutionTime::current_high_resolution_time(relevant_global_object(window))), true);
+        // AD-HOC (cgx-webext): webNavigation.onCompleted.
+        ExtensionNetwork::notify_navigation(*document, "completed"sv);
 
         // INTEROP: A load event handler can call document.open(), which associates a replacement parser after the old
         //          parser was detached above. Do not let this completion continue into the replacement document.

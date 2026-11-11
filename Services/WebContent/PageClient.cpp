@@ -2238,6 +2238,11 @@ Optional<String> PageClient::page_did_request_extension_context_init(Web::HTML::
     return response->take_init_json();
 }
 
+void PageClient::page_did_report_extension_network_stage(u64 token, StringView stage, Optional<Web::HTML::CrossProcessId> navigable_id, String const& details_json)
+{
+    client().async_did_report_extension_network_stage(m_id, token, MUST(String::from_utf8(stage)), navigable_id, details_json);
+}
+
 void PageClient::page_did_call_extension_api(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, String const& name, String const& args_json)
 {
     client().async_did_call_extension_api(m_id, document_id, extension_id, request_id, name, args_json);

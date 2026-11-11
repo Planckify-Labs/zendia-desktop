@@ -21,6 +21,10 @@
 #include <LibJS/Runtime/Completion.h>
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestTimingInfo.h>
+#include <AK/JsonArray.h>
+#include <AK/JsonObject.h>
+#include <LibWeb/Loader/ExtensionNetwork.h>
+#include <LibURL/Parser.h>
 #include <LibTextCodec/Encoder.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
@@ -2350,6 +2354,264 @@ static void process_http_network_or_cache_response(JS::Object& global_object, In
 }
 
 // https://fetch.spec.whatwg.org/#concept-http-network-or-cache-fetch
+// AD-HOC (cgx-webext): The rest of this block lets browser extensions watch and change HTTP requests (webRequest and
+//                      declarativeNetRequest). See LibWeb/Loader/ExtensionNetwork.h.
+static StringView extension_resource_type(Infrastructure::Request const& request)
+{
+    using Destination = Infrastructure::Request::Destination;
+    using InitiatorType = Infrastructure::Request::InitiatorType;
+
+    if (request.mode() == Infrastructure::Request::Mode::Navigate) {
+        if (auto const& target = request.extension_navigation_target(); target.has_value())
+            return target->is_top_level ? "main_frame"sv : "sub_frame"sv;
+    }
+    if (request.destination().has_value()) {
+        switch (*request.destination()) {
+        case Destination::Document:
+            return "main_frame"sv;
+        case Destination::Frame:
+        case Destination::IFrame:
+            return "sub_frame"sv;
+        case Destination::Style:
+        case Destination::XSLT:
+            return "stylesheet"sv;
+        case Destination::Script:
+        case Destination::Worker:
+        case Destination::SharedWorker:
+        case Destination::ServiceWorker:
+        case Destination::AudioWorklet:
+        case Destination::PaintWorklet:
+            return "script"sv;
+        case Destination::Image:
+            return "image"sv;
+        case Destination::Font:
+            return "font"sv;
+        case Destination::Object:
+        case Destination::Embed:
+            return "object"sv;
+        case Destination::Audio:
+        case Destination::Video:
+        case Destination::Track:
+            return "media"sv;
+        case Destination::Report:
+            return "csp_report"sv;
+        default:
+            return "other"sv;
+        }
+    }
+    if (request.initiator_type().has_value()) {
+        switch (*request.initiator_type()) {
+        case InitiatorType::Fetch:
+        case InitiatorType::XMLHttpRequest:
+            return "xmlhttprequest"sv;
+        case InitiatorType::Beacon:
+        case InitiatorType::Ping:
+            return "ping"sv;
+        default:
+            break;
+        }
+    }
+    return "other"sv;
+}
+
+static JsonArray extension_headers_json(HTTP::HeaderList const& headers)
+{
+    JsonArray list;
+    for (auto const& [name, value] : headers.headers()) {
+        JsonObject header;
+        header.set("name"sv, String::from_utf8_with_replacement_character(name));
+        header.set("value"sv, String::from_utf8_with_replacement_character(value));
+        list.must_append(move(header));
+    }
+    return list;
+}
+
+static NonnullRefPtr<HTTP::HeaderList> extension_headers_from_json(JsonArray const& list)
+{
+    auto headers = HTTP::HeaderList::create();
+    list.for_each([&](JsonValue const& entry) {
+        if (!entry.is_object())
+            return;
+        auto name = entry.as_object().get_string("name"sv);
+        if (!name.has_value() || name->is_empty())
+            return;
+        auto value = entry.as_object().get_string("value"sv).value_or({});
+        headers->append(HTTP::Header::isomorphic_encode(name->bytes_as_string_view(), value.bytes_as_string_view()));
+    });
+    return headers;
+}
+
+static Optional<HTML::CrossProcessId> extension_request_navigable(Infrastructure::Request const& request)
+{
+    if (request.mode() == Infrastructure::Request::Mode::Navigate) {
+        if (auto const& target = request.extension_navigation_target(); target.has_value())
+            return target->navigable_id;
+    }
+    if (auto const& client = request.client_snapshot())
+        return client->navigable_id;
+    return {};
+}
+
+static JsonObject extension_request_details(Infrastructure::Request const& request)
+{
+    JsonObject details;
+    details.set("requestId"sv, request.extension_request_id());
+    details.set("url"sv, request.current_url().serialize());
+    details.set("method"sv, String::from_utf8_with_replacement_character(request.method()));
+    details.set("type"sv, extension_resource_type(request));
+    details.set("timeStamp"sv, UnixDateTime::now().milliseconds_since_epoch());
+    if (auto const* origin = request.origin().get_pointer<URL::Origin>(); origin && !origin->is_opaque())
+        details.set("initiator"sv, origin->serialize());
+    if (auto const& client = request.client_snapshot(); client && request.mode() != Infrastructure::Request::Mode::Navigate)
+        details.set("documentUrl"sv, client->creation_url.serialize());
+    return details;
+}
+
+static void extension_add_response_details(JsonObject& details, Infrastructure::Response const& response)
+{
+    details.set("statusCode"sv, response.status());
+    details.set("statusLine"sv, MUST(String::formatted("HTTP/1.1 {} {}", response.status(), response.status_message())));
+    details.set("responseHeaders"sv, extension_headers_json(*response.header_list()));
+    details.set("fromCache"sv, response.cache_state().has_value());
+}
+
+// What the browser does for an extension's redirect: an internal 307 that the usual redirect handling follows.
+static NonnullRefPtr<Infrastructure::Response> extension_redirect_response(Infrastructure::Request const& request, URL::URL const& target)
+{
+    auto response = Infrastructure::Response::create();
+    response->set_status(307);
+    response->set_status_message("Internal Redirect"sv);
+    auto location = target.serialize();
+    response->header_list()->append(HTTP::Header::isomorphic_encode("Location"sv, location.bytes_as_string_view()));
+    // The page did not ask for this redirect, so it must not fail the CORS check either.
+    if (auto const* origin = request.origin().get_pointer<URL::Origin>()) {
+        auto allowed_origin = origin->serialize();
+        response->header_list()->append(HTTP::Header::isomorphic_encode("Access-Control-Allow-Origin"sv, allowed_origin.bytes_as_string_view()));
+        response->header_list()->append(HTTP::Header::isomorphic_encode("Access-Control-Allow-Credentials"sv, "true"sv));
+    }
+    return response;
+}
+
+static GC::Ref<PendingResponse> http_network_fetch_with_extensions(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, HTTP::Cookie::IncludeCredentials include_credentials, IsNewConnectionFetch is_new_connection_fetch, RefPtr<HTTP::MemoryCache> http_cache)
+{
+    using ExtensionNetwork::Stage;
+
+    auto request = fetch_params.request();
+    if (ExtensionNetwork::interest() == 0 || !Infrastructure::is_http_or_https_scheme(request->current_url().scheme()))
+        return nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params, include_credentials, is_new_connection_fetch, move(http_cache));
+
+    auto& page = Bindings::principal_host_defined_page(realm);
+    if (request->extension_request_id().is_empty())
+        request->set_extension_request_id(ExtensionNetwork::next_request_id());
+    auto navigable_id = extension_request_navigable(*request);
+    auto returned_pending_response = PendingResponse::create(fetch_params);
+
+    auto fail = [](Page& page, Infrastructure::Request const& request, Optional<HTML::CrossProcessId> navigable_id, StringView error) {
+        auto details = extension_request_details(request);
+        details.set("error"sv, error);
+        ExtensionNetwork::notify(page, Stage::ErrorOccurred, navigable_id, details);
+    };
+
+    ExtensionNetwork::ask(page, Stage::BeforeRequest, navigable_id, extension_request_details(*request), [&realm, page = GC::Root { page }, fetch_params = NonnullRefPtr { fetch_params }, request, returned = GC::Root { returned_pending_response }, navigable_id, include_credentials, is_new_connection_fetch, http_cache = move(http_cache), fail](JsonObject answer) mutable {
+        HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+
+        if (answer.get_bool("cancel"sv).value_or(false)) {
+            fail(*page, *request, navigable_id, "net::ERR_BLOCKED_BY_CLIENT"sv);
+            returned->resolve(Infrastructure::Response::network_error("Request was blocked by an extension"_string));
+            return;
+        }
+        if (auto redirect = answer.get_string("redirectUrl"sv); redirect.has_value()) {
+            if (auto target = URL::Parser::basic_parse(redirect->bytes_as_string_view()); target.has_value() && *target != request->current_url()) {
+                if (Infrastructure::is_http_or_https_scheme(target->scheme())) {
+                    returned->resolve(extension_redirect_response(*request, *target));
+                    return;
+                }
+                // Redirects may only go to HTTP(S) URLs, but extensions also send requests to their own files and to
+                // data: URLs. Those are answered in place.
+                request->url_list().append(target.release_value());
+                scheme_fetch(realm, *fetch_params)->when_loaded([returned = GC::Ref { *returned }](NonnullRefPtr<Infrastructure::Response> response) {
+                    returned->resolve(move(response));
+                });
+                return;
+            }
+        }
+
+        auto details = extension_request_details(*request);
+        details.set("requestHeaders"sv, extension_headers_json(*request->header_list()));
+        ExtensionNetwork::ask(*page, Stage::BeforeSendHeaders, navigable_id, details, [&realm, page, fetch_params, request, returned, navigable_id, include_credentials, is_new_connection_fetch, http_cache = move(http_cache), fail](JsonObject answer) mutable {
+            HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+
+            if (answer.get_bool("cancel"sv).value_or(false)) {
+                fail(*page, *request, navigable_id, "net::ERR_BLOCKED_BY_CLIENT"sv);
+                returned->resolve(Infrastructure::Response::network_error("Request was blocked by an extension"_string));
+                return;
+            }
+            if (auto headers = answer.get_array("requestHeaders"sv); headers.has_value())
+                request->set_header_list(extension_headers_from_json(*headers));
+            if (ExtensionNetwork::is_interested(Stage::SendHeaders)) {
+                auto sent = extension_request_details(*request);
+                sent.set("requestHeaders"sv, extension_headers_json(*request->header_list()));
+                ExtensionNetwork::notify(*page, Stage::SendHeaders, navigable_id, sent);
+            }
+
+            auto pending_response = nonstandard_resource_loader_file_or_http_network_fetch(realm, *fetch_params, include_credentials, is_new_connection_fetch, move(http_cache));
+            pending_response->when_loaded([&realm, page = GC::Ref { *page }, fetch_params, request, returned = GC::Ref { *returned }, navigable_id, fail](NonnullRefPtr<Infrastructure::Response> response) {
+                if (response->is_network_error()) {
+                    fail(*page, *request, navigable_id, "net::ERR_FAILED"sv);
+                    returned->resolve(move(response));
+                    return;
+                }
+                auto details = extension_request_details(*request);
+                extension_add_response_details(details, *response);
+                ExtensionNetwork::ask(*page, Stage::HeadersReceived, navigable_id, details, [&realm, page = GC::Root { page }, fetch_params, request, returned = GC::Root { returned }, navigable_id, response, fail](JsonObject answer) {
+                    HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+
+                    if (answer.get_bool("cancel"sv).value_or(false)) {
+                        stop_discarded_response_body(*fetch_params->controller(), *response);
+                        fail(*page, *request, navigable_id, "net::ERR_BLOCKED_BY_CLIENT"sv);
+                        returned->resolve(Infrastructure::Response::network_error("Response was blocked by an extension"_string));
+                        return;
+                    }
+                    if (auto redirect = answer.get_string("redirectUrl"sv); redirect.has_value()) {
+                        if (auto target = URL::Parser::basic_parse(redirect->bytes_as_string_view()); target.has_value() && Infrastructure::is_http_or_https_scheme(target->scheme())) {
+                            stop_discarded_response_body(*fetch_params->controller(), *response);
+                            returned->resolve(extension_redirect_response(*request, *target));
+                            return;
+                        }
+                    }
+                    if (auto headers = answer.get_array("responseHeaders"sv); headers.has_value()) {
+                        auto replaced = extension_headers_from_json(*headers);
+                        response->header_list()->clear();
+                        for (auto const& header : replaced->headers())
+                            response->header_list()->append(header);
+                    }
+
+                    auto is_redirect = Infrastructure::is_redirect_status(response->status()) && response->header_list()->contains("Location"sv);
+                    auto after = is_redirect ? Stage::BeforeRedirect : Stage::ResponseStarted;
+                    if (ExtensionNetwork::is_interested(after) || ExtensionNetwork::is_interested(Stage::Completed)) {
+                        auto seen = extension_request_details(*request);
+                        extension_add_response_details(seen, *response);
+                        if (is_redirect) {
+                            if (auto location = response->header_list()->get("Location"sv); location.has_value()) {
+                                if (auto target = URL::Parser::basic_parse(*location, request->current_url()); target.has_value())
+                                    seen.set("redirectUrl"sv, target->serialize());
+                            }
+                            ExtensionNetwork::notify(*page, Stage::BeforeRedirect, navigable_id, seen);
+                        } else {
+                            ExtensionNetwork::notify(*page, Stage::ResponseStarted, navigable_id, seen);
+                            // FIXME: This is when the headers arrived, not when the body ended.
+                            ExtensionNetwork::notify(*page, Stage::Completed, navigable_id, seen);
+                        }
+                    }
+                    returned->resolve(response);
+                });
+            });
+        });
+    });
+
+    return returned_pending_response;
+}
+
 static GC::Ref<PendingResponse> continue_http_network_or_cache_fetch(JS::Object& global_object, Infrastructure::FetchParams const& fetch_params, NonnullRefPtr<Infrastructure::FetchParams const> http_fetch_params, RefPtr<Infrastructure::Response> response, RefPtr<Infrastructure::Response> stored_response, RefPtr<HTTP::MemoryCache> http_cache, IsAuthenticationFetch is_authentication_fetch, IsNewConnectionFetch is_new_connection_fetch, HTTP::Cookie::IncludeCredentials include_credentials)
 {
     auto& realm = HTML::relevant_realm(global_object);
@@ -2366,7 +2628,8 @@ static GC::Ref<PendingResponse> continue_http_network_or_cache_fetch(JS::Object&
 
         // 2. Let forwardResponse be the result of running HTTP-network fetch given httpFetchParams, includeCredentials,
         //    and isNewConnectionFetch.
-        pending_forward_response = nonstandard_resource_loader_file_or_http_network_fetch(realm, *http_fetch_params, include_credentials, is_new_connection_fetch, http_cache);
+        // AD-HOC (cgx-webext): Browser extensions may watch and change the request on its way.
+        pending_forward_response = http_network_fetch_with_extensions(realm, *http_fetch_params, include_credentials, is_new_connection_fetch, http_cache);
     } else {
         pending_forward_response = PendingResponse::create(fetch_params, Infrastructure::Response::create());
     }

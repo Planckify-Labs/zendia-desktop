@@ -420,6 +420,7 @@ private:
     virtual void did_change_favicon(Gfx::ShareableBitmap favicon) override;
     virtual void did_request_delete_all_cookies(u64 request_id, URL::URL url) override;
     virtual void did_call_extension_api(Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, String name, String args_json) override;
+    virtual void did_report_extension_network_stage(u64 token, String stage, Optional<Web::HTML::CrossProcessId> navigable_id, String details_json) override;
 
 #if defined(ENABLE_WEBEXT)
     // AD-HOC (cgx-webext): extension pages and content scripts in documents this page hosts. `extension_id_or_empty` is

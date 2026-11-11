@@ -4506,8 +4506,59 @@ void WebContentPage::extension_contexts_destroyed(Web::HTML::CrossProcessId docu
             manager->context_destroyed(record.context_id);
     }
 }
+void WebContentPage::did_report_extension_network_stage(u64 token, String stage, Optional<Web::HTML::CrossProcessId> navigable_id, String details_json)
+{
+    auto answer = [weak_client = WeakPtr<WebContentClient> { client() }, token](StringView json) {
+        if (token == 0)
+            return;
+        if (auto client = weak_client.strong_ref())
+            client->async_extension_network_answer(token, MUST(String::from_utf8(json)));
+    };
+
+    auto* manager = Application::extension_manager();
+    auto parsed = JsonValue::from_string(details_json);
+    if (!manager || parsed.is_error() || !parsed.value().is_object()) {
+        answer("{}"sv);
+        return;
+    }
+    // Which tab and frame a request belongs to is what the browser knows, not what the renderer says.
+    auto details = parsed.release_value().as_object();
+    auto is_tab = displays_tab() && !Application::the().is_extension_popup_view(view().view_id()) && !Application::the().is_extension_background_view(view().view_id());
+    details.set("tabId"sv, is_tab ? static_cast<i64>(view().view_id()) : -1);
+    i64 frame_id = 0;
+    i64 parent_frame_id = -1;
+    if (navigable_id.has_value()) {
+        if (auto navigable = traversable().find(*navigable_id); navigable.has_value() && !navigable->is_top_level_traversable()) {
+            frame_id = static_cast<i64>(navigable->id().local_id);
+            auto const* parent = navigable->parent();
+            parent_frame_id = parent && !parent->is_top_level_traversable() ? static_cast<i64>(parent->id().local_id) : 0;
+        }
+    }
+    details.set("frameId"sv, frame_id);
+    details.set("parentFrameId"sv, parent_frame_id);
+
+    if (stage == "navigation"sv) {
+        if (extension_trace_enabled())
+            warnln("[webext] navigation: {}", trace_excerpt(details.serialized()));
+        if (is_tab)
+            manager->host_event("navigation"sv, details.serialized());
+        return;
+    }
+
+    if (extension_trace_enabled())
+        warnln("[webext] network {}: {}", stage, trace_excerpt(details.serialized()));
+    manager->network_event(stage, details.serialized(), [answer = move(answer), stage](bool ok, StringView json) {
+        if (extension_trace_enabled() && json != "{}"sv)
+            warnln("[webext]   {} => {}", stage, trace_excerpt(json));
+        answer(ok ? json : "{}"sv);
+    });
+}
 #else
 void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId, String, u64, String, String)
+{
+}
+
+void WebContentPage::did_report_extension_network_stage(u64, String, Optional<Web::HTML::CrossProcessId>, String)
 {
 }
 #endif

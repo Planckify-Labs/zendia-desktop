@@ -86,6 +86,7 @@
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/NodeArena.h>
 #include <LibWeb/Layout/Viewport.h>
+#include <LibWeb/Loader/ExtensionNetwork.h>
 #include <LibWeb/Loader/GeneratedPagesLoader.h>
 #include <LibWeb/Page/EventHandler.h>
 #include <LibWeb/Page/Page.h>
@@ -2630,6 +2631,8 @@ static void create_navigation_params_by_fetching(
     request->set_use_url_credentials(true);
     request->set_redirect_mode(Fetch::Infrastructure::Request::RedirectMode::Manual);
     request->set_replaces_client_id(active_document.relevant_settings_object().id);
+    request->set_extension_navigation_target(Fetch::Infrastructure::Request::ExtensionNavigationTarget { navigable->id(), navigable->is_top_level_traversable() });
+    ExtensionNetwork::notify_navigation(navigable->page(), navigable->id(), "beforeNavigate"sv, entry.url);
     request->set_mode(Fetch::Infrastructure::Request::Mode::Navigate);
     if (WebDriver::BiDi::network_events_enabled() || WebDriver::BiDi::network_configuration_enabled())
         WebDriver::BiDi::initialize_network_request(*request, navigable, navigation_id);
@@ -4109,6 +4112,10 @@ bool LocalNavigable::resume_navigation_params_creation(Utf16String const& naviga
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#navigate-fragid
 void LocalNavigable::navigate_to_a_fragment(URL::URL const& url, HistoryHandlingBehavior history_handling, UserNavigationInvolvement user_involvement, GC::Ptr<DOM::Element> source_element, Optional<StorageSerializationRecord> navigation_api_state, Utf16String navigation_id, GC::Ptr<NavigationAPIMethodTracker> api_method_tracker, Optional<URL::Origin> initiator_origin)
 {
+    // AD-HOC (cgx-webext): webNavigation.onReferenceFragmentUpdated.
+    if (auto document = active_document())
+        ExtensionNetwork::notify_navigation(page(), id(), "referenceFragmentUpdated"sv, url, document->id_if_assigned());
+
     // https://wicg.github.io/scroll-to-text-fragment/#extracting-the-fragment-directive
     auto directive_state = active_session_history_entry()->directive_state();
     auto stripped_url = url;
@@ -4665,6 +4672,10 @@ void perform_url_and_history_update_steps(DOM::Document& document, URL::URL new_
 {
     // 1. Let navigable be document's node navigable.
     auto navigable = document.navigable();
+
+    // AD-HOC (cgx-webext): webNavigation.onHistoryStateUpdated.
+    if (navigable)
+        ExtensionNetwork::notify_navigation(document.page(), navigable->id(), "historyStateUpdated"sv, new_url, document.id_if_assigned());
 
     // 2. Let activeEntry be navigable's active session history entry.
     auto active_entry = navigable->active_session_history_entry();

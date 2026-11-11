@@ -36,6 +36,7 @@
 #include <LibJS/Runtime/HostObject.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibUnicode/TimeZone.h>
+#include <LibWeb/Loader/ExtensionNetwork.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/CSS/Parser/ErrorReporter.h>
@@ -3899,6 +3900,16 @@ void ConnectionFromClient::deliver_extension_message(Web::PageId page_id, Web::H
 {
     if (auto page = this->page(page_id); page.has_value())
         page->deliver_extension_message(document_id, extension_id, json);
+}
+
+void ConnectionFromClient::set_extension_network_interest(u32 stages)
+{
+    Web::ExtensionNetwork::set_interest(stages);
+}
+
+void ConnectionFromClient::extension_network_answer(u64 token, String answer_json)
+{
+    Web::ExtensionNetwork::did_receive_answer(token, answer_json);
 }
 
 void ConnectionFromClient::run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, u64 token)

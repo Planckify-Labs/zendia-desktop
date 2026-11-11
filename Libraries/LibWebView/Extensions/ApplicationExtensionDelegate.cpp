@@ -94,6 +94,12 @@ void ApplicationExtensionDelegate::dispatch_event(StringView extension_id, Strin
         return;
     }
 
+    // Which stages of a request extensions care about changed; the renderers have to know.
+    if (event == "__network.changed"sv) {
+        Application::the().extension_network_interest_changed();
+        return;
+    }
+
     JsonObject message;
     message.set("kind"sv, "event"sv);
     message.set("name"sv, MUST(String::from_utf8(event)));

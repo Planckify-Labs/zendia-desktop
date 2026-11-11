@@ -214,6 +214,17 @@ public:
     [[nodiscard]] RefPtr<ReservedClientContextSnapshot const> const& reserved_client_snapshot() const { return m_reserved_client_snapshot; }
     void set_reserved_client_snapshot(RefPtr<ReservedClientContextSnapshot const> reserved_client_snapshot) { m_reserved_client_snapshot = move(reserved_client_snapshot); }
 
+    // AD-HOC (cgx-webext): What browser extensions know a request by (webRequest's requestId), kept across redirects,
+    //                      and for a navigation request the frame that navigates and whether it is the tab's top frame.
+    struct ExtensionNavigationTarget {
+        HTML::CrossProcessId navigable_id;
+        bool is_top_level { false };
+    };
+    [[nodiscard]] String const& extension_request_id() const { return m_extension_request_id; }
+    void set_extension_request_id(String id) { m_extension_request_id = move(id); }
+    [[nodiscard]] Optional<ExtensionNavigationTarget> const& extension_navigation_target() const { return m_extension_navigation_target; }
+    void set_extension_navigation_target(Optional<ExtensionNavigationTarget> target) { m_extension_navigation_target = move(target); }
+
     [[nodiscard]] HTML::EnvironmentId const& replaces_client_id() const { return m_replaces_client_id; }
     void set_replaces_client_id(HTML::EnvironmentId replaces_client_id) { m_replaces_client_id = move(replaces_client_id); }
 
@@ -415,6 +426,9 @@ private:
     // https://fetch.spec.whatwg.org/#concept-request-replaces-client-id
     // A request has an associated replaces client id (a string). Unless stated otherwise it is the empty string.
     HTML::EnvironmentId m_replaces_client_id;
+
+    String m_extension_request_id;
+    Optional<ExtensionNavigationTarget> m_extension_navigation_target;
 
     // https://fetch.spec.whatwg.org/#concept-request-window
     // A request has an associated traversable for user prompts, that is "no-traversable", "client", or a traversable

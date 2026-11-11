@@ -1175,6 +1175,8 @@ public:
     void set_mute_iframe_load(bool value) { m_mute_iframe_load = value; }
 
     HTML::CrossProcessId id() const { return m_id.value(); }
+    // AD-HOC (cgx-webext): Documents that never were a navigable's document (made by a parser API, say) have no id.
+    Optional<HTML::CrossProcessId> id_if_assigned() const { return m_id; }
 
     // AD-HOC (cgx-webext): Extension bridges of this document: "" for an extension's own page, else one per extension
     //                      whose content scripts run in it.

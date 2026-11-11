@@ -294,6 +294,10 @@ WebContentClient::WebContentClient(NonnullOwnPtr<IPC::Transport> transport, Brow
 {
     VERIFY(initial_page_id > 0);
     clients().set(this);
+#if defined(ENABLE_WEBEXT)
+    if (auto stages = Application::the().extension_network_interest(); stages != 0)
+        async_set_extension_network_interest(stages);
+#endif
 }
 
 WebContentClient::~WebContentClient()

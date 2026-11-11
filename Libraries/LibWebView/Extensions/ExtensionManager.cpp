@@ -367,6 +367,17 @@ ByteString ExtensionManager::host_event(StringView name, StringView args_json)
     return take(webext_host_event(m_handle, to_c(name), to_c(args_json))).value_or("null"sv);
 }
 
+void ExtensionManager::network_event(StringView stage, StringView details_json, Function<void(bool, StringView)> on_reply)
+{
+    auto* callback = new Function<void(bool, StringView)>(move(on_reply));
+    webext_network_event(
+        m_handle, to_c(stage), to_c(details_json), [](void* user, bool ok, WebExtStr json) {
+            auto owned = adopt_own(*static_cast<Function<void(bool, StringView)>*>(user));
+            (*owned)(ok, to_view(json));
+        },
+        callback);
+}
+
 void ExtensionManager::notify_installed(StringView extension_id, StringView reason, StringView previous_version)
 {
     webext_notify_installed(m_handle, to_c(extension_id), to_c(reason), to_c(previous_version));

@@ -234,6 +234,7 @@
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Layout/TreeBuilder.h>
 #include <LibWeb/Layout/Viewport.h>
+#include <LibWeb/Loader/ExtensionNetwork.h>
 #include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/MediaSession/ActiveMediaSessionTracker.h>
 #include <LibWeb/Namespace.h>
@@ -7505,6 +7506,9 @@ void Document::make_active()
 
     // 3. Set document's browsing context's WindowProxy's [[Window]] internal slot value to window.
     m_browsing_context->set_active_window(window);
+
+    // AD-HOC (cgx-webext): webNavigation.onCommitted.
+    ExtensionNetwork::notify_navigation(*this, "committed"sv);
 
     auto current_navigable = this->navigable();
     if (current_navigable && current_navigable->is_top_level_traversable()) {
