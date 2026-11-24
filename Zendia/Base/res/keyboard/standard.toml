@@ -1,0 +1,66 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+# Standard browser keyboard profile (default when vim mode is off).
+# Both Control (<C-...>) and Super/Command (<D-...>) aliases are bound for
+# cross-platform browser shortcuts.
+
+name = "standard"
+description = "Standard browser keyboard shortcuts"
+leader = "<Space>"
+
+[[bindings]]
+keys = ["<C-t>", "<D-t>"]
+command = "tab.new"
+description = "New tab"
+args = { activate = true }
+
+[[bindings]]
+keys = ["<C-w>", "<D-w>"]
+command = "tab.close"
+description = "Close tab"
+
+[[bindings]]
+keys = ["<C-Tab>", "<C-PageDown>"]
+command = "tab.next"
+description = "Next tab"
+
+[[bindings]]
+keys = ["<C-S-Tab>", "<C-PageUp>"]
+command = "tab.previous"
+description = "Previous tab"
+
+[[bindings]]
+keys = ["<C-l>", "<D-l>", "<A-d>"]
+command = "location.focus"
+description = "Focus location bar"
+
+[[bindings]]
+keys = ["<C-r>", "<D-r>", "<F5>"]
+command = "navigation.reload"
+description = "Reload page"
+args = { bypass_cache = false }
+
+[[bindings]]
+keys = ["<C-S-r>", "<D-S-r>", "<C-F5>"]
+command = "navigation.reload"
+description = "Reload page (bypass cache)"
+args = { bypass_cache = true }
+
+[[bindings]]
+keys = ["<A-Left>", "<D-[>"]
+command = "navigation.back"
+description = "Go back"
+
+[[bindings]]
+keys = ["<A-Right>", "<D-]>"]
+command = "navigation.forward"
+description = "Go forward"
+
+# Debug shortcut that cycles sample InputServer events (mode, pending keys, and
+# which-key candidates) through the stub backend until InputServer arrives.
+[[bindings]]
+keys = "<C-A-m>"
+command = "debug.cycle_input_state"
+description = "Cycle sample vim input state (debug)"

@@ -10,4 +10,15 @@
 //! InputServer and the UI process use this crate: InputServer builds the tables and handles counts, macros, the `:`
 //! command line and profile scripts, and the UI process resolves ordinary keys from the table without waiting on IPC.
 //!
+//! So far it has the key notation (`<C-t>`, `<C-S-Tab>`, `<A-Left>`, `<F5>`), TOML profiles compiled into a table,
+//! and the resolver. Layering profiles comes with InputServer.
+//!
 //! See `Zendia/Documentation/Architecture.md`, "Keeping keys instant".
+
+pub mod notation;
+pub mod resolver;
+pub mod table;
+
+pub use notation::{KeyCode, KeyModifiers, KeySequence, KeyStroke, NotationError};
+pub use resolver::{KeyResolver, NextKeyHint, Resolution};
+pub use table::{ArgValue, Binding, CommandInvocation, KeyTable, Profile, STANDARD_PROFILE_TOML, TableError};

@@ -10,3 +10,5 @@ license.workspace = true
 description = "The keymap engine: modes, profiles and compiled key tables"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
