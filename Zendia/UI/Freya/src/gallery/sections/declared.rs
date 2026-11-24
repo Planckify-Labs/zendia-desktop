@@ -213,6 +213,10 @@ pub fn sample_agent_tree() -> UiNode {
 }
 
 impl Component for DeclaredSection {
+    fn render_key(&self) -> DiffKey {
+        DiffKey::from(&self.state_id)
+    }
+
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let tree = if self.state_id == "agent" {

@@ -86,6 +86,10 @@ fn gray_page_placeholder(title: &str, url: &str) -> Element {
 }
 
 impl Component for WindowShellSection {
+    fn render_key(&self) -> DiffKey {
+        DiffKey::from(&self.state_id)
+    }
+
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();

@@ -718,6 +718,10 @@ impl Component for OverlaysAndMotionCard {
 }
 
 impl Component for KitSection {
+    fn render_key(&self) -> DiffKey {
+        DiffKey::from(&self.state_id)
+    }
+
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let show_surfaces = self.state_id == "all" || self.state_id == "surfaces";

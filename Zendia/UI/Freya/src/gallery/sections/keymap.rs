@@ -48,6 +48,10 @@ fn format_binding_detail(binding: &Binding) -> String {
 }
 
 impl Component for KeymapSection {
+    fn render_key(&self) -> DiffKey {
+        DiffKey::from(&self.state_id)
+    }
+
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();

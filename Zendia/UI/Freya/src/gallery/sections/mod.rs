@@ -23,6 +23,9 @@ use std::sync::Arc;
 /// Renders the active gallery section and named state.
 ///
 /// New phases add a section arm here alongside their entry in [`crate::gallery::registry::GALLERY_SECTIONS`].
+///
+/// Each section is keyed by its state, so switching states mounts it afresh. A state may draw with helpers that call
+/// other hooks than another state's, which Freya allows only in a new component.
 pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<GalleryCore>) -> Element {
     match section_id {
         "theme" => theme::ThemeSection {

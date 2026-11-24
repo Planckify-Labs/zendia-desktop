@@ -90,6 +90,10 @@ fn icon_tile(name: &str, subtitle: Option<&str>, size: f32, role: ThemeRole) -> 
 }
 
 impl Component for IconsSection {
+    fn render_key(&self) -> DiffKey {
+        DiffKey::from(&self.state_id)
+    }
+
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let role = if self.state_id == "accent" {

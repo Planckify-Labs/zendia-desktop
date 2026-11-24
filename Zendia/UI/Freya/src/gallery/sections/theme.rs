@@ -413,6 +413,10 @@ fn glass_and_scales_card() -> Element {
 }
 
 impl Component for ThemeSection {
+    fn render_key(&self) -> DiffKey {
+        DiffKey::from(&self.state_id)
+    }
+
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let show_palette = self.state_id == "all" || self.state_id == "palette";

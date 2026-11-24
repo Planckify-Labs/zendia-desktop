@@ -31,6 +31,10 @@ pub struct MenusSection {
 }
 
 impl Component for MenusSection {
+    fn render_key(&self) -> DiffKey {
+        DiffKey::from(&self.state_id)
+    }
+
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let core = use_core();

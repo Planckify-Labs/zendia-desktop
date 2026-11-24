@@ -237,6 +237,10 @@ fn glance_card_overlay(on_close: impl FnMut(Event<PressEventData>) + 'static) ->
 }
 
 impl Component for PageSection {
+    fn render_key(&self) -> DiffKey {
+        DiffKey::from(&self.state_id)
+    }
+
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();
