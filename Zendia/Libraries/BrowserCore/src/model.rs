@@ -9,7 +9,7 @@
 //! Views read this model to draw windows, tabs, spaces, panels, and service state. None of these types depend on any UI
 //! toolkit so headless runners and background services can share the crate.
 
-use crate::contributions::Contributions;
+use crate::contributions::{Contributions, ToolbarArea, ToolbarPlacementRules};
 use crate::events::Event;
 use std::collections::BTreeMap;
 
@@ -431,6 +431,92 @@ pub struct ThemeSettings {
     pub overrides: ThemeOverrides,
 }
 
+/// Default expanded sidebar width in logical pixels (matching Zen's Linux default).
+pub const SIDEBAR_DEFAULT_WIDTH: f32 = 186.0;
+/// Minimum expanded sidebar width in logical pixels (matching `--zen-toolbox-min-width`).
+pub const SIDEBAR_MIN_WIDTH: f32 = 163.0;
+/// Maximum expanded sidebar width in logical pixels (matching `zen.view.sidebar-expanded.max-width`).
+pub const SIDEBAR_MAX_WIDTH: f32 = 500.0;
+/// Fixed width of the collapsed icon-only sidebar in logical pixels (`48px` tab column + `6px` padding each side).
+pub const SIDEBAR_COLLAPSED_WIDTH: f32 = 60.0;
+
+/// Toolbar layout mode, corresponding to Zen's `zen.view.use-single-toolbar` and `zen.view.sidebar-expanded`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ToolbarLayout {
+    /// Buttons and address bar sit inside the expanded sidebar with no top toolbar.
+    #[default]
+    Single,
+    /// Full-width top toolbar paired with an expanded vertical tab sidebar.
+    Multiple,
+    /// Full-width top toolbar paired with a collapsed icon-only sidebar.
+    Collapsed,
+}
+
+/// Horizontal edge of the window where the vertical sidebar sits (`zen.tabs.vertical.right-side`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SidebarSide {
+    #[default]
+    Left,
+    Right,
+}
+
+/// Profile layout settings owned by the browser core and read by views.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutSettings {
+    pub toolbar_layout: ToolbarLayout,
+    pub sidebar_side: SidebarSide,
+    pub sidebar_expanded: bool,
+    pub sidebar_width: f32,
+    /// Compact mode profile setting (auto-hiding chrome is implemented in phase 4).
+    pub compact_mode: bool,
+}
+
+impl Default for LayoutSettings {
+    fn default() -> Self {
+        Self {
+            toolbar_layout: ToolbarLayout::Single,
+            sidebar_side: SidebarSide::Left,
+            sidebar_expanded: true,
+            sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+            compact_mode: false,
+        }
+    }
+}
+
+impl LayoutSettings {
+    /// Clamps a candidate sidebar width into `[SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH]`.
+    pub fn clamp_sidebar_width(width: f32) -> f32 {
+        if width.is_finite() {
+            width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+        } else {
+            SIDEBAR_DEFAULT_WIDTH
+        }
+    }
+
+    /// Logical width the sidebar occupies in its current expanded/collapsed state.
+    pub fn effective_sidebar_width(&self) -> f32 {
+        if self.sidebar_expanded {
+            Self::clamp_sidebar_width(self.sidebar_width)
+        } else {
+            SIDEBAR_COLLAPSED_WIDTH
+        }
+    }
+
+    /// Whether the active toolbar layout renders a full-width top toolbar above the sidebar and page.
+    pub fn has_top_toolbar(&self) -> bool {
+        !matches!(self.toolbar_layout, ToolbarLayout::Single)
+    }
+
+    /// Resolves which [`ToolbarArea`] an item occupies under this layout's toolbar mode.
+    pub fn resolve_toolbar_area(&self, rules: ToolbarPlacementRules) -> Option<ToolbarArea> {
+        match self.toolbar_layout {
+            ToolbarLayout::Single => rules.single_toolbar,
+            ToolbarLayout::Multiple => rules.multiple_toolbars,
+            ToolbarLayout::Collapsed => rules.collapsed_toolbar,
+        }
+    }
+}
+
 /// Complete snapshot of browser state owned by the core and read by views.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BrowserModel {
@@ -456,6 +542,7 @@ pub struct BrowserModel {
     pub pending_keys: Vec<String>,
     pub which_key: Option<WhichKeyState>,
     pub theme: ThemeSettings,
+    pub layout: LayoutSettings,
 }
 
 impl BrowserModel {
@@ -580,6 +667,10 @@ impl BrowserModel {
             }
             Event::SettingsChanged { theme } => {
                 self.theme = theme.clone();
+                true
+            }
+            Event::LayoutSettingsChanged { layout } => {
+                self.layout = layout.clone();
                 true
             }
             Event::PanelToggled { .. } | Event::LocationFocusRequested | Event::ModelReplaced => false,

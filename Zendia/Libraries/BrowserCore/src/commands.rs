@@ -7,7 +7,10 @@
 //! Named, typed browser commands and their descriptors for keymaps and the command palette.
 
 use crate::contributions::SidePanelId;
-use crate::model::{AgentId, ChatSiteId, ConversationId, SpaceId, SplitDirection, TabId, ThemeOverrides, ThemeScheme};
+use crate::model::{
+    AgentId, ChatSiteId, ConversationId, SidebarSide, SpaceId, SplitDirection, TabId, ThemeOverrides, ThemeScheme,
+    ToolbarLayout,
+};
 use std::fmt;
 
 /// Every action a view, keymap, palette, plugin, extension, or agent asks the browser core to perform.
@@ -68,6 +71,22 @@ pub enum Command {
     ThemeSet {
         scheme: Option<ThemeScheme>,
         overrides: Option<ThemeOverrides>,
+    },
+    LayoutSetToolbarLayout {
+        layout: ToolbarLayout,
+    },
+    LayoutSetCompactMode {
+        enabled: bool,
+    },
+    SidebarToggleExpanded,
+    SidebarSetExpanded {
+        expanded: bool,
+    },
+    SidebarSetSide {
+        side: SidebarSide,
+    },
+    SidebarSetWidth {
+        width: f32,
     },
     /// Cycles sample InputServer events (mode, pending keys, which-key) in the stub backend.
     DebugCycleInputState,
@@ -146,6 +165,12 @@ impl Command {
             Self::AgentSend { .. } => "agent.send",
             Self::WebChatAsk { .. } => "webchat.ask",
             Self::ThemeSet { .. } => "theme.set",
+            Self::LayoutSetToolbarLayout { .. } => "layout.set_toolbar_layout",
+            Self::LayoutSetCompactMode { .. } => "layout.set_compact_mode",
+            Self::SidebarToggleExpanded => "sidebar.toggle_expanded",
+            Self::SidebarSetExpanded { .. } => "sidebar.set_expanded",
+            Self::SidebarSetSide { .. } => "sidebar.set_side",
+            Self::SidebarSetWidth { .. } => "sidebar.set_width",
             Self::DebugCycleInputState => "debug.cycle_input_state",
             Self::Custom { name, .. } => name.as_str(),
         }
@@ -235,6 +260,50 @@ impl Command {
                     overrides: None,
                 })
             }
+            "layout.set_toolbar_layout" => {
+                let raw = parse_required_string_arg(name, args, "layout")?;
+                let layout = match raw.as_str() {
+                    "single" => ToolbarLayout::Single,
+                    "multiple" => ToolbarLayout::Multiple,
+                    "collapsed" => ToolbarLayout::Collapsed,
+                    other => {
+                        return Err(CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: format!("unknown toolbar layout `{other}`"),
+                        });
+                    }
+                };
+                Ok(Self::LayoutSetToolbarLayout { layout })
+            }
+            "layout.set_compact_mode" => Ok(Self::LayoutSetCompactMode {
+                enabled: parse_bool_arg(name, args, "enabled", false)?,
+            }),
+            "sidebar.toggle_expanded" => Ok(Self::SidebarToggleExpanded),
+            "sidebar.set_expanded" => Ok(Self::SidebarSetExpanded {
+                expanded: parse_bool_arg(name, args, "expanded", true)?,
+            }),
+            "sidebar.set_side" => {
+                let raw = parse_required_string_arg(name, args, "side")?;
+                let side = match raw.as_str() {
+                    "left" => SidebarSide::Left,
+                    "right" => SidebarSide::Right,
+                    other => {
+                        return Err(CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: format!("unknown sidebar side `{other}`"),
+                        });
+                    }
+                };
+                Ok(Self::SidebarSetSide { side })
+            }
+            "sidebar.set_width" => {
+                let raw = parse_required_string_arg(name, args, "width")?;
+                let width = raw.parse::<f32>().map_err(|_| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("argument `width` expected number, got `{raw}`"),
+                })?;
+                Ok(Self::SidebarSetWidth { width })
+            }
             "debug.cycle_input_state" => Ok(Self::DebugCycleInputState),
             _ => Ok(Self::Custom {
                 name: name.to_string(),
@@ -258,6 +327,9 @@ pub enum ArgumentType {
     ChatSiteId,
     SplitDirection,
     ThemeScheme,
+    Float,
+    ToolbarLayout,
+    SidebarSide,
 }
 
 /// Schema entry describing one argument of a command.
@@ -489,6 +561,67 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
                     "Theme palette, role, glass, and agent color overrides",
                 ),
             ],
+        },
+        CommandDescriptor {
+            name: "layout.set_toolbar_layout".to_string(),
+            title: "Set Toolbar Layout".to_string(),
+            description: "Switch between single toolbar, multiple toolbars, and collapsed toolbar".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "layout",
+                ArgumentType::ToolbarLayout,
+                true,
+                "Toolbar layout (single, multiple, or collapsed)",
+            )],
+        },
+        CommandDescriptor {
+            name: "layout.set_compact_mode".to_string(),
+            title: "Set Compact Mode".to_string(),
+            description: "Enable or disable compact mode in profile layout settings".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "enabled",
+                ArgumentType::Bool,
+                true,
+                "Whether compact mode is enabled",
+            )],
+        },
+        CommandDescriptor {
+            name: "sidebar.toggle_expanded".to_string(),
+            title: "Toggle Sidebar Expanded".to_string(),
+            description: "Toggle the vertical sidebar between expanded and collapsed".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "sidebar.set_expanded".to_string(),
+            title: "Set Sidebar Expanded".to_string(),
+            description: "Expand or collapse the vertical tab sidebar".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "expanded",
+                ArgumentType::Bool,
+                true,
+                "Whether the sidebar should be expanded",
+            )],
+        },
+        CommandDescriptor {
+            name: "sidebar.set_side".to_string(),
+            title: "Set Sidebar Side".to_string(),
+            description: "Place the vertical sidebar on the left or right edge of the window".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "side",
+                ArgumentType::SidebarSide,
+                true,
+                "Sidebar edge (left or right)",
+            )],
+        },
+        CommandDescriptor {
+            name: "sidebar.set_width".to_string(),
+            title: "Set Sidebar Width".to_string(),
+            description: "Resize the expanded sidebar width in logical pixels".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "width",
+                ArgumentType::Float,
+                true,
+                "Width in logical pixels",
+            )],
         },
         CommandDescriptor {
             name: "debug.cycle_input_state".to_string(),

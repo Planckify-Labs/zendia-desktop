@@ -8,7 +8,8 @@
 
 use crate::contributions::{Contributions, SidePanelId};
 use crate::model::{
-    Conversation, InputMode, ServiceState, SpaceId, SplitGroup, Tab, TabId, ThemeSettings, WhichKeyState,
+    Conversation, InputMode, LayoutSettings, ServiceState, SpaceId, SplitGroup, Tab, TabId, ThemeSettings,
+    WhichKeyState,
 };
 use std::fmt;
 use std::sync::Mutex;
@@ -59,6 +60,9 @@ pub enum Event {
     },
     SettingsChanged {
         theme: ThemeSettings,
+    },
+    LayoutSettingsChanged {
+        layout: LayoutSettings,
     },
     /// Signals subscribers to reload a fresh snapshot from `BrowserCore::model`.
     ModelReplaced,

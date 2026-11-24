@@ -12,6 +12,7 @@ pub mod keymap;
 pub mod kit;
 pub mod page;
 pub mod theme;
+pub mod window_shell;
 
 use crate::gallery::registry::GalleryCore;
 use crate::ui::theme::{ThemeRole, use_theme};
@@ -45,6 +46,10 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
         }
         .into_element(),
         "keymap" => keymap::KeymapSection {
+            state_id: state_id.to_string(),
+        }
+        .into_element(),
+        "window-shell" => window_shell::WindowShellSection {
             state_id: state_id.to_string(),
         }
         .into_element(),

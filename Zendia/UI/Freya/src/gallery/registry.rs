@@ -204,6 +204,45 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "window-shell",
+        title: "Window shell",
+        phase: 1,
+        icon: "window",
+        summary: "Window layout, single/multiple/collapsed toolbar layouts, and left/right vertical sidebar frame.",
+        states: &[
+            GalleryStateSpec {
+                id: "single-left",
+                label: "Single · Left",
+                description: "Single toolbar inside expanded left sidebar over rounded inset page card.",
+            },
+            GalleryStateSpec {
+                id: "single-right",
+                label: "Single · Right",
+                description: "Single toolbar inside expanded right sidebar with mirrored bottom actions.",
+            },
+            GalleryStateSpec {
+                id: "multiple-left",
+                label: "Multiple · Left",
+                description: "Full-width top toolbar paired with expanded left vertical sidebar.",
+            },
+            GalleryStateSpec {
+                id: "multiple-right",
+                label: "Multiple · Right",
+                description: "Full-width top toolbar paired with expanded right vertical sidebar.",
+            },
+            GalleryStateSpec {
+                id: "collapsed-left",
+                label: "Collapsed · Left",
+                description: "Full-width top toolbar paired with collapsed icon-only left sidebar.",
+            },
+            GalleryStateSpec {
+                id: "collapsed-right",
+                label: "Collapsed · Right",
+                description: "Full-width top toolbar paired with collapsed icon-only right sidebar.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
@@ -429,6 +468,11 @@ fn format_command_detail(command: &Command) -> String {
         Command::AgentSend { prompt, .. } => prompt.clone(),
         Command::WebChatAsk { site_id, prompt } => format!("{}: {prompt}", site_id.0),
         Command::ThemeSet { scheme, .. } => format!("scheme={scheme:?}"),
+        Command::LayoutSetToolbarLayout { layout } => format!("layout={layout:?}"),
+        Command::LayoutSetCompactMode { enabled } => format!("enabled={enabled}"),
+        Command::SidebarSetExpanded { expanded } => format!("expanded={expanded}"),
+        Command::SidebarSetSide { side } => format!("side={side:?}"),
+        Command::SidebarSetWidth { width } => format!("width={width:.0}"),
         Command::Custom { args, .. } => {
             if args.is_empty() {
                 "no args".to_string()

@@ -10,10 +10,10 @@
 use crate::hub::{self, startup};
 use crate::hub_adapter::HubTabAdapter;
 use crate::input;
-use crate::ui::core_view::{use_core, use_provide_core_with_observer};
+use crate::ui::chrome::{WindowShell, use_provide_chrome_view_state};
+use crate::ui::core_view::use_provide_core_with_observer;
 use crate::ui::page::{
-    DebugInputOverlay, PageStage, PageSurface, PageSurfaceContext, use_page_surfaces, use_provide_keymap,
-    use_provide_page_surfaces,
+    DebugInputOverlay, PageStage, PageSurface, PageSurfaceContext, use_provide_keymap, use_provide_page_surfaces,
 };
 use crate::ui::theme::{ThemeRole, use_provide_theme, use_theme};
 use freya::prelude::*;
@@ -22,17 +22,10 @@ use hub_protocol::ipc_types::hub_server::messages as server;
 use hub_protocol::*;
 use std::sync::Arc;
 use zendia_browser_core::BrowserCore;
-use zendia_browser_core::commands::Command;
 use zendia_browser_core::events::Event as CoreEvent;
 use zendia_browser_core::model::TabId;
 use zendia_browser_core::stub::StubBackend;
 use zendia_browser_core::tab_source::TabSource;
-
-const TOOLBAR_BACKGROUND: (u8, u8, u8) = (238, 238, 242);
-const TAB_STRIP_BACKGROUND: (u8, u8, u8) = (222, 222, 228);
-const ACTIVE_TAB_BACKGROUND: (u8, u8, u8) = (238, 238, 242);
-const TEXT_COLOR: (u8, u8, u8) = (30, 30, 34);
-const MUTED_TEXT_COLOR: (u8, u8, u8) = (96, 96, 104);
 
 fn cursor_icon(cursor: &Gfx_Cursor) -> CursorIcon {
     let Gfx_Cursor::Standard(cursor) = cursor else {
@@ -306,6 +299,7 @@ pub fn app() -> impl IntoElement {
         }
     });
     let _theme = use_provide_theme(&core);
+    let _chrome_view_state = use_provide_chrome_view_state();
     let theme = use_theme();
 
     // NB: What the Hub sends arrives on the IPC reader thread, which hands it to this task on the UI thread.
@@ -430,201 +424,15 @@ pub fn app() -> impl IntoElement {
                 .into_element()
         };
 
+    let page_stage = PageStage::new()
+        .on_sized(on_stage_sized)
+        .page(page_content)
+        .overlay(DebugInputOverlay);
+
     rect()
         .width(Size::fill())
         .height(Size::fill())
-        .background(TOOLBAR_BACKGROUND)
-        .color(TEXT_COLOR)
         .on_global_key_down(on_global_key_down)
         .on_global_key_up(on_global_key_up)
-        .child(TabStrip)
-        .child(Toolbar {
-            location,
-            location_a11y_id,
-        })
-        .child(
-            PageStage::new()
-                .on_sized(on_stage_sized)
-                .page(page_content)
-                .overlay(DebugInputOverlay),
-        )
-}
-
-#[derive(PartialEq)]
-struct TabStrip;
-
-impl Component for TabStrip {
-    fn render(&self) -> impl IntoElement {
-        let core = use_core();
-        let snapshot = core.model().read().clone();
-        let tabs = snapshot.tabs.iter().map(|tab| {
-            let tab_id = tab.id;
-            let is_active = snapshot.active_tab == Some(tab_id);
-            let title = if tab.is_loading {
-                format!("⟳ {}", tab.display_title())
-            } else {
-                tab.display_title()
-            };
-            let activate_core = core.clone();
-            let close_core = core.clone();
-            rect()
-                .key(tab_id.0)
-                .width(Size::px(200.))
-                .height(Size::fill())
-                .padding(Gaps::new(0., 6., 0., 12.))
-                .direction(Direction::Horizontal)
-                .cross_align(Alignment::center())
-                .corner_radius(CornerRadius::new_all(6.))
-                .background(if is_active {
-                    ACTIVE_TAB_BACKGROUND
-                } else {
-                    TAB_STRIP_BACKGROUND
-                })
-                .on_press(move |_| {
-                    activate_core.invoke_or_log(Command::TabActivate { tab_id });
-                })
-                .child(
-                    label()
-                        .text(title)
-                        .width(Size::flex(1.))
-                        .max_lines(1)
-                        .text_overflow(TextOverflow::Ellipsis)
-                        .font_size(13.)
-                        .color(if is_active { TEXT_COLOR } else { MUTED_TEXT_COLOR }),
-                )
-                .child(
-                    rect()
-                        .width(Size::px(22.))
-                        .height(Size::px(22.))
-                        .main_align(Alignment::center())
-                        .cross_align(Alignment::center())
-                        .corner_radius(CornerRadius::new_all(11.))
-                        .on_press(move |e: Event<PressEventData>| {
-                            e.stop_propagation();
-                            let tab_is_closing = close_core.model().peek().tab(tab_id).is_some_and(|tab| tab.closing);
-                            close_core.invoke_or_log(Command::TabClose {
-                                tab_id: Some(tab_id),
-                                force: tab_is_closing,
-                            });
-                        })
-                        .child(label().text("×").font_size(15.)),
-                )
-        });
-
-        let new_tab_core = core.clone();
-        rect()
-            .width(Size::fill())
-            .height(Size::px(38.))
-            .padding(Gaps::new(4., 8., 0., 8.))
-            .spacing(4.)
-            .direction(Direction::Horizontal)
-            .background(TAB_STRIP_BACKGROUND)
-            .children(tabs)
-            .child(
-                rect()
-                    .width(Size::px(30.))
-                    .height(Size::fill())
-                    .main_align(Alignment::center())
-                    .cross_align(Alignment::center())
-                    .on_press(move |_| {
-                        new_tab_core.invoke_or_log(Command::TabNew {
-                            url: None,
-                            after: None,
-                            activate: true,
-                        });
-                    })
-                    .child(label().text("+").font_size(18.)),
-            )
-    }
-}
-
-fn toolbar_button(
-    text: &'static str,
-    enabled: bool,
-    on_press: impl FnMut(Event<PressEventData>) + 'static,
-) -> impl IntoElement {
-    Button::new()
-        .flat()
-        .compact()
-        .enabled(enabled)
-        .on_press(on_press)
-        .child(label().text(text).font_size(16.))
-}
-
-#[derive(PartialEq)]
-struct Toolbar {
-    location: State<String>,
-    location_a11y_id: AccessibilityId,
-}
-
-impl Component for Toolbar {
-    fn render(&self) -> impl IntoElement {
-        let core = use_core();
-        let page_ctx = use_page_surfaces();
-        let (active_tab_id, can_back, can_forward, is_loading) = {
-            let model = core.model().read();
-            let active = model.active_tab();
-            (
-                active.map(|tab| tab.id),
-                active.is_some_and(|tab| tab.can_navigate_back),
-                active.is_some_and(|tab| tab.can_navigate_forward),
-                active.is_some_and(|tab| tab.is_loading),
-            )
-        };
-
-        let submit_core = core.clone();
-        let submit_page_ctx = page_ctx.clone();
-        let on_submit = move |text: String| {
-            if submit_core.invoke_or_log(Command::NavigationLoadUrl {
-                tab_id: None,
-                input: text,
-            }) {
-                submit_page_ctx.request_focus_active_surface();
-            }
-        };
-
-        let back_core = core.clone();
-        let forward_core = core.clone();
-        let reload_core = core.clone();
-
-        rect()
-            .width(Size::fill())
-            .height(Size::px(44.))
-            .padding(Gaps::new(6., 8., 6., 8.))
-            .spacing(4.)
-            .direction(Direction::Horizontal)
-            .cross_align(Alignment::center())
-            .child(toolbar_button("←", can_back, move |_| {
-                if let Some(tab_id) = active_tab_id {
-                    back_core.invoke_or_log(Command::NavigationBack { tab_id: Some(tab_id) });
-                }
-            }))
-            .child(toolbar_button("→", can_forward, move |_| {
-                if let Some(tab_id) = active_tab_id {
-                    forward_core.invoke_or_log(Command::NavigationForward { tab_id: Some(tab_id) });
-                }
-            }))
-            .child(toolbar_button(
-                if is_loading { "✕" } else { "↻" },
-                active_tab_id.is_some(),
-                move |_| {
-                    let Some(tab_id) = active_tab_id else { return };
-                    if is_loading {
-                        reload_core.invoke_or_log(Command::NavigationStop { tab_id: Some(tab_id) });
-                    } else {
-                        reload_core.invoke_or_log(Command::NavigationReload {
-                            tab_id: Some(tab_id),
-                            bypass_cache: false,
-                        });
-                    }
-                },
-            ))
-            .child(
-                Input::new(self.location)
-                    .a11y_id(self.location_a11y_id)
-                    .placeholder("Search or enter an address")
-                    .width(Size::flex(1.))
-                    .on_submit(on_submit),
-            )
-    }
+        .child(WindowShell::new(location, location_a11y_id, page_stage))
 }

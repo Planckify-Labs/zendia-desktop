@@ -52,6 +52,82 @@ pub enum ToolbarPlacement {
     AddressBarEnd,
 }
 
+/// Visual presentation and role of a contributed toolbar item.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ToolbarItemKind {
+    /// Standard icon button.
+    #[default]
+    Button,
+    /// Pill-shaped button showing both its icon and title (for example, Chat).
+    PillButton,
+    /// The address bar slot rendered by the window chrome.
+    UrlBar,
+    /// Application menu trigger button that toggles view-local app menu state.
+    AppMenu,
+}
+
+/// Concrete toolbar area where a toolbar item renders for a resolved window layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ToolbarArea {
+    /// Leading group of the top bar (sidebar toggle, navigation buttons).
+    TopBarStart,
+    /// Flexible center slot of the top bar (address bar in multiple and collapsed layouts).
+    TopBarCenter,
+    /// Trailing group of the top bar before window controls (Zendia items, extensions, app menu).
+    TopBarEnd,
+    /// Leading group of the sidebar top row (app menu and sidebar toggle in single-toolbar layout).
+    SidebarTopStart,
+    /// Trailing group of the sidebar top row (navigation buttons in single-toolbar layout).
+    SidebarTopEnd,
+    /// Dedicated address bar row inside the sidebar (single-toolbar layout).
+    SidebarUrlBar,
+    /// Bottom foot row of the sidebar (library, Zendia items in single-toolbar layout, new tab).
+    SidebarBottom,
+}
+
+/// Per-layout placement rules mapping one toolbar item across all toolbar layouts.
+///
+/// `None` hides the item from toolbars in that layout while keeping it registered in the toolbar model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ToolbarPlacementRules {
+    pub single_toolbar: Option<ToolbarArea>,
+    pub multiple_toolbars: Option<ToolbarArea>,
+    pub collapsed_toolbar: Option<ToolbarArea>,
+}
+
+impl ToolbarPlacementRules {
+    /// Default placement rules derived from a high-level [`ToolbarPlacement`] slot.
+    pub const fn from_placement(placement: ToolbarPlacement) -> Self {
+        match placement {
+            ToolbarPlacement::NavigationStart => Self {
+                single_toolbar: Some(ToolbarArea::SidebarTopEnd),
+                multiple_toolbars: Some(ToolbarArea::TopBarStart),
+                collapsed_toolbar: Some(ToolbarArea::TopBarStart),
+            },
+            ToolbarPlacement::NavigationEnd => Self {
+                single_toolbar: Some(ToolbarArea::SidebarBottom),
+                multiple_toolbars: Some(ToolbarArea::TopBarEnd),
+                collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
+            },
+            ToolbarPlacement::SidebarTop => Self {
+                single_toolbar: Some(ToolbarArea::SidebarTopStart),
+                multiple_toolbars: Some(ToolbarArea::TopBarStart),
+                collapsed_toolbar: Some(ToolbarArea::TopBarStart),
+            },
+            ToolbarPlacement::SidebarBottom => Self {
+                single_toolbar: Some(ToolbarArea::SidebarBottom),
+                multiple_toolbars: Some(ToolbarArea::SidebarBottom),
+                collapsed_toolbar: Some(ToolbarArea::SidebarBottom),
+            },
+            ToolbarPlacement::AddressBarEnd => Self {
+                single_toolbar: Some(ToolbarArea::SidebarUrlBar),
+                multiple_toolbars: Some(ToolbarArea::TopBarCenter),
+                collapsed_toolbar: Some(ToolbarArea::TopBarCenter),
+            },
+        }
+    }
+}
+
 /// Visual tone for a badge shown on a toolbar item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BadgeTone {
@@ -77,7 +153,9 @@ pub struct ToolbarItem {
     pub icon: String,
     pub command: String,
     pub command_args: Vec<(String, String)>,
+    pub kind: ToolbarItemKind,
     pub placement: ToolbarPlacement,
+    pub placement_rules: ToolbarPlacementRules,
     pub order: i32,
     pub badge: Option<ToolbarBadge>,
     pub visible: bool,

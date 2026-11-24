@@ -15,6 +15,7 @@ pub use registry::{
 };
 
 use crate::gallery::sections::render_section;
+use crate::ui::chrome::use_provide_chrome_view_state;
 use crate::ui::core_view::{use_core, use_provide_core};
 use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
 use crate::ui::page::use_provide_keymap;
@@ -52,6 +53,7 @@ impl App for GalleryApp {
         let gallery_core = use_hook(|| Arc::new(GalleryCore::new(initial_theme)));
         let core = use_provide_core(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>);
         let _theme_state = use_provide_theme(&core);
+        let _chrome_view_state = use_provide_chrome_view_state();
         let keymap = use_provide_keymap();
         let theme = use_theme();
 

@@ -13,17 +13,18 @@
 use crate::BrowserCore;
 use crate::commands::{Command, CommandDescriptor, CommandError, CommandResult, builtin_command_descriptors};
 use crate::contributions::{
-    BadgeTone, ContributionId, ContributionSource, Contributions, MenuEntry, MenuLocation, PaletteEntry,
-    SidePanelEntry, SidePanelId, SidePanelLayout, SidePanelSide, ToolbarBadge, ToolbarItem, ToolbarPlacement,
+    ContributionId, ContributionSource, Contributions, MenuEntry, MenuLocation, PaletteEntry, SidePanelEntry,
+    SidePanelId, SidePanelLayout, SidePanelSide, ToolbarArea, ToolbarItem, ToolbarItemKind, ToolbarPlacement,
+    ToolbarPlacementRules,
 };
 use crate::events::{Event, EventBus, Subscription};
 use crate::model::{
     Agent, AgentId, BrowserModel, ChatSite, ChatSiteId, Conversation, ConversationId, ConversationStatus,
     ConversationStep, Download, DownloadId, DownloadStatus, Essential, Folder, FolderId, HistoryEntry, HistoryEntryId,
-    InputMode, MediaSession, MediaSessionId, ModelEffort, ModelId, ModelInfo, PinnedTab, ServiceId, ServiceState,
-    ServiceStatus, Space, SpaceGradient, SpaceId, SplitDirection, SplitGroup, SplitGroupId, StepId, StepKind,
-    StepStatus, Tab, TabId, TabKind, ThemeOverrides, ThemeScheme, ThemeSettings, WhichKeyEntry, WhichKeyState, Window,
-    WindowId,
+    InputMode, LayoutSettings, MediaSession, MediaSessionId, ModelEffort, ModelId, ModelInfo, PinnedTab, ServiceId,
+    ServiceState, ServiceStatus, SidebarSide, Space, SpaceGradient, SpaceId, SplitDirection, SplitGroup, SplitGroupId,
+    StepId, StepKind, StepStatus, Tab, TabId, TabKind, ThemeOverrides, ThemeScheme, ThemeSettings, ToolbarLayout,
+    WhichKeyEntry, WhichKeyState, Window, WindowId,
 };
 use crate::tab_source::{TabSource, TabUpdate};
 use std::sync::{Arc, Mutex};
@@ -689,6 +690,84 @@ impl StubBackend {
         self.bus.publish(Event::SettingsChanged { theme: updated });
         Ok(())
     }
+
+    fn handle_layout_set_toolbar_layout(&self, layout: ToolbarLayout) -> CommandResult {
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.layout.toolbar_layout = layout;
+            state.model.layout.sidebar_expanded = !matches!(layout, ToolbarLayout::Collapsed);
+            state.model.layout.clone()
+        };
+        self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
+        Ok(())
+    }
+
+    fn handle_layout_set_compact_mode(&self, enabled: bool) -> CommandResult {
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.layout.compact_mode = enabled;
+            state.model.layout.clone()
+        };
+        self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
+        Ok(())
+    }
+
+    fn handle_sidebar_toggle_expanded(&self) -> CommandResult {
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let next_expanded = !state.model.layout.sidebar_expanded;
+            state.model.layout.sidebar_expanded = next_expanded;
+            state.model.layout.toolbar_layout = if next_expanded {
+                ToolbarLayout::Multiple
+            } else {
+                ToolbarLayout::Collapsed
+            };
+            state.model.layout.clone()
+        };
+        self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
+        Ok(())
+    }
+
+    fn handle_sidebar_set_expanded(&self, expanded: bool) -> CommandResult {
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.layout.sidebar_expanded = expanded;
+            if !expanded {
+                state.model.layout.toolbar_layout = ToolbarLayout::Collapsed;
+            } else if state.model.layout.toolbar_layout == ToolbarLayout::Collapsed {
+                state.model.layout.toolbar_layout = ToolbarLayout::Multiple;
+            }
+            state.model.layout.clone()
+        };
+        self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
+        Ok(())
+    }
+
+    fn handle_sidebar_set_side(&self, side: SidebarSide) -> CommandResult {
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.layout.sidebar_side = side;
+            state.model.layout.clone()
+        };
+        self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
+        Ok(())
+    }
+
+    fn handle_sidebar_set_width(&self, width: f32) -> CommandResult {
+        if !width.is_finite() {
+            return Err(CommandError::InvalidArgument {
+                command: "sidebar.set_width".to_string(),
+                message: "sidebar width must be a finite number".to_string(),
+            });
+        }
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.layout.sidebar_width = LayoutSettings::clamp_sidebar_width(width);
+            state.model.layout.clone()
+        };
+        self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
+        Ok(())
+    }
 }
 
 impl BrowserCore for StubBackend {
@@ -827,6 +906,12 @@ impl BrowserCore for StubBackend {
             } => self.handle_agent_send(conversation_id, agent_id, prompt),
             Command::WebChatAsk { site_id, prompt } => self.handle_webchat_ask(site_id, prompt),
             Command::ThemeSet { scheme, overrides } => self.handle_theme_set(scheme, overrides),
+            Command::LayoutSetToolbarLayout { layout } => self.handle_layout_set_toolbar_layout(layout),
+            Command::LayoutSetCompactMode { enabled } => self.handle_layout_set_compact_mode(enabled),
+            Command::SidebarToggleExpanded => self.handle_sidebar_toggle_expanded(),
+            Command::SidebarSetExpanded { expanded } => self.handle_sidebar_set_expanded(expanded),
+            Command::SidebarSetSide { side } => self.handle_sidebar_set_side(side),
+            Command::SidebarSetWidth { width } => self.handle_sidebar_set_width(width),
             Command::DebugCycleInputState => {
                 self.cycle_sample_input_state();
                 Ok(())
@@ -847,14 +932,20 @@ fn sample_contributions() -> Contributions {
     Contributions {
         toolbar_items: vec![
             ToolbarItem {
-                id: ContributionId::new("zendia.chat"),
-                title: "Chat".to_string(),
-                tooltip: Some("Open Agent Chat".to_string()),
-                icon: "chat".to_string(),
-                command: "panel.toggle".to_string(),
-                command_args: vec![("panel_id".to_string(), "zendia.agent".to_string())],
-                placement: ToolbarPlacement::NavigationEnd,
-                order: 10,
+                id: ContributionId::new("builtin.library"),
+                title: "Library".to_string(),
+                tooltip: Some("Open Library".to_string()),
+                icon: "library".to_string(),
+                command: "library.toggle".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::Button,
+                placement: ToolbarPlacement::SidebarBottom,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarBottom),
+                    multiple_toolbars: Some(ToolbarArea::SidebarBottom),
+                    collapsed_toolbar: Some(ToolbarArea::SidebarBottom),
+                },
+                order: -50,
                 badge: None,
                 visible: true,
                 enabled: true,
@@ -865,14 +956,37 @@ fn sample_contributions() -> Contributions {
                 title: "Agents".to_string(),
                 tooltip: Some("Show All Agent Runs".to_string()),
                 icon: "agents".to_string(),
-                command: "panel.toggle".to_string(),
-                command_args: vec![("panel_id".to_string(), "zendia.agents".to_string())],
+                command: "zendia.agents.toggle".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::Button,
                 placement: ToolbarPlacement::NavigationEnd,
-                order: 20,
-                badge: Some(ToolbarBadge {
-                    text: "1".to_string(),
-                    tone: BadgeTone::Warning,
-                }),
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarBottom),
+                    multiple_toolbars: Some(ToolbarArea::TopBarEnd),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
+                },
+                order: -30,
+                badge: None,
+                visible: true,
+                enabled: true,
+                source: ContributionSource::BuiltIn,
+            },
+            ToolbarItem {
+                id: ContributionId::new("zendia.chat"),
+                title: "Chat".to_string(),
+                tooltip: Some("Open Agent Chat".to_string()),
+                icon: "chat".to_string(),
+                command: "zendia.chat.toggle".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::PillButton,
+                placement: ToolbarPlacement::NavigationEnd,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarBottom),
+                    multiple_toolbars: Some(ToolbarArea::TopBarEnd),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
+                },
+                order: -20,
+                badge: None,
                 visible: true,
                 enabled: true,
                 source: ContributionSource::BuiltIn,
@@ -882,10 +996,156 @@ fn sample_contributions() -> Contributions {
                 title: "Web chat".to_string(),
                 tooltip: Some("Open Web Chat Panel".to_string()),
                 icon: "webchat".to_string(),
-                command: "panel.toggle".to_string(),
-                command_args: vec![("panel_id".to_string(), "zendia.webchat".to_string())],
+                command: "zendia.webchat.toggle".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::Button,
                 placement: ToolbarPlacement::NavigationEnd,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: None,
+                    multiple_toolbars: Some(ToolbarArea::TopBarEnd),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
+                },
+                order: -10,
+                badge: None,
+                visible: true,
+                enabled: true,
+                source: ContributionSource::BuiltIn,
+            },
+            ToolbarItem {
+                id: ContributionId::new("builtin.app_menu"),
+                title: "Application Menu".to_string(),
+                tooltip: Some("Open Application Menu".to_string()),
+                icon: "menu".to_string(),
+                command: "chrome.toggle_app_menu".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::AppMenu,
+                placement: ToolbarPlacement::SidebarTop,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarTopStart),
+                    multiple_toolbars: Some(ToolbarArea::TopBarEnd),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
+                },
+                order: 5,
+                badge: None,
+                visible: true,
+                enabled: true,
+                source: ContributionSource::BuiltIn,
+            },
+            ToolbarItem {
+                id: ContributionId::new("builtin.sidebar_toggle"),
+                title: "Toggle Sidebar".to_string(),
+                tooltip: Some("Expand or Collapse Sidebar".to_string()),
+                icon: "sidebar".to_string(),
+                command: "sidebar.toggle_expanded".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::Button,
+                placement: ToolbarPlacement::SidebarTop,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarTopStart),
+                    multiple_toolbars: Some(ToolbarArea::TopBarStart),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarStart),
+                },
+                order: 10,
+                badge: None,
+                visible: true,
+                enabled: true,
+                source: ContributionSource::BuiltIn,
+            },
+            ToolbarItem {
+                id: ContributionId::new("builtin.back"),
+                title: "Back".to_string(),
+                tooltip: Some("Go Back".to_string()),
+                icon: "back".to_string(),
+                command: "navigation.back".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::Button,
+                placement: ToolbarPlacement::NavigationStart,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarTopEnd),
+                    multiple_toolbars: Some(ToolbarArea::TopBarStart),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarStart),
+                },
+                order: 20,
+                badge: None,
+                visible: true,
+                enabled: true,
+                source: ContributionSource::BuiltIn,
+            },
+            ToolbarItem {
+                id: ContributionId::new("builtin.forward"),
+                title: "Forward".to_string(),
+                tooltip: Some("Go Forward".to_string()),
+                icon: "forward".to_string(),
+                command: "navigation.forward".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::Button,
+                placement: ToolbarPlacement::NavigationStart,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarTopEnd),
+                    multiple_toolbars: Some(ToolbarArea::TopBarStart),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarStart),
+                },
                 order: 30,
+                badge: None,
+                visible: true,
+                enabled: true,
+                source: ContributionSource::BuiltIn,
+            },
+            ToolbarItem {
+                id: ContributionId::new("builtin.reload"),
+                title: "Reload".to_string(),
+                tooltip: Some("Reload Page".to_string()),
+                icon: "reload".to_string(),
+                command: "navigation.reload".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::Button,
+                placement: ToolbarPlacement::NavigationStart,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarTopEnd),
+                    multiple_toolbars: Some(ToolbarArea::TopBarStart),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarStart),
+                },
+                order: 40,
+                badge: None,
+                visible: true,
+                enabled: true,
+                source: ContributionSource::BuiltIn,
+            },
+            ToolbarItem {
+                id: ContributionId::new("builtin.url_bar"),
+                title: "Address Bar".to_string(),
+                tooltip: Some("Search or Enter Address".to_string()),
+                icon: "search-glass".to_string(),
+                command: "location.focus".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::UrlBar,
+                placement: ToolbarPlacement::AddressBarEnd,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarUrlBar),
+                    multiple_toolbars: Some(ToolbarArea::TopBarCenter),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarCenter),
+                },
+                order: 50,
+                badge: None,
+                visible: true,
+                enabled: true,
+                source: ContributionSource::BuiltIn,
+            },
+            ToolbarItem {
+                id: ContributionId::new("builtin.new_tab"),
+                title: "New Tab".to_string(),
+                tooltip: Some("Open a New Tab".to_string()),
+                icon: "plus".to_string(),
+                command: "tab.new".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::Button,
+                placement: ToolbarPlacement::SidebarBottom,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarBottom),
+                    multiple_toolbars: Some(ToolbarArea::SidebarBottom),
+                    collapsed_toolbar: Some(ToolbarArea::SidebarBottom),
+                },
+                order: 90,
                 badge: None,
                 visible: true,
                 enabled: true,
@@ -1386,6 +1646,7 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         pending_keys: Vec::new(),
         which_key: None,
         theme: ThemeSettings::default(),
+        layout: LayoutSettings::default(),
     }
 }
 
@@ -1904,5 +2165,178 @@ mod tests {
             ),
             Err(CommandError::InvalidArgument { .. })
         ));
+    }
+
+    #[test]
+    fn layout_settings_defaults_and_commands_publish_events() {
+        use crate::model::{SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH};
+
+        let core = StubBackend::new();
+        let mut view_model = core.model();
+        let sub = core.subscribe();
+
+        assert_eq!(view_model.layout.toolbar_layout, ToolbarLayout::Single);
+        assert_eq!(view_model.layout.sidebar_side, SidebarSide::Left);
+        assert!(view_model.layout.sidebar_expanded);
+        assert_eq!(view_model.layout.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
+        assert!(!view_model.layout.compact_mode);
+        assert!(!view_model.layout.has_top_toolbar());
+        assert_eq!(view_model.layout.effective_sidebar_width(), SIDEBAR_DEFAULT_WIDTH);
+
+        core.invoke(Command::LayoutSetToolbarLayout {
+            layout: ToolbarLayout::Multiple,
+        })
+        .unwrap();
+        core.invoke(Command::SidebarSetSide {
+            side: SidebarSide::Right,
+        })
+        .unwrap();
+        core.invoke(Command::SidebarSetWidth { width: 260.0 }).unwrap();
+        core.invoke(Command::LayoutSetCompactMode { enabled: true }).unwrap();
+
+        while let Ok(event) = sub.try_recv() {
+            view_model.apply_event(&event);
+        }
+        assert_eq!(view_model.layout, core.model().layout);
+        assert_eq!(view_model.layout.toolbar_layout, ToolbarLayout::Multiple);
+        assert_eq!(view_model.layout.sidebar_side, SidebarSide::Right);
+        assert!(view_model.layout.sidebar_expanded);
+        assert!(view_model.layout.has_top_toolbar());
+        assert_eq!(view_model.layout.sidebar_width, 260.0);
+        assert!(view_model.layout.compact_mode);
+
+        // Collapsing sidebar switches to Collapsed layout and reports collapsed width.
+        core.invoke(Command::SidebarToggleExpanded).unwrap();
+        let collapsed = core.model().layout;
+        assert!(!collapsed.sidebar_expanded);
+        assert_eq!(collapsed.toolbar_layout, ToolbarLayout::Collapsed);
+        assert_eq!(collapsed.effective_sidebar_width(), SIDEBAR_COLLAPSED_WIDTH);
+        assert_eq!(collapsed.sidebar_width, 260.0);
+
+        // Expanding again switches to Multiple toolbars and restores expanded width.
+        core.invoke(Command::SidebarToggleExpanded).unwrap();
+        let expanded = core.model().layout;
+        assert!(expanded.sidebar_expanded);
+        assert_eq!(expanded.toolbar_layout, ToolbarLayout::Multiple);
+        assert_eq!(expanded.effective_sidebar_width(), 260.0);
+
+        // Width clamps to Zen's min/max bounds and rejects non-finite values.
+        core.invoke(Command::SidebarSetWidth { width: 20.0 }).unwrap();
+        assert_eq!(core.model().layout.sidebar_width, SIDEBAR_MIN_WIDTH);
+        core.invoke(Command::SidebarSetWidth { width: 900.0 }).unwrap();
+        assert_eq!(core.model().layout.sidebar_width, SIDEBAR_MAX_WIDTH);
+        assert!(matches!(
+            core.invoke(Command::SidebarSetWidth { width: f32::NAN }),
+            Err(CommandError::InvalidArgument { .. })
+        ));
+    }
+
+    #[test]
+    fn layout_commands_parse_from_name_and_args() {
+        assert_eq!(
+            Command::from_name_and_args(
+                "layout.set_toolbar_layout",
+                &[("layout".to_string(), "multiple".to_string())]
+            )
+            .unwrap(),
+            Command::LayoutSetToolbarLayout {
+                layout: ToolbarLayout::Multiple,
+            }
+        );
+        assert_eq!(
+            Command::from_name_and_args("sidebar.set_side", &[("side".to_string(), "right".to_string())]).unwrap(),
+            Command::SidebarSetSide {
+                side: SidebarSide::Right,
+            }
+        );
+        assert_eq!(
+            Command::from_name_and_args("sidebar.set_width", &[("width".to_string(), "220".to_string())]).unwrap(),
+            Command::SidebarSetWidth { width: 220.0 }
+        );
+        assert_eq!(
+            Command::from_name_and_args("sidebar.toggle_expanded", &[]).unwrap(),
+            Command::SidebarToggleExpanded
+        );
+        assert!(matches!(
+            Command::from_name_and_args(
+                "layout.set_toolbar_layout",
+                &[("layout".to_string(), "bogus".to_string())]
+            ),
+            Err(CommandError::InvalidArgument { .. })
+        ));
+    }
+
+    #[test]
+    fn builtin_toolbar_contributions_follow_layout_placement_rules() {
+        let core = StubBackend::new();
+        let model = core.model();
+        let items = &model.contributions.toolbar_items;
+
+        for expected in [
+            "builtin.back",
+            "builtin.forward",
+            "builtin.reload",
+            "builtin.url_bar",
+            "builtin.sidebar_toggle",
+            "builtin.new_tab",
+            "builtin.app_menu",
+            "builtin.library",
+            "zendia.chat",
+            "zendia.agents",
+            "zendia.webchat",
+        ] {
+            assert!(
+                items.iter().any(|item| item.id.as_str() == expected),
+                "missing built-in toolbar contribution `{expected}`"
+            );
+        }
+
+        let item = |id: &str| items.iter().find(|i| i.id.as_str() == id).unwrap();
+        let single = LayoutSettings {
+            toolbar_layout: ToolbarLayout::Single,
+            ..LayoutSettings::default()
+        };
+        let multiple = LayoutSettings {
+            toolbar_layout: ToolbarLayout::Multiple,
+            ..LayoutSettings::default()
+        };
+        let collapsed = LayoutSettings {
+            toolbar_layout: ToolbarLayout::Collapsed,
+            sidebar_expanded: false,
+            ..LayoutSettings::default()
+        };
+
+        assert_eq!(
+            single.resolve_toolbar_area(item("builtin.url_bar").placement_rules),
+            Some(ToolbarArea::SidebarUrlBar)
+        );
+        assert_eq!(
+            multiple.resolve_toolbar_area(item("builtin.url_bar").placement_rules),
+            Some(ToolbarArea::TopBarCenter)
+        );
+        assert_eq!(
+            single.resolve_toolbar_area(item("zendia.chat").placement_rules),
+            Some(ToolbarArea::SidebarBottom)
+        );
+        assert_eq!(
+            multiple.resolve_toolbar_area(item("zendia.chat").placement_rules),
+            Some(ToolbarArea::TopBarEnd)
+        );
+        assert_eq!(
+            single.resolve_toolbar_area(item("zendia.webchat").placement_rules),
+            None
+        );
+        assert_eq!(
+            collapsed.resolve_toolbar_area(item("zendia.webchat").placement_rules),
+            Some(ToolbarArea::TopBarEnd)
+        );
+        assert_eq!(
+            single.resolve_toolbar_area(item("builtin.app_menu").placement_rules),
+            Some(ToolbarArea::SidebarTopStart)
+        );
+        assert_eq!(
+            multiple.resolve_toolbar_area(item("builtin.app_menu").placement_rules),
+            Some(ToolbarArea::TopBarEnd)
+        );
     }
 }
