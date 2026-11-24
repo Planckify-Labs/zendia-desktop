@@ -1,0 +1,52 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+# Zendia's own CI. It lives beside upstream's workflows, which we leave untouched.
+name: Zendia CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fork-surface:
+    name: Changes to upstream files are listed in Zendia/FORK.md
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream Ladybird
+        run: |
+          git remote add upstream https://github.com/LadybirdBrowser/ladybird.git || true
+          git fetch --no-tags upstream master
+
+      - name: Check the fork surface
+        run: Zendia/Meta/fork-surface.sh upstream/master
+
+  workspace:
+    name: Zendia workspace (format, clippy, tests)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: Zendia
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the libraries Freya builds against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      # rustup reads the toolchain that rust-toolchain.toml at the root of the tree pins.
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Tests
+        run: cargo test --workspace

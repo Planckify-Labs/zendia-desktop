@@ -1,0 +1,12 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+[package]
+name = "zendia-automation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The client side of the Automation World: element references and page snapshots"
+
+[dependencies]

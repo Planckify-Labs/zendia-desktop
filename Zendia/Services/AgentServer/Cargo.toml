@@ -1,0 +1,16 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+[package]
+name = "zendia-agent-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runs one AI agent session: the model loop, the MCP server and the run trace. It holds the model API keys."
+
+[[bin]]
+name = "zendia-agent-server"
+path = "src/main.rs"
+
+[dependencies]

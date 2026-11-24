@@ -1,0 +1,12 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+[package]
+name = "zendia-module-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The contract plugins and extensions use to add commands, UI and keymaps"
+
+[dependencies]

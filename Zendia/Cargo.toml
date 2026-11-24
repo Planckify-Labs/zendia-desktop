@@ -1,0 +1,37 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+# Zendia's code is a Cargo workspace of its own. Cargo finds it before the engine's workspace at the root of the tree, so
+# the engine's Cargo.toml needs no change, and our dependencies stay out of the engine's Cargo.lock.
+[workspace]
+members = [
+    "Libraries/Automation",
+    "Libraries/BrowserCore",
+    "Libraries/Keymap",
+    "Libraries/ModuleApi",
+    "Libraries/Sandbox",
+    "Libraries/Service",
+    "Services/AgentServer",
+    "Services/ExtensionServer",
+    "Services/InputServer",
+    "Services/PluginHost",
+    "UI/Headless",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[workspace.dependencies]
+# The engine's crates, used by path so that we share its code instead of copying it.
+libipc_rust = { path = "../Libraries/LibIPC/Rust" }
+
+zendia-automation = { path = "Libraries/Automation" }
+zendia-browser-core = { path = "Libraries/BrowserCore" }
+zendia-keymap = { path = "Libraries/Keymap" }
+zendia-module-api = { path = "Libraries/ModuleApi" }
+zendia-sandbox = { path = "Libraries/Sandbox" }
+zendia-service = { path = "Libraries/Service" }

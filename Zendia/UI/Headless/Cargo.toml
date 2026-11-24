@@ -1,0 +1,16 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+[package]
+name = "zendia-headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runs the browser core without a window, for agents and automation."
+
+[[bin]]
+name = "zendia-headless"
+path = "src/main.rs"
+
+[dependencies]

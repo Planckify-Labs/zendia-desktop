@@ -5,8 +5,8 @@ browser out of the box, and vim control is something users turn on. Following La
 process: the keymap engine, AI agents, plugins and extensions. They all drive the browser through one command registry
 in the UI process, and Ladybird's own processes stay as upstream ships them, so the fork stays easy to merge.
 
-This is the proposed design, written on 24 November 2026. Nothing here is built yet except the Freya UI's first steps
-(`UI/Freya` on the `freya-ui` branch) and cgx-webext, which lives in its own repository.
+This is the proposed design, written on 24 November 2026. The `Zendia/` layout below exists, but its crates are
+placeholders so far. cgx-webext lives in its own repository.
 
 ## Design rules
 
@@ -279,7 +279,7 @@ zendia/                            the fork repo
 │   ├── Protocols/                 .ipc files: our services + embedder channel
 │   ├── Libraries/
 │   │   ├── BrowserCore/           command registry, browser model, events, profile data
-│   │   ├── HubProtocol/           client for upstream's Hub (today UI/Freya/hub-protocol)
+│   │   ├── HubProtocol/           client for upstream's Hub
 │   │   ├── ModuleApi/             contract for plugins and extensions
 │   │   ├── Keymap/                keymap engine, profiles, compiled tables
 │   │   ├── Automation/            Automation World client: element refs, snapshots
@@ -291,7 +291,7 @@ zendia/                            the fork repo
 │   │   ├── PluginHost/
 │   │   └── ExtensionServer/       hosts cgx-webext core + adapter
 │   ├── UI/
-│   │   ├── Freya/                 the window (today UI/Freya)
+│   │   ├── Freya/                 the window (the zendia executable)
 │   │   └── Headless/              browser core without a window
 │   ├── Base/res/
 │   │   ├── keyboard/              standard.toml (default), vim.toml
@@ -334,8 +334,8 @@ upstream crates such as `libipc_rust` by path, so we use the engine's code rathe
 Each step builds on the one before it. The agent comes last because by then it is mostly a loop over commands and hooks
 that the keyboard and plugins have already tested.
 
-1. **Fork setup.** Upstream remote, the weekly merge, `FORK.md` and the fork-surface CI check. Revert build edits to
-   upstream files that are no longer needed, such as the `UI/Freya` exclude in the root `Cargo.toml`.
+1. **Fork setup.** Upstream remote, the weekly merge, `FORK.md` and the fork-surface CI check. Done: see
+   `Zendia/Meta/` and `.github/workflows/zendia-ci.yml`. Adding the `upstream` remote waits for Zendia's own repository.
 2. **Browser core in the UI process.** Command registry and browser model as Rust crates. The Freya app becomes a view
    on them.
 3. **A service template.** Rust LibIPC endpoints, launch from the UI process, a sandbox profile and restart on crash, so

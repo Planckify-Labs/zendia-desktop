@@ -1,0 +1,16 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+[package]
+name = "zendia-input-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runs the keymap engine: builds key tables for the UI process and handles counts, macros, the `:` command line and profile scripts."
+
+[[bin]]
+name = "zendia-input-server"
+path = "src/main.rs"
+
+[dependencies]

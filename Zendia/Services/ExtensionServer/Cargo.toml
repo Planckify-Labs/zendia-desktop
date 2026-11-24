@@ -1,0 +1,16 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+[package]
+name = "zendia-extension-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hosts the cgx-webext core and the adapter between its typed contract and the Module API."
+
+[[bin]]
+name = "zendia-extension-server"
+path = "src/main.rs"
+
+[dependencies]

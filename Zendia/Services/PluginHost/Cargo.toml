@@ -1,0 +1,16 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+[package]
+name = "zendia-plugin-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runs one plugin in its sandbox, with only the capabilities the user approved."
+
+[[bin]]
+name = "zendia-plugin-host"
+path = "src/main.rs"
+
+[dependencies]
