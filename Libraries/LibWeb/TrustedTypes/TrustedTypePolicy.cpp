@@ -13,6 +13,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/SanitizerConfiguration.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/Internals/ExtensionWorld.h>
 #include <LibWeb/TrustedTypes/RequireTrustedTypesForDirective.h>
 #include <LibWeb/TrustedTypes/TrustedHTML.h>
 #include <LibWeb/TrustedTypes/TrustedHTMLParserOptions.h>
@@ -217,14 +218,17 @@ WebIDL::ExceptionOr<Utf16String> get_trusted_type_compliant_string(TrustedTypeNa
     if (input_is_expected_type || !does_sink_require_trusted_types(global, sink_group, IncludeReportOnlyPolicies::Yes))
         return stringified(input);
 
-    // AD-HOC (cgx-webext): Content scripts load their extension's web-accessible scripts into pages (<script src=
-    //                      "chrome-extension://...">). In Chrome and Firefox they run in an isolated world that the page's
-    //                      Trusted Types policy does not govern; ours share the page's world, so script URLs into an
-    //                      extension are let through. The page cannot change what an extension's file contains, and the
-    //                      browser serves it only if the extension made it web accessible.
-    if (expected_type == TrustedTypeName::TrustedScriptURL) {
-        if (auto const* url = input.get_pointer<Utf16String>(); url && (url->starts_with("chrome-extension://"sv) || url->starts_with("moz-extension://"sv)))
-            return *url;
+    // AD-HOC (cgx-webext): The page's Trusted Types policy governs the page's script. The content scripts of a browser
+    //                      extension run in a world of their own, which is governed by the extension's policy: they set
+    //                      innerHTML and script URLs on pages that require trusted types, in Chrome and in Firefox.
+    if (auto* current_realm = global.vm().current_realm(); current_realm && Internals::ExtensionWorld::is_extension_realm(*current_realm)) {
+        return input.visit(
+            [](auto const& value) {
+                return value->to_string();
+            },
+            [](Utf16String const& value) {
+                return value;
+            });
     }
 
     auto input_abi = input_to_abi(input);

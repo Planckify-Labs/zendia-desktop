@@ -61,6 +61,7 @@
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/IndexedDB/IDBFactory.h>
 #include <LibWeb/Infra/SerializedURL.h>
+#include <LibWeb/Internals/ExtensionWorld.h>
 #include <LibWeb/LargestContentfulPaint/LargestContentfulPaint.h>
 #include <LibWeb/Loader/LoaderConfig.h>
 #include <LibWeb/Page/Page.h>
@@ -886,7 +887,10 @@ WebIDL::ExceptionOr<i32> WindowOrWorkerGlobalScopeMixin::run_timer_initializatio
         //    handler). If this throws an exception, catch it and return 0.
         auto const& source = handler.get<Utf16String>();
         auto handler_primitive_string = JS::PrimitiveString::create(this_impl().vm(), source);
-        if (ContentSecurityPolicy::ensure_csp_does_not_block_string_compilation(relevant_realm(*this), {}, source, source, JS::CompilationType::Timer, {}, handler_primitive_string).is_throw_completion())
+        // AD-HOC (cgx-webext): A browser extension's world is not governed by the page's policy.
+        auto const* current_realm = this_impl().vm().current_realm();
+        if (!(current_realm && Internals::ExtensionWorld::is_extension_realm(*current_realm))
+            && ContentSecurityPolicy::ensure_csp_does_not_block_string_compilation(relevant_realm(*this), {}, source, source, JS::CompilationType::Timer, {}, handler_primitive_string).is_throw_completion())
             return 0;
     }
     auto function_or_string = move(handler).downcast<GC::Ref<WebIDL::CallbackType>, Utf16String>();
@@ -922,7 +926,7 @@ WebIDL::ExceptionOr<i32> WindowOrWorkerGlobalScopeMixin::run_timer_initializatio
         throttling_class = TimerThrottlingClass::Immediate;
 
     // 7. Let initiating script be the active script.
-    auto const* initiating_script = Web::Bindings::active_script();
+    auto* initiating_script = Web::Bindings::active_script();
 
     // FIXME: 8. Let uniqueHandle be null.
 
@@ -943,8 +947,13 @@ WebIDL::ExceptionOr<i32> WindowOrWorkerGlobalScopeMixin::run_timer_initializatio
             // 5. If handler is a Function, then invoke handler given arguments and "report", and with callback this value set to thisArg.
             [&](GC::Root<WebIDL::CallbackType> const& callback) {
                 auto this_value = [&]() -> JS::Value {
-                    if (auto* window = as_if<Window>(self.this_impl()))
+                    if (auto* window = as_if<Window>(self.this_impl())) {
+                        // AD-HOC (cgx-webext): A callback of a browser extension's world gets that world's `window`,
+                        //                      not the page's.
+                        if (auto world = Internals::ExtensionWorld::from_realm(callback->callback->shape().realm()))
+                            return &world->window_proxy_object();
                         return &window->window()->object();
+                    }
                     auto& realm = relevant_realm(self);
                     return Bindings::wrap(Bindings::host_defined_wrapper_world(realm), realm, GC::Ref { self.this_impl() });
                 }();
@@ -955,7 +964,10 @@ WebIDL::ExceptionOr<i32> WindowOrWorkerGlobalScopeMixin::run_timer_initializatio
                 // 1. Assert: handler is a string.
 
                 // 2. Let settings object be global's relevant settings object.
-                auto& settings_object = relevant_settings_object(self);
+                // AD-HOC (cgx-webext): Code that a browser extension's world passed as a string runs in that world.
+                auto& settings_object = initiating_script && Internals::ExtensionWorld::is_extension_realm(initiating_script->settings_object().realm())
+                    ? initiating_script->settings_object()
+                    : relevant_settings_object(self);
 
                 // 3. Let fetch options be the default classic script fetch options.
                 auto options = default_script_fetch_options();

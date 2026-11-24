@@ -102,9 +102,11 @@ void report_content_security_policy_violations_for_request(Fetch::Infrastructure
 
 // https://w3c.github.io/webappsec-csp/#should-block-request
 // AD-HOC (cgx-webext): Files of browser extensions are not governed by the page's policy, as in Chrome and Firefox: content
-//                      scripts insert <link> and <script> elements for their web-accessible files into pages whose CSP
-//                      does not list the extension. Whether the page may have the file is decided when it is served
-//                      (web_accessible_resources).
+//                      scripts insert <link>, <script> and <img> elements, and stylesheets with fonts and images, for their
+//                      web-accessible files into pages whose CSP does not list the extension. Those elements and requests
+//                      belong to the page's document and world even when an isolated-world script made them, so this
+//                      cannot depend on who made the request. Whether the page may have the file is decided when it is
+//                      served (web_accessible_resources).
 static bool is_extension_resource(Fetch::Infrastructure::Request const& request)
 {
     auto const& scheme = request.current_url().scheme();

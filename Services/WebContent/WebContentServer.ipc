@@ -309,7 +309,7 @@ endpoint WebContentServer routed by Web::PageId page_id
     // did_report_extension_network_stage.
     set_extension_network_interest(u32 stages) =|
     extension_network_answer(u64 token, String answer_json) =|
-    run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, u64 token) =|
+    run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, String world, u64 token) =|
 
     set_system_visibility_state(Web::PageId page_id, Web::HTML::VisibilityState system_visibility_state) =|
     update_visibility_state(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::VisibilityState visibility_state) =|

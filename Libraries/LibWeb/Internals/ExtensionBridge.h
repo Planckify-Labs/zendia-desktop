@@ -19,18 +19,30 @@
 
 namespace Web::Internals {
 
+class ExtensionWorld;
+
 // AD-HOC (cgx-webext): Connects extension JavaScript to the extension core in the browser process.
 //
 // An extension's own pages (background page, popup, options) get one as `__cgxBridge`, which Shim/boot.js consumes.
 // Content scripts get one per extension that is handed to their program as an argument and is never put on the page's
-// global object. The browser process decides what each bridge may do; nothing the renderer says is trusted there.
+// global object. They run in an isolated world of the document, an ExtensionWorld, and the bridge is wrapped there only.
+// The browser process decides what each bridge may do; nothing the renderer says is trusted there.
 class WEB_API ExtensionBridge final : public InternalsBase {
     WEB_WRAPPABLE(ExtensionBridge, InternalsBase);
     GC_DECLARE_ALLOCATOR(ExtensionBridge);
 
 public:
+    // What a bridge serves.
+    enum class Kind : u8 {
+        Page,           // An extension's own page, in the page's world.
+        ContentScripts, // An extension's content scripts in its isolated world of a document.
+        MainScripts,    // Content scripts with `world: "MAIN"`: they run in the page's world and are given no API at all.
+        StorePage,      // The program of an extension store's page (see Shim/store-*.js), in the page's world.
+    };
+
     // `extension_id` is empty for an extension's own page.
     static GC::Ref<ExtensionBridge> create(HTML::Window&, String extension_id);
+    static GC::Ref<ExtensionBridge> create(HTML::Window&, String extension_id, Kind, GC::Ptr<ExtensionWorld>);
     virtual ~ExtensionBridge() override;
 
     static bool is_extension_origin(URL::Origin const&);
@@ -41,6 +53,8 @@ public:
     static void inject_content_scripts(DOM::Document&);
     // Tells the content scripts of the document that a later stage ("document_end", "document_idle") was reached.
     static void run_content_script_stage(DOM::Document&, StringView stage);
+    // Called when the document is destroyed: lets go of the isolated worlds of its content scripts.
+    static void document_destroyed(DOM::Document&);
 
     // Code an extension injects with scripting.executeScript, tabs.executeScript or insertCSS.
     struct Injection {
@@ -48,6 +62,7 @@ public:
         String code;    // The script (a classic script, run for its completion value) or the stylesheet.
         String binding; // For "js": the global property the code reads the extension's API from, and deletes at once.
         String run_at;  // "document_start", "document_end" or "document_idle".
+        String world;   // "ISOLATED" (the default) or "MAIN", for "js".
         u64 token { 0 };
     };
     // Runs an injection in the document, in the extension's content-script context. If the extension has none there yet,
@@ -63,22 +78,35 @@ public:
     // From the browser process.
     void complete_call(u64 request_id, bool ok, String const& json);
     void deliver(String const& json);
+    // Defines the globals Firefox gives content scripts for crossing into the page (see ExtensionWorld).
+    void install_firefox_helpers();
 
     String const& extension_id() const { return m_extension_id; }
 
 private:
-    ExtensionBridge(HTML::Window&, String extension_id);
+    ExtensionBridge(HTML::Window&, String extension_id, Kind, GC::Ptr<ExtensionWorld>);
     virtual void visit_edges(GC::Cell::Visitor&) override;
 
+    // The realm the bridge's objects (promises, handlers) belong to: the isolated world's, else the page's.
+    JS::Realm& bridge_realm() const;
+    // Tells the content scripts that a stage of loading was reached.
+    void run_stage(StringView stage);
+
     HTML::CrossProcessId document_id() const;
-    // Evaluates a content-script program and calls it with a new bridge for the extension.
-    static GC::Ptr<ExtensionBridge> start_program(DOM::Document&, String const& extension_id, String const& program);
+    // Evaluates a content-script program in the world `kind` says and calls it with a new bridge for the extension.
+    static GC::Ptr<ExtensionBridge> start_program(DOM::Document&, String const& extension_id, String const& program, Kind);
+    // The key the document knows the bridge of an extension's `kind` of content scripts by.
+    static String document_key(String const& extension_id, Kind);
     void execute(Injection const&);
     void run_due_injections();
     Vector<Injection> m_deferred_injections;
 
     String m_extension_id;
+    Kind m_kind { Kind::Page };
+    GC::Ptr<ExtensionWorld> m_world;
     GC::Ptr<WebIDL::CallbackType> m_message_handler;
+    // For MainScripts: what the program returned, which runs the scripts of a stage.
+    GC::Ptr<JS::FunctionObject> m_stage_runner;
     HashMap<u64, GC::Ref<WebIDL::Promise>> m_pending_calls;
     u64 m_next_request_id { 1 };
 };

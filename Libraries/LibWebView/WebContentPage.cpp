@@ -4333,6 +4333,7 @@ void run_extension_injection_in_tab(StringView extension_id, JsonObject const& a
     auto code = args.get_string("code"sv).value_or({});
     auto binding = args.get_string("binding"sv).value_or({});
     auto run_at = args.get_string("runAt"sv).value_or("document_idle"_string);
+    auto world = args.get_string("world"sv).value_or("ISOLATED"_string);
 
     Vector<ExtensionFrame> targets;
     for (auto& frame : frames_of_view(*view)) {
@@ -4351,7 +4352,7 @@ void run_extension_injection_in_tab(StringView extension_id, JsonObject const& a
     pending_injections().set(token, move(pending));
 
     for (auto const& frame : targets)
-        frame.page->run_extension_injection(frame.document_id, extension_id, setup, kind, code, binding, run_at, token);
+        frame.page->run_extension_injection(frame.document_id, extension_id, setup, kind, code, binding, run_at, world, token);
 }
 
 // "__inject.result" [token, ok, value]: the answer of one document.
@@ -4383,12 +4384,12 @@ static void extension_injection_result(ByteString const& extension_id, Web::HTML
         finish_injection(*token);
 }
 
-void WebContentPage::run_extension_injection(Web::HTML::CrossProcessId document_id, ByteString const& extension_id, String const& setup_program, String const& kind, String const& code, String const& binding, String const& run_at, u64 token)
+void WebContentPage::run_extension_injection(Web::HTML::CrossProcessId document_id, ByteString const& extension_id, String const& setup_program, String const& kind, String const& code, String const& binding, String const& run_at, String const& world, u64 token)
 {
     auto& grants = m_extension_injection_grants.ensure(document_id);
     if (!grants.contains_slow(extension_id))
         grants.append(extension_id);
-    async_run_extension_injection(document_id, MUST(String::from_byte_string(extension_id)), setup_program, kind, code, binding, run_at, token);
+    async_run_extension_injection(document_id, MUST(String::from_byte_string(extension_id)), setup_program, kind, code, binding, run_at, world, token);
 }
 
 void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId document_id, String extension_id_or_empty, u64 request_id, String name, String args_json)

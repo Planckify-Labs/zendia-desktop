@@ -626,6 +626,7 @@ set(SOURCES
     Internals/Internals.cpp
     Internals/InternalsBase.cpp
     Internals/ExtensionBridge.cpp
+    Internals/ExtensionWorld.cpp
     Internals/WebUI.cpp
     IntersectionObserver/IntersectionObserver.cpp
     IntersectionObserver/IntersectionObserverEntry.cpp

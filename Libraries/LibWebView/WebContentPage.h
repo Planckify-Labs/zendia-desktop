@@ -431,7 +431,7 @@ private:
 public:
     // Runs code an extension injects in one of this page's documents, which may then start the extension's content-script
     // context there although no content script of it matches.
-    void run_extension_injection(Web::HTML::CrossProcessId document_id, ByteString const& extension_id, String const& setup_program, String const& kind, String const& code, String const& binding, String const& run_at, u64 token);
+    void run_extension_injection(Web::HTML::CrossProcessId document_id, ByteString const& extension_id, String const& setup_program, String const& kind, String const& code, String const& binding, String const& run_at, String const& world, u64 token);
 
 private:
     void extension_contexts_destroyed(Web::HTML::CrossProcessId document_id);

@@ -189,7 +189,10 @@ GC::Ref<JS::HostObject> wrap(WrapperWorld& wrapper_world, JS::Realm& preferred_r
     auto wrapper = wrappable->create_wrapper(actual_wrapper_realm);
     if (auto* element = as_if<DOM::Element>(wrappable.ptr()))
         set_prototype_from_custom_element_definition_if_needed(*element, wrapper);
-    wrapper_world.set_wrapper(wrappable, wrapper);
+    // AD-HOC (cgx-webext): Script of a world whose document is gone can still run for a moment (a promise job that was
+    //                      already queued, a callback of an aborted fetch). It gets wrappers that nothing caches or keeps.
+    if (!wrapper_world.is_detached())
+        wrapper_world.set_wrapper(wrappable, wrapper);
     return wrapper;
 }
 

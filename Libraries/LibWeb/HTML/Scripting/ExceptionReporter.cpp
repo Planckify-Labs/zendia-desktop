@@ -19,6 +19,7 @@
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
+#include <LibWeb/Internals/ExtensionWorld.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/WebDriver/BiDi/BiDi.h>
 #include <LibWeb/WebIDL/DOMException.h>
@@ -82,6 +83,14 @@ void report_an_exception(JS::Object& global, JS::Value exception, Optional<Error
 {
     auto& realm = relevant_realm(global);
     auto& vm = realm.vm();
+
+    // AD-HOC (cgx-webext): An error of a browser extension's world is the extension's, and fires in that world only, as in
+    //                      Chrome. It must not reach the page's `error` handlers, which would learn what extensions run.
+    if (Internals::ExtensionWorld::is_extension_realm(realm)) {
+        auto info = extract_error_information(vm, exception);
+        dbgln("Uncaught error in a browser extension's content script: {} ({}:{}:{})", info.message, info.filename, info.lineno, info.colno);
+        return;
+    }
 
     // NB: Whatever comes out of an aborted script is no error of its own.
     if (vm.interrupt_requested())

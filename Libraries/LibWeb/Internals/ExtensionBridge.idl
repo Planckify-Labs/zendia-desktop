@@ -8,4 +8,6 @@ interface ExtensionBridge {
     Promise<DOMString> call(DOMString name, DOMString argsJson);
     DOMString callSync(DOMString name, DOMString argsJson);
     undefined setMessageHandler(ExtensionBridgeMessageHandler handler);
+    // Firefox extensions: cloneInto, exportFunction, createObjectIn and wrappedJSObject in this content-script world.
+    undefined installFirefoxHelpers();
 };

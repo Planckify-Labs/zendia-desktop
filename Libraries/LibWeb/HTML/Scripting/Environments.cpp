@@ -28,6 +28,7 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/Scripting/WindowEnvironmentSettingsObject.h>
+#include <LibWeb/Internals/ExtensionWorld.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/HTML/WorkerAgentParent.h>
@@ -460,6 +461,12 @@ Window& incumbent_window()
 // https://whatpr.org/html/9893/webappapis.html#concept-realm-settings-object
 EnvironmentSettingsObject& principal_realm_settings_object(JS::Realm& realm)
 {
+    // AD-HOC (cgx-webext): The realm of a browser extension's isolated world has a settings object of its own, which is the
+    //                      page's in every respect but its realm and module map. Callbacks, promise jobs and scripts of
+    //                      the world have to run in that realm, so it is the world's settings object that is incumbent.
+    if (auto world = Internals::ExtensionWorld::from_realm(realm))
+        return world->settings();
+
     // A principal realm has a [[HostDefined]] field, which contains the principal realm's settings object.
     auto& host_defined = Bindings::host_defined_of(realm);
     if (host_defined.is_principal_host_defined())

@@ -300,6 +300,60 @@ void Application::start_extension_background_pages()
     // Rules that came with the packages were loaded before there was an event loop to tell the renderers on.
     m_extensions_started = true;
     extension_network_interest_changed();
+
+    // AD-HOC (cgx-webext): The Qt UI reports its windows and tabs to the extension core. A headless run has no such UI, so
+    //                      its views are reported as the tabs of one window; without that, tabs.* and scripting.executeScript
+    //                      have nothing to act on and cannot be run in a headless test.
+    if (m_browser_options.headless_mode.has_value()) {
+        static RefPtr<Core::Timer> s_headless_state_timer;
+        s_headless_state_timer = Core::Timer::create_repeating(AK::Duration::from_milliseconds(50), [this] {
+            if (!m_extension_manager)
+                return;
+            JsonArray tabs;
+            bool first = true;
+            ViewImplementation::for_each_view([&](ViewImplementation& view) {
+                if (is_extension_background_view(view.view_id()) || view.owner_view_id().has_value())
+                    return IterationDecision::Continue;
+                JsonObject entry;
+                entry.set("id"sv, static_cast<i64>(view.view_id()));
+                entry.set("active"sv, first);
+                entry.set("pinned"sv, false);
+                entry.set("url"sv, view.url().serialize());
+                entry.set("title"sv, view.title().to_utf8());
+                entry.set("status"sv, view.is_loading() ? "loading"sv : "complete"sv);
+                entry.set("muted"sv, false);
+                entry.set("zoom"sv, view.zoom_level());
+                entry.set("width"sv, static_cast<i64>(view.viewport_size().width().value()));
+                entry.set("height"sv, static_cast<i64>(view.viewport_size().height().value()));
+                MUST(tabs.append(move(entry)));
+                first = false;
+                return IterationDecision::Continue;
+            });
+            JsonObject window;
+            window.set("id"sv, 1);
+            window.set("type"sv, "normal"sv);
+            window.set("state"sv, "normal"sv);
+            window.set("focused"sv, true);
+            window.set("incognito"sv, false);
+            window.set("left"sv, 0);
+            window.set("top"sv, 0);
+            window.set("width"sv, m_browser_options.window_width);
+            window.set("height"sv, m_browser_options.window_height);
+            window.set("tabs"sv, move(tabs));
+            JsonArray windows;
+            MUST(windows.append(move(window)));
+            JsonObject root;
+            root.set("windows"sv, move(windows));
+            root.set("lastFocusedWindowId"sv, 1);
+            auto state = root.serialized().to_byte_string();
+            static ByteString s_last_reported;
+            if (state == s_last_reported)
+                return;
+            s_last_reported = state;
+            (void)m_extension_manager->host_event("browserState"sv, state);
+        });
+        s_headless_state_timer->start();
+    }
 }
 
 void Application::start_extension_background_page(ByteString const& id, ExtensionStartReason reason)

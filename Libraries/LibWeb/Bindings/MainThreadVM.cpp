@@ -72,6 +72,7 @@
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/HTML/WorkletGlobalScope.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
+#include <LibWeb/Internals/ExtensionWorld.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
@@ -278,6 +279,11 @@ void initialize_agent(HTML::AgentType type)
 
     // 8.1.6.2 HostEnsureCanCompileStrings(realm, parameterStrings, bodyString, codeString, compilationType, parameterArgs, bodyArg), https://html.spec.whatwg.org/multipage/webappapis.html#hostensurecancompilestrings(realm,-parameterstrings,-bodystring,-codestring,-compilationtype,-parameterargs,-bodyarg)
     vm.host_ensure_can_compile_strings = [](JS::Realm& realm, ReadonlySpan<Utf16String> parameter_strings, Utf16View body_string, Utf16View code_string, JS::CompilationType compilation_type, ReadonlySpan<JS::Value> parameter_args, JS::Value body_arg) -> JS::ThrowCompletionOr<void> {
+        // AD-HOC (cgx-webext): The page's policy governs the page's script. The content scripts of a browser extension, which
+        //                      have a world of their own, are governed by the extension's, as in Chrome and Firefox.
+        if (Internals::ExtensionWorld::is_extension_realm(realm))
+            return {};
+
         // 1. Perform ? EnsureCSPDoesNotBlockStringCompilation(realm, parameterStrings, bodyString, codeString, compilationType, parameterArgs, bodyArg). [CSP]
         return ContentSecurityPolicy::ensure_csp_does_not_block_string_compilation(realm, parameter_strings, body_string, code_string, compilation_type, parameter_args, body_arg);
     };
@@ -324,6 +330,11 @@ void initialize_agent(HTML::AgentType type)
         // 3. Let settingsObject be the current settings object.
         // 4. If script is not null, then set settings object to script's settings object.
         auto& settings_object = script ? script->settings_object() : HTML::current_settings_object();
+
+        // AD-HOC (cgx-webext): The promises of a browser extension's world are the extension's: the page's
+        //                      unhandledrejection handlers do not hear about them.
+        if (Internals::ExtensionWorld::is_extension_realm(settings_object.realm()))
+            return;
 
         auto track_promise_rejection = [&](auto& global_mixin) {
             // 5. Let global be settingsObject's global object.

@@ -292,7 +292,7 @@ private:
     virtual void deliver_extension_message(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String json) override;
     virtual void set_extension_network_interest(u32 stages) override;
     virtual void extension_network_answer(u64 token, String answer_json) override;
-    virtual void run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, u64 token) override;
+    virtual void run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, String world, u64 token) override;
     virtual void set_system_visibility_state(Web::PageId page_id, Web::HTML::VisibilityState) override;
     virtual void set_browsing_context_group(Web::PageId page_id, u64 browsing_context_group_id) override;
     virtual void update_visibility_state(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::VisibilityState) override;

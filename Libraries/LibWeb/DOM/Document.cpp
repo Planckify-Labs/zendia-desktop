@@ -6467,6 +6467,9 @@ void Document::destroy()
         m_html_parser_end_state = nullptr;
     }
 
+    // AD-HOC (cgx-webext): The isolated worlds of browser extensions' content scripts go away with the document.
+    Internals::ExtensionBridge::document_destroyed(*this);
+
     // AD-HOC: Mark this document as destroyed so we can remove tasks from the queue that will never be able to run.
     m_has_been_destroyed = true;
     rendering_pending_document_changed(*this);

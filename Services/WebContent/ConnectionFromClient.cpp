@@ -3912,10 +3912,10 @@ void ConnectionFromClient::extension_network_answer(u64 token, String answer_jso
     Web::ExtensionNetwork::did_receive_answer(token, answer_json);
 }
 
-void ConnectionFromClient::run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, u64 token)
+void ConnectionFromClient::run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, String world, u64 token)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->run_extension_injection(document_id, extension_id, setup_program, { .kind = move(kind), .code = move(code), .binding = move(binding), .run_at = move(run_at), .token = token });
+        page->run_extension_injection(document_id, extension_id, setup_program, { .kind = move(kind), .code = move(code), .binding = move(binding), .run_at = move(run_at), .world = move(world), .token = token });
 }
 
 void ConnectionFromClient::toggle_media_play_state(Web::PageId page_id)
