@@ -10,6 +10,42 @@ use crate::contributions::SidePanelId;
 use crate::model::{AgentId, ChatSiteId, ConversationId, SpaceId, SplitDirection, TabId, ThemeOverrides, ThemeScheme};
 use std::fmt;
 
+/// Context-menu action applied to an HTML audio or video element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaAction {
+    TogglePlay,
+    ToggleMute,
+    ToggleControls,
+    ToggleLoop,
+    TogglePictureInPicture,
+    ToggleFullscreen,
+}
+
+impl MediaAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TogglePlay => "toggle_play",
+            Self::ToggleMute => "toggle_mute",
+            Self::ToggleControls => "toggle_controls",
+            Self::ToggleLoop => "toggle_loop",
+            Self::TogglePictureInPicture => "toggle_pip",
+            Self::ToggleFullscreen => "toggle_fullscreen",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "toggle_play" => Some(Self::TogglePlay),
+            "toggle_mute" => Some(Self::ToggleMute),
+            "toggle_controls" => Some(Self::ToggleControls),
+            "toggle_loop" => Some(Self::ToggleLoop),
+            "toggle_pip" => Some(Self::TogglePictureInPicture),
+            "toggle_fullscreen" => Some(Self::ToggleFullscreen),
+            _ => None,
+        }
+    }
+}
+
 /// Every action a view, keymap, palette, plugin, extension, or agent asks the browser core to perform.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -71,6 +107,69 @@ pub enum Command {
     },
     /// Cycles sample InputServer events (mode, pending keys, which-key) in the stub backend.
     DebugCycleInputState,
+    // Menu, vim mode, zoom, dialog, and page context menu commands.
+    VimSetEnabled {
+        enabled: bool,
+    },
+    ZoomIn {
+        tab_id: Option<TabId>,
+    },
+    ZoomOut {
+        tab_id: Option<TabId>,
+    },
+    ZoomReset {
+        tab_id: Option<TabId>,
+    },
+    MenuAppToggle,
+    AppAbout,
+    AppQuit,
+    PageInspectElement {
+        tab_id: Option<TabId>,
+    },
+    PageCut {
+        tab_id: Option<TabId>,
+    },
+    PageCopy {
+        tab_id: Option<TabId>,
+    },
+    PagePaste {
+        tab_id: Option<TabId>,
+        match_style: bool,
+    },
+    PageSelectAll {
+        tab_id: Option<TabId>,
+    },
+    PageCopyLink {
+        url: String,
+    },
+    PageOpenLinkInNewTab {
+        tab_id: Option<TabId>,
+        url: String,
+        activate: bool,
+    },
+    PageViewSource {
+        tab_id: Option<TabId>,
+    },
+    PageReplaceMisspelling {
+        tab_id: Option<TabId>,
+        replacement: String,
+    },
+    PageIgnoreMisspelling {
+        tab_id: Option<TabId>,
+        word: String,
+    },
+    PageLearnMisspelling {
+        tab_id: Option<TabId>,
+        word: String,
+    },
+    MediaContextAction {
+        tab_id: Option<TabId>,
+        action: MediaAction,
+    },
+    PageSelectDropdownChoose {
+        tab_id: Option<TabId>,
+        item_id: Option<u32>,
+    },
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -147,6 +246,39 @@ impl Command {
             Self::WebChatAsk { .. } => "webchat.ask",
             Self::ThemeSet { .. } => "theme.set",
             Self::DebugCycleInputState => "debug.cycle_input_state",
+            Self::VimSetEnabled { .. } => "vim.set_enabled",
+            Self::ZoomIn { .. } => "zoom.in",
+            Self::ZoomOut { .. } => "zoom.out",
+            Self::ZoomReset { .. } => "zoom.reset",
+            Self::MenuAppToggle => "menu.app.toggle",
+            Self::AppAbout => "app.about",
+            Self::AppQuit => "app.quit",
+            Self::PageInspectElement { .. } => "page.inspect_element",
+            Self::PageCut { .. } => "page.cut",
+            Self::PageCopy { .. } => "page.copy",
+            Self::PagePaste { match_style, .. } => {
+                if *match_style {
+                    "page.paste_and_match_style"
+                } else {
+                    "page.paste"
+                }
+            }
+            Self::PageSelectAll { .. } => "page.select_all",
+            Self::PageCopyLink { .. } => "page.copy_link",
+            Self::PageOpenLinkInNewTab { .. } => "page.open_link_in_new_tab",
+            Self::PageViewSource { .. } => "page.view_source",
+            Self::PageReplaceMisspelling { .. } => "page.replace_misspelling",
+            Self::PageIgnoreMisspelling { .. } => "page.ignore_misspelling",
+            Self::PageLearnMisspelling { .. } => "page.learn_misspelling",
+            Self::MediaContextAction { action, .. } => match action {
+                MediaAction::TogglePlay => "media.toggle_play",
+                MediaAction::ToggleMute => "media.toggle_mute",
+                MediaAction::ToggleControls => "media.toggle_controls",
+                MediaAction::ToggleLoop => "media.toggle_loop",
+                MediaAction::TogglePictureInPicture => "media.toggle_pip",
+                MediaAction::ToggleFullscreen => "media.toggle_fullscreen",
+            },
+            Self::PageSelectDropdownChoose { .. } => "page.select_dropdown_choose",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -236,6 +368,114 @@ impl Command {
                 })
             }
             "debug.cycle_input_state" => Ok(Self::DebugCycleInputState),
+            "vim.set_enabled" => Ok(Self::VimSetEnabled {
+                enabled: parse_bool_arg(name, args, "enabled", true)?,
+            }),
+            "zoom.in" => Ok(Self::ZoomIn {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "zoom.out" => Ok(Self::ZoomOut {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "zoom.reset" => Ok(Self::ZoomReset {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "menu.app.toggle" => Ok(Self::MenuAppToggle),
+            "app.about" => Ok(Self::AppAbout),
+            "app.quit" => Ok(Self::AppQuit),
+            "page.inspect_element" => Ok(Self::PageInspectElement {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "page.cut" => Ok(Self::PageCut {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "page.copy" => Ok(Self::PageCopy {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "page.paste" => Ok(Self::PagePaste {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                match_style: parse_bool_arg(name, args, "match_style", false)?,
+            }),
+            "page.paste_and_match_style" => Ok(Self::PagePaste {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                match_style: true,
+            }),
+            "page.select_all" => Ok(Self::PageSelectAll {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "page.copy_link" | "page.copy_image_address" | "page.copy_media_address" => Ok(Self::PageCopyLink {
+                url: parse_required_string_arg(name, args, "url")?,
+            }),
+            "page.open_link_in_new_tab" | "page.open_image_in_new_tab" | "page.open_media_in_new_tab" => {
+                Ok(Self::PageOpenLinkInNewTab {
+                    tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                    url: parse_required_string_arg(name, args, "url")?,
+                    activate: parse_bool_arg(name, args, "activate", false)?,
+                })
+            }
+            "page.view_source" => Ok(Self::PageViewSource {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "page.replace_misspelling" => Ok(Self::PageReplaceMisspelling {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                replacement: parse_required_string_arg(name, args, "replacement")?,
+            }),
+            "page.ignore_misspelling" => Ok(Self::PageIgnoreMisspelling {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                word: parse_required_string_arg(name, args, "word")?,
+            }),
+            "page.learn_misspelling" => Ok(Self::PageLearnMisspelling {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                word: parse_required_string_arg(name, args, "word")?,
+            }),
+            "media.toggle_play" => Ok(Self::MediaContextAction {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                action: MediaAction::TogglePlay,
+            }),
+            "media.toggle_mute" => Ok(Self::MediaContextAction {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                action: MediaAction::ToggleMute,
+            }),
+            "media.toggle_controls" => Ok(Self::MediaContextAction {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                action: MediaAction::ToggleControls,
+            }),
+            "media.toggle_loop" => Ok(Self::MediaContextAction {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                action: MediaAction::ToggleLoop,
+            }),
+            "media.toggle_pip" => Ok(Self::MediaContextAction {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                action: MediaAction::TogglePictureInPicture,
+            }),
+            "media.toggle_fullscreen" => Ok(Self::MediaContextAction {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                action: MediaAction::ToggleFullscreen,
+            }),
+            "media.action" => {
+                let raw = parse_required_string_arg(name, args, "action")?;
+                let action = MediaAction::parse(&raw).ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("unknown media action `{raw}`"),
+                })?;
+                Ok(Self::MediaContextAction {
+                    tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                    action,
+                })
+            }
+            "page.select_dropdown_choose" => {
+                let item_id = match parse_optional_u64_arg(name, args, "item_id")? {
+                    Some(v) => Some(u32::try_from(v).map_err(|_| CommandError::InvalidArgument {
+                        command: name.to_string(),
+                        message: format!("argument `item_id` out of u32 range: `{v}`"),
+                    })?),
+                    None => None,
+                };
+                Ok(Self::PageSelectDropdownChoose {
+                    tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                    item_id,
+                })
+            }
             _ => Ok(Self::Custom {
                 name: name.to_string(),
                 args: args.to_vec(),
@@ -495,6 +735,149 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             title: "Cycle Sample Vim State".to_string(),
             description: "Emit sample InputServer mode, pending keys, and which-key events".to_string(),
             arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "vim.set_enabled".to_string(),
+            title: "Set Vim Mode".to_string(),
+            description: "Enable or disable Neovim-style keyboard control".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "enabled",
+                ArgumentType::Bool,
+                true,
+                "Whether vim mode should be enabled",
+            )],
+        },
+        CommandDescriptor {
+            name: "zoom.in".to_string(),
+            title: "Zoom In".to_string(),
+            description: "Increase page zoom level".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "zoom.out".to_string(),
+            title: "Zoom Out".to_string(),
+            description: "Decrease page zoom level".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "zoom.reset".to_string(),
+            title: "Reset Zoom".to_string(),
+            description: "Reset page zoom level to 100%".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "menu.app.toggle".to_string(),
+            title: "Toggle Application Menu".to_string(),
+            description: "Open or close the main application menu".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "app.about".to_string(),
+            title: "About Zendia".to_string(),
+            description: "Show version and license information for Zendia".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "app.quit".to_string(),
+            title: "Quit".to_string(),
+            description: "Close all windows and exit Zendia".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "page.inspect_element".to_string(),
+            title: "Inspect Element".to_string(),
+            description: "Open developer tools on the right-clicked page element".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "page.cut".to_string(),
+            title: "Cut".to_string(),
+            description: "Cut the selected editable text".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "page.copy".to_string(),
+            title: "Copy".to_string(),
+            description: "Copy the selected text to the clipboard".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "page.paste".to_string(),
+            title: "Paste".to_string(),
+            description: "Paste clipboard contents into the focused field".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab"),
+                ArgumentSchema::new("match_style", ArgumentType::Bool, false, "Paste as plain text"),
+            ],
+        },
+        CommandDescriptor {
+            name: "page.select_all".to_string(),
+            title: "Select All".to_string(),
+            description: "Select all text in the active field or page".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "page.copy_link".to_string(),
+            title: "Copy Link".to_string(),
+            description: "Copy a link or resource address to the clipboard".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "url",
+                ArgumentType::String,
+                true,
+                "Address to copy",
+            )],
+        },
+        CommandDescriptor {
+            name: "page.open_link_in_new_tab".to_string(),
+            title: "Open Link in New Tab".to_string(),
+            description: "Open a URL in a new tab".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Source tab"),
+                ArgumentSchema::new("url", ArgumentType::String, true, "URL to open"),
+                ArgumentSchema::new("activate", ArgumentType::Bool, false, "Focus the new tab"),
+            ],
+        },
+        CommandDescriptor {
+            name: "page.view_source".to_string(),
+            title: "View Page Source".to_string(),
+            description: "Open the HTML source of the current page".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "media.toggle_play".to_string(),
+            title: "Play / Pause Media".to_string(),
+            description: "Toggle playback on the context-menu media element".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "media.toggle_mute".to_string(),
+            title: "Mute / Unmute Media".to_string(),
+            description: "Toggle mute on the context-menu media element".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "media.toggle_controls".to_string(),
+            title: "Show / Hide Media Controls".to_string(),
+            description: "Toggle built-in controls on the context-menu media element".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "media.toggle_loop".to_string(),
+            title: "Loop Media".to_string(),
+            description: "Toggle looping on the context-menu media element".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "media.toggle_pip".to_string(),
+            title: "Toggle Picture in Picture".to_string(),
+            description: "Enter or exit picture-in-picture for the context-menu video".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "media.toggle_fullscreen".to_string(),
+            title: "Toggle Media Full Screen".to_string(),
+            description: "Enter or exit fullscreen for the context-menu video".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
         },
     ]
 }

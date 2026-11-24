@@ -15,6 +15,7 @@
 
 pub mod commands;
 pub mod events;
+pub mod menus;
 pub mod model;
 pub mod stub;
 pub mod tab_source;

@@ -204,6 +204,75 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "menus",
+        title: "Menus & About",
+        phase: 1,
+        icon: "menu",
+        summary: "Zen-styled app menu, Ladybird-styled page/link/image/media/tab context menus, <select> dropdown, and About dialog.",
+        states: &[
+            GalleryStateSpec {
+                id: "app-menu-vim-off",
+                label: "App Menu (Vim Off)",
+                description: "Application menu with built-in entries, zoom row, and Vim mode switch off.",
+            },
+            GalleryStateSpec {
+                id: "app-menu-vim-on",
+                label: "App Menu (Vim On)",
+                description: "Application menu reflecting Vim mode enabled in BrowserCore.",
+            },
+            GalleryStateSpec {
+                id: "app-menu-submenu",
+                label: "App Menu Submenu",
+                description: "Application menu with the Help and Report submenu expanded.",
+            },
+            GalleryStateSpec {
+                id: "context-page",
+                label: "Page Context",
+                description: "Ladybird page context menu with Zendia Ask, Split View, and Glance contributions.",
+            },
+            GalleryStateSpec {
+                id: "context-editable",
+                label: "Editable & Spelling",
+                description: "Editable field context menu with spelling guesses and text edit actions.",
+            },
+            GalleryStateSpec {
+                id: "context-selection",
+                label: "Selected Text",
+                description: "Selected text context menu with Look Up, Copy, Search, and highlight link.",
+            },
+            GalleryStateSpec {
+                id: "context-link",
+                label: "Link Context",
+                description: "Link context menu with Open in New Tab/Window/Private, Copy Link, and Download.",
+            },
+            GalleryStateSpec {
+                id: "context-image",
+                label: "Image Context",
+                description: "Linked image context menu with link actions and image open/copy/save actions.",
+            },
+            GalleryStateSpec {
+                id: "context-media",
+                label: "Media Context",
+                description: "Playing video and paused muted audio context menus with checkable Loop.",
+            },
+            GalleryStateSpec {
+                id: "context-tab",
+                label: "Tab Context",
+                description: "Zendia tab context menu rendered in Ladybird's native menu look.",
+            },
+            GalleryStateSpec {
+                id: "select-dropdown",
+                label: "Select Dropdown",
+                description: "HTML <select> popup with option groups, checkmark, disabled item, and separators.",
+            },
+            GalleryStateSpec {
+                id: "about-dialog",
+                label: "About Dialog",
+                description: "About Zendia dialog with emblem, version copy pill, Ladybird attribution, and links.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
@@ -429,6 +498,13 @@ fn format_command_detail(command: &Command) -> String {
         Command::AgentSend { prompt, .. } => prompt.clone(),
         Command::WebChatAsk { site_id, prompt } => format!("{}: {prompt}", site_id.0),
         Command::ThemeSet { scheme, .. } => format!("scheme={scheme:?}"),
+        Command::VimSetEnabled { enabled } => format!("enabled={enabled}"),
+        Command::PageCopyLink { url } => url.clone(),
+        Command::PageOpenLinkInNewTab { url, activate, .. } => format!("{url} activate={activate}"),
+        Command::PageReplaceMisspelling { replacement, .. } => replacement.clone(),
+        Command::PageIgnoreMisspelling { word, .. } | Command::PageLearnMisspelling { word, .. } => word.clone(),
+        Command::MediaContextAction { action, .. } => action.as_str().to_string(),
+        Command::PageSelectDropdownChoose { item_id, .. } => format!("item_id={item_id:?}"),
         Command::Custom { args, .. } => {
             if args.is_empty() {
                 "no args".to_string()

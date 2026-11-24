@@ -15,7 +15,8 @@ pub use registry::{
 };
 
 use crate::gallery::sections::render_section;
-use crate::ui::core_view::{use_core, use_provide_core};
+use crate::ui::chrome::menus::{MenuLayer, use_provide_menu_state};
+use crate::ui::core_view::{use_core, use_provide_core_with_observer};
 use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
 use crate::ui::page::use_provide_keymap;
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_provide_theme, use_theme};
@@ -23,6 +24,7 @@ use freya::prelude::*;
 use std::sync::Arc;
 use zendia_browser_core::BrowserCore;
 use zendia_browser_core::commands::Command;
+use zendia_browser_core::events::Event as CoreEvent;
 use zendia_browser_core::model::ThemeScheme;
 use zendia_module_api::ui::UiTone;
 
@@ -50,7 +52,19 @@ impl App for GalleryApp {
         let initial_state = self.options.resolved_initial_state().to_string();
 
         let gallery_core = use_hook(|| Arc::new(GalleryCore::new(initial_theme)));
-        let core = use_provide_core(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>);
+        let menu_state = use_provide_menu_state();
+        let core =
+            use_provide_core_with_observer(
+                Arc::clone(&gallery_core) as Arc<dyn BrowserCore>,
+                move |event| match event {
+                    CoreEvent::AppMenuToggleRequested => menu_state.toggle_app_menu(None),
+                    CoreEvent::AboutDialogRequested => menu_state.open_about(),
+                    CoreEvent::ClipboardCopyRequested { text } if !text.is_empty() => {
+                        let _ = freya::clipboard::Clipboard::set(text.clone());
+                    }
+                    _ => {}
+                },
+            );
         let _theme_state = use_provide_theme(&core);
         let keymap = use_provide_keymap();
         let theme = use_theme();
@@ -258,6 +272,7 @@ impl App for GalleryApp {
                     .child(rect().width(Size::fill()).height(Size::flex(1.0)).child(body))
                     .child(command_log_bar),
             )
+            .child(MenuLayer)
     }
 }
 

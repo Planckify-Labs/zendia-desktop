@@ -13,10 +13,11 @@
 use crate::BrowserCore;
 use crate::commands::{Command, CommandDescriptor, CommandError, CommandResult, builtin_command_descriptors};
 use crate::contributions::{
-    BadgeTone, ContributionId, ContributionSource, Contributions, MenuEntry, MenuLocation, PaletteEntry,
-    SidePanelEntry, SidePanelId, SidePanelLayout, SidePanelSide, ToolbarBadge, ToolbarItem, ToolbarPlacement,
+    BadgeTone, ContributionId, ContributionSource, Contributions, MenuEntryKind, PaletteEntry, SidePanelEntry,
+    SidePanelId, SidePanelLayout, SidePanelSide, ToolbarBadge, ToolbarItem, ToolbarPlacement,
 };
 use crate::events::{Event, EventBus, Subscription};
+use crate::menus::{APP_MENU_VIM_MODE_ID, builtin_menu_entries};
 use crate::model::{
     Agent, AgentId, BrowserModel, ChatSite, ChatSiteId, Conversation, ConversationId, ConversationStatus,
     ConversationStep, Download, DownloadId, DownloadStatus, Essential, Folder, FolderId, HistoryEntry, HistoryEntryId,
@@ -689,6 +690,53 @@ impl StubBackend {
         self.bus.publish(Event::SettingsChanged { theme: updated });
         Ok(())
     }
+
+    fn handle_vim_set_enabled(&self, enabled: bool) -> CommandResult {
+        let updated_contributions = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.vim_mode_enabled = enabled;
+            for entry in &mut state.model.contributions.menu_entries {
+                if entry.id.as_str() == APP_MENU_VIM_MODE_ID {
+                    entry.kind = MenuEntryKind::Toggle { checked: enabled };
+                    entry.command_args = vec![("enabled".to_string(), (!enabled).to_string())];
+                }
+            }
+            state.model.contributions.clone()
+        };
+        self.bus.publish(Event::VimModeChanged { enabled });
+        self.bus.publish(Event::ContributionsChanged {
+            contributions: updated_contributions,
+        });
+        Ok(())
+    }
+
+    fn handle_stub_zoom(&self, next_zoom: impl FnOnce(f32) -> f32) -> CommandResult {
+        let zoom_level = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let updated = next_zoom(state.model.zoom_level).clamp(0.3, 3.0);
+            state.model.zoom_level = (updated * 100.0).round() / 100.0;
+            state.model.zoom_level
+        };
+        self.bus.publish(Event::ZoomChanged { zoom_level });
+        Ok(())
+    }
+
+    /// Updates the reported zoom level from an external [`TabSource`] (such as Ladybird's Hub).
+    pub fn feed_zoom_level(&self, zoom_level: f32) {
+        let rounded = (zoom_level.clamp(0.3, 3.0) * 100.0).round() / 100.0;
+        let changed = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if (state.model.zoom_level - rounded).abs() < 0.001 {
+                false
+            } else {
+                state.model.zoom_level = rounded;
+                true
+            }
+        };
+        if changed {
+            self.bus.publish(Event::ZoomChanged { zoom_level: rounded });
+        }
+    }
 }
 
 impl BrowserCore for StubBackend {
@@ -831,6 +879,143 @@ impl BrowserCore for StubBackend {
                 self.cycle_sample_input_state();
                 Ok(())
             }
+            Command::VimSetEnabled { enabled } => self.handle_vim_set_enabled(enabled),
+            Command::ZoomIn { tab_id } => {
+                if let Some(source) = tab_source {
+                    let target = self.resolve_target_tab(tab_id, &name)?;
+                    source.zoom_in(target)
+                } else {
+                    self.handle_stub_zoom(|z| z + 0.1)
+                }
+            }
+            Command::ZoomOut { tab_id } => {
+                if let Some(source) = tab_source {
+                    let target = self.resolve_target_tab(tab_id, &name)?;
+                    source.zoom_out(target)
+                } else {
+                    self.handle_stub_zoom(|z| z - 0.1)
+                }
+            }
+            Command::ZoomReset { tab_id } => {
+                if let Some(source) = tab_source {
+                    let target = self.resolve_target_tab(tab_id, &name)?;
+                    source.zoom_reset(target)
+                } else {
+                    self.handle_stub_zoom(|_| 1.0)
+                }
+            }
+            Command::MenuAppToggle => {
+                self.bus.publish(Event::AppMenuToggleRequested);
+                Ok(())
+            }
+            Command::AppAbout => {
+                self.bus.publish(Event::AboutDialogRequested);
+                Ok(())
+            }
+            Command::AppQuit => {
+                self.bus.publish(Event::QuitRequested);
+                Ok(())
+            }
+            Command::PageInspectElement { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.inspect_element(target)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::PageCut { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.cut_selection(target)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::PageCopy { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.copy_selection(target)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::PagePaste { tab_id, match_style } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.paste(target, match_style)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::PageSelectAll { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.select_all(target)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::PageCopyLink { url } => {
+                self.bus.publish(Event::ClipboardCopyRequested { text: url });
+                Ok(())
+            }
+            Command::PageOpenLinkInNewTab { tab_id, url, activate } => {
+                if let Some(source) = tab_source {
+                    let target = self.resolve_target_tab(tab_id, &name)?;
+                    source.open_url_in_new_tab(target, &url, activate)
+                } else {
+                    self.handle_stub_tab_new(Some(url), tab_id, activate)
+                }
+            }
+            Command::PageViewSource { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.view_source(target)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::PageReplaceMisspelling { tab_id, replacement } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.replace_misspelling(target, &replacement)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::PageIgnoreMisspelling { tab_id, word } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.ignore_misspelling(target, &word)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::PageLearnMisspelling { tab_id, word } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.learn_misspelling(target, &word)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::MediaContextAction { tab_id, action } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.media_action(target, action)
+                } else {
+                    Ok(())
+                }
+            }
+            Command::PageSelectDropdownChoose { tab_id, item_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                if let Some(source) = tab_source {
+                    source.select_dropdown_choose(target, item_id)
+                } else {
+                    Ok(())
+                }
+            }
             Command::Custom { name, args } => {
                 eprintln!("zendia: stub backend does not handle command `{name}` (args: {args:?})");
                 Err(CommandError::UnknownCommand(name))
@@ -892,34 +1077,7 @@ fn sample_contributions() -> Contributions {
                 source: ContributionSource::BuiltIn,
             },
         ],
-        menu_entries: vec![
-            MenuEntry {
-                id: ContributionId::new("zendia.menu.new_tab"),
-                location: MenuLocation::AppMenu,
-                label: "New Tab".to_string(),
-                icon: Some("plus".to_string()),
-                command: "tab.new".to_string(),
-                command_args: Vec::new(),
-                shortcut_hint: Some("Ctrl+T".to_string()),
-                group: "tabs".to_string(),
-                order: 10,
-                enabled: true,
-                source: ContributionSource::BuiltIn,
-            },
-            MenuEntry {
-                id: ContributionId::new("zendia.menu.ask_chatgpt"),
-                location: MenuLocation::PageContext,
-                label: "Ask ChatGPT".to_string(),
-                icon: Some("webchat".to_string()),
-                command: "webchat.ask".to_string(),
-                command_args: vec![("site_id".to_string(), "chatgpt".to_string())],
-                shortcut_hint: None,
-                group: "zendia".to_string(),
-                order: 20,
-                enabled: true,
-                source: ContributionSource::BuiltIn,
-            },
-        ],
+        menu_entries: builtin_menu_entries(false, "ChatGPT", 0),
         palette_entries: vec![
             PaletteEntry {
                 id: ContributionId::new("zendia.palette.new_tab"),
@@ -1386,6 +1544,8 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         pending_keys: Vec::new(),
         which_key: None,
         theme: ThemeSettings::default(),
+        vim_mode_enabled: false,
+        zoom_level: 1.0,
     }
 }
 
@@ -1904,5 +2064,75 @@ mod tests {
             ),
             Err(CommandError::InvalidArgument { .. })
         ));
+        assert_eq!(
+            Command::from_name_and_args("vim.set_enabled", &[("enabled".to_string(), "true".to_string())]).unwrap(),
+            Command::VimSetEnabled { enabled: true }
+        );
+        assert_eq!(
+            Command::from_name_and_args("menu.app.toggle", &[]).unwrap(),
+            Command::MenuAppToggle
+        );
+        assert_eq!(
+            Command::from_name_and_args("app.about", &[]).unwrap(),
+            Command::AppAbout
+        );
+        assert_eq!(
+            Command::from_name_and_args("page.paste_and_match_style", &[]).unwrap(),
+            Command::PagePaste {
+                tab_id: None,
+                match_style: true,
+            }
+        );
+        assert_eq!(
+            Command::from_name_and_args("media.toggle_loop", &[("tab_id".to_string(), "7".to_string())]).unwrap(),
+            Command::MediaContextAction {
+                tab_id: Some(TabId(7)),
+                action: crate::commands::MediaAction::ToggleLoop,
+            }
+        );
+        assert_eq!(
+            Command::from_name_and_args(
+                "page.select_dropdown_choose",
+                &[
+                    ("tab_id".to_string(), "3".to_string()),
+                    ("item_id".to_string(), "2".to_string())
+                ]
+            )
+            .unwrap(),
+            Command::PageSelectDropdownChoose {
+                tab_id: Some(TabId(3)),
+                item_id: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn vim_mode_and_zoom_commands_update_model_and_publish_events() {
+        let core = StubBackend::new();
+        let mut view_model = core.model();
+        let sub = core.subscribe();
+
+        assert!(!view_model.vim_mode_enabled);
+        assert!((view_model.zoom_level - 1.0).abs() < 1e-5);
+
+        core.invoke(Command::VimSetEnabled { enabled: true }).unwrap();
+        core.invoke(Command::ZoomIn { tab_id: None }).unwrap();
+        core.invoke(Command::ZoomReset { tab_id: None }).unwrap();
+
+        let mut saw_vim = false;
+        let mut saw_zoom = false;
+        while let Ok(event) = sub.try_recv() {
+            match event {
+                Event::VimModeChanged { enabled: true } => saw_vim = true,
+                Event::ZoomChanged { .. } => saw_zoom = true,
+                _ => {}
+            }
+            view_model.apply_event(&event);
+        }
+        assert!(saw_vim);
+        assert!(saw_zoom);
+        assert!(view_model.vim_mode_enabled);
+        assert!((view_model.zoom_level - 1.0).abs() < 1e-5);
+        assert_eq!(view_model, core.model());
     }
 }

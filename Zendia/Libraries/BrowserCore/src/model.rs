@@ -456,6 +456,8 @@ pub struct BrowserModel {
     pub pending_keys: Vec<String>,
     pub which_key: Option<WhichKeyState>,
     pub theme: ThemeSettings,
+    pub vim_mode_enabled: bool,
+    pub zoom_level: f32,
 }
 
 impl BrowserModel {
@@ -582,7 +584,21 @@ impl BrowserModel {
                 self.theme = theme.clone();
                 true
             }
-            Event::PanelToggled { .. } | Event::LocationFocusRequested | Event::ModelReplaced => false,
+            Event::VimModeChanged { enabled } => {
+                self.vim_mode_enabled = *enabled;
+                true
+            }
+            Event::ZoomChanged { zoom_level } => {
+                self.zoom_level = *zoom_level;
+                true
+            }
+            Event::PanelToggled { .. }
+            | Event::LocationFocusRequested
+            | Event::AppMenuToggleRequested
+            | Event::AboutDialogRequested
+            | Event::QuitRequested
+            | Event::ClipboardCopyRequested { .. }
+            | Event::ModelReplaced => false,
         }
     }
 }

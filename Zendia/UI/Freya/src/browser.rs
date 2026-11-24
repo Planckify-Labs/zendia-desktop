@@ -10,6 +10,9 @@
 use crate::hub::{self, startup};
 use crate::hub_adapter::HubTabAdapter;
 use crate::input;
+use crate::ui::chrome::menus::{
+    MenuLayer, MenuViewState, open_hub_context_menu, open_hub_select_dropdown, use_provide_menu_state,
+};
 use crate::ui::core_view::{use_core, use_provide_core_with_observer};
 use crate::ui::page::{
     DebugInputOverlay, PageStage, PageSurface, PageSurfaceContext, use_page_surfaces, use_provide_keymap,
@@ -65,7 +68,13 @@ fn cursor_icon(cursor: &Gfx_Cursor) -> CursorIcon {
 }
 
 /// Routes incoming Hub messages to the Hub tab adapter (browser state) or the view-local [`PageSurfaceContext`].
-fn handle_message(adapter: &HubTabAdapter, page_ctx: &PageSurfaceContext, message: HubMessage) {
+fn handle_message(
+    core: &dyn BrowserCore,
+    adapter: &HubTabAdapter,
+    page_ctx: &PageSurfaceContext,
+    menu_state: &MenuViewState,
+    message: HubMessage,
+) {
     let hub = hub::connection();
     let mut surfaces = page_ctx.surfaces();
     let tracker = page_ctx.tracker();
@@ -248,6 +257,43 @@ fn handle_message(adapter: &HubTabAdapter, page_ctx: &PageSurfaceContext, messag
             });
         }
         HubMessage::AppQuitForSignal(_) => Platform::get().exit(),
+        HubMessage::ViewRequestContextMenu(client::ViewRequestContextMenu { view_id, request }) => {
+            let caps = adapter.view_capabilities(view_id);
+            open_hub_context_menu(
+                core,
+                page_ctx,
+                menu_state,
+                view_id,
+                &request,
+                caps.can_view_source,
+                caps.can_report_website_issue,
+                adapter.search_engine_name(),
+            );
+        }
+        HubMessage::ViewRequestSelectDropdown(client::ViewRequestSelectDropdown {
+            view_id,
+            content_position,
+            minimum_width,
+            items,
+        }) => {
+            open_hub_select_dropdown(
+                core,
+                page_ctx,
+                menu_state,
+                view_id,
+                &content_position,
+                minimum_width,
+                &items,
+            );
+        }
+        HubMessage::ViewSelectedText(client::ViewSelectedText { text, .. }) => {
+            if let Some(bytes) = text {
+                let text = String::from_utf8_lossy(&bytes.0).into_owned();
+                if !text.is_empty() {
+                    let _ = freya::clipboard::Clipboard::set(text);
+                }
+            }
+        }
     }
 }
 
@@ -288,6 +334,7 @@ pub fn app() -> impl IntoElement {
 
     let page_ctx = use_provide_page_surfaces();
     let keymap = use_provide_keymap();
+    let menu_state = use_provide_menu_state();
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -302,6 +349,18 @@ pub fn app() -> impl IntoElement {
             CoreEvent::LocationFocusRequested => {
                 location_a11y_id.request_focus();
             }
+            CoreEvent::AppMenuToggleRequested => {
+                menu_state.toggle_app_menu(None);
+            }
+            CoreEvent::AboutDialogRequested => {
+                menu_state.open_about();
+            }
+            CoreEvent::QuitRequested => {
+                Platform::get().exit();
+            }
+            CoreEvent::ClipboardCopyRequested { text } if !text.is_empty() => {
+                let _ = freya::clipboard::Clipboard::set(text.clone());
+            }
             _ => {}
         }
     });
@@ -310,6 +369,7 @@ pub fn app() -> impl IntoElement {
 
     // NB: What the Hub sends arrives on the IPC reader thread, which hands it to this task on the UI thread.
     use_hook({
+        let stub_core = Arc::clone(&stub_core);
         let adapter = Arc::clone(&hub_adapter);
         let page_ctx = page_ctx.clone();
         move || {
@@ -317,7 +377,9 @@ pub fn app() -> impl IntoElement {
                 let incoming = startup().incoming.clone();
                 while let Ok(incoming) = incoming.recv().await {
                     match incoming {
-                        Incoming::Message(message) => handle_message(&adapter, &page_ctx, *message),
+                        Incoming::Message(message) => {
+                            handle_message(stub_core.as_ref(), &adapter, &page_ctx, &menu_state, *message)
+                        }
                         Incoming::Disconnected => {
                             eprintln!("zendia: The Hub went away");
                             Platform::get().exit();
@@ -448,6 +510,7 @@ pub fn app() -> impl IntoElement {
                 .page(page_content)
                 .overlay(DebugInputOverlay),
         )
+        .child(MenuLayer)
 }
 
 #[derive(PartialEq)]

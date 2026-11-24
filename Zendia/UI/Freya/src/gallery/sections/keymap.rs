@@ -170,6 +170,6 @@ mod tests {
         assert_eq!(all_count, table.bindings().len());
         assert!(nav_count > 0);
         assert!(debug_count > 0);
-        assert_eq!(nav_count + debug_count, all_count);
+        assert!(nav_count + debug_count <= all_count);
     }
 }

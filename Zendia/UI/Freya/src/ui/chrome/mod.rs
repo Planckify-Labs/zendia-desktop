@@ -5,3 +5,6 @@
  */
 
 //! Window shell chrome: sidebar, toolbars, address bar, menus, and command palette.
+
+pub mod about;
+pub mod menus;

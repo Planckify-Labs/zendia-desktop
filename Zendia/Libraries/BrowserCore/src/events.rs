@@ -60,6 +60,18 @@ pub enum Event {
     SettingsChanged {
         theme: ThemeSettings,
     },
+    VimModeChanged {
+        enabled: bool,
+    },
+    ZoomChanged {
+        zoom_level: f32,
+    },
+    AppMenuToggleRequested,
+    AboutDialogRequested,
+    QuitRequested,
+    ClipboardCopyRequested {
+        text: String,
+    },
     /// Signals subscribers to reload a fresh snapshot from `BrowserCore::model`.
     ModelReplaced,
 }

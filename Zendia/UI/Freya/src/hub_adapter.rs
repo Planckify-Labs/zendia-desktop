@@ -9,12 +9,22 @@
 use crate::hub::{self, startup};
 use hub_protocol::ipc_types::hub_server::messages as server;
 use hub_protocol::*;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use zendia_browser_core::BrowserCore;
-use zendia_browser_core::commands::{CommandError, CommandResult};
+use zendia_browser_core::commands::{CommandError, CommandResult, MediaAction};
 use zendia_browser_core::model::{Tab, TabId, TabKind};
 use zendia_browser_core::stub::StubBackend;
 use zendia_browser_core::tab_source::{TabSource, TabUpdate};
+
+/// Per-view capability flags cached from `Hub::ViewState` for building context menus.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ViewCapabilities {
+    pub can_view_source: bool,
+    pub can_report_website_issue: bool,
+    pub zoom_level: f32,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct ViewportState {
@@ -27,6 +37,8 @@ struct ViewportState {
 pub struct HubTabAdapter {
     core: Arc<StubBackend>,
     viewport: Mutex<ViewportState>,
+    capabilities: Mutex<HashMap<u64, ViewCapabilities>>,
+    next_request_id: AtomicU64,
 }
 
 impl HubTabAdapter {
@@ -37,6 +49,57 @@ impl HubTabAdapter {
                 size: (0, 0),
                 device_pixel_ratio,
             }),
+            capabilities: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(1),
+        }
+    }
+
+    pub fn view_capabilities(&self, view_id: u64) -> ViewCapabilities {
+        self.capabilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&view_id)
+            .copied()
+            .unwrap_or(ViewCapabilities {
+                can_view_source: true,
+                can_report_website_issue: false,
+                zoom_level: 1.0,
+            })
+    }
+
+    pub fn search_engine_name(&self) -> Option<String> {
+        let url = &startup().settings.search_url;
+        if url.contains("google.") {
+            Some("Google".to_string())
+        } else if url.contains("duckduckgo.") {
+            Some("DuckDuckGo".to_string())
+        } else if url.contains("kagi.") {
+            Some("Kagi".to_string())
+        } else if url.contains("bing.") {
+            Some("Bing".to_string())
+        } else if url.contains("brave.") {
+            Some("Brave".to_string())
+        } else {
+            Some("Web".to_string())
+        }
+    }
+
+    fn record_capabilities(&self, view_id: u64, state: &Hub_ViewState) {
+        let caps = ViewCapabilities {
+            can_view_source: state.can_view_source,
+            can_report_website_issue: state.can_report_website_issue,
+            zoom_level: if state.zoom_level > 0.0 {
+                state.zoom_level as f32
+            } else {
+                1.0
+            },
+        };
+        self.capabilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(view_id, caps);
+        if self.core.model().active_tab == Some(TabId(view_id)) {
+            self.core.feed_zoom_level(caps.zoom_level);
         }
     }
 
@@ -120,6 +183,7 @@ impl HubTabAdapter {
             return;
         }
         self.set_up_view(view_id);
+        self.record_capabilities(view_id, state);
         let should_activate = activate_tab || self.core.model().active_tab.is_none();
         let tab = Tab {
             id: TabId(view_id),
@@ -179,6 +243,10 @@ impl HubTabAdapter {
         if !self.has_view(view_id) {
             return;
         }
+        self.capabilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
         hub::connection().post_or_log(server::DestroyView { view_id });
         if let Some(next) = self.core.feed_tab_closed(TabId(view_id)) {
             self.activate_view(next.0);
@@ -186,6 +254,7 @@ impl HubTabAdapter {
     }
 
     pub fn on_view_state_changed(&self, view_id: u64, state: &Hub_ViewState) {
+        self.record_capabilities(view_id, state);
         self.core.feed_tab_updated(
             TabId(view_id),
             TabUpdate {
@@ -332,6 +401,141 @@ impl TabSource for HubTabAdapter {
             });
         };
         load_in_hub(view_id, url);
+        Ok(())
+    }
+
+    fn inspect_element(&self, tab_id: TabId) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.inspect_element")?;
+        hub::connection().post_or_log(server::ViewInspectContextMenuElement { view_id });
+        Ok(())
+    }
+
+    fn cut_selection(&self, tab_id: TabId) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.cut")?;
+        hub::connection().post_or_log(server::ViewCutSelection { view_id });
+        Ok(())
+    }
+
+    fn copy_selection(&self, tab_id: TabId) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.copy")?;
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        hub::connection().post_or_log(server::ViewRequestSelectedText { view_id, request_id });
+        Ok(())
+    }
+
+    fn paste(&self, tab_id: TabId, match_style: bool) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.paste")?;
+        hub::connection().post_or_log(server::ViewPaste {
+            view_id,
+            paste_mode: if match_style {
+                Web_Clipboard_PasteMode::PlainTextOnly
+            } else {
+                Web_Clipboard_PasteMode::AllMimeTypes
+            },
+        });
+        Ok(())
+    }
+
+    fn select_all(&self, tab_id: TabId) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.select_all")?;
+        hub::connection().post_or_log(server::ViewSelectAll { view_id });
+        Ok(())
+    }
+
+    fn view_source(&self, tab_id: TabId) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.view_source")?;
+        hub::connection().post_or_log(server::ViewGetSource { view_id });
+        Ok(())
+    }
+
+    fn replace_misspelling(&self, tab_id: TabId, replacement: &str) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.replace_misspelling")?;
+        hub::connection().post_or_log(server::ViewReplaceContextMenuMisspelling {
+            view_id,
+            replacement: libipc_rust::wire::Utf16String::from(replacement),
+        });
+        Ok(())
+    }
+
+    fn ignore_misspelling(&self, tab_id: TabId, word: &str) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.ignore_misspelling")?;
+        hub::connection().post_or_log(server::ViewIgnoreMisspelling {
+            view_id,
+            word: libipc_rust::wire::Utf16String::from(word),
+        });
+        Ok(())
+    }
+
+    fn learn_misspelling(&self, tab_id: TabId, word: &str) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.learn_misspelling")?;
+        hub::connection().post_or_log(server::ViewLearnMisspelling {
+            view_id,
+            word: libipc_rust::wire::Utf16String::from(word),
+        });
+        Ok(())
+    }
+
+    fn media_action(&self, tab_id: TabId, action: MediaAction) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "media.action")?;
+        let ipc_action = match action {
+            MediaAction::TogglePlay => WebView_ContextMenuMediaAction::TogglePlay,
+            MediaAction::ToggleMute => WebView_ContextMenuMediaAction::ToggleMute,
+            MediaAction::ToggleControls => WebView_ContextMenuMediaAction::ToggleControls,
+            MediaAction::ToggleLoop => WebView_ContextMenuMediaAction::ToggleLoop,
+            MediaAction::TogglePictureInPicture => WebView_ContextMenuMediaAction::TogglePictureInPicture,
+            MediaAction::ToggleFullscreen => WebView_ContextMenuMediaAction::ToggleFullscreen,
+        };
+        hub::connection().post_or_log(server::ViewDoContextMenuMediaAction {
+            view_id,
+            action: ipc_action,
+        });
+        Ok(())
+    }
+
+    fn select_dropdown_choose(&self, tab_id: TabId, item_id: Option<u32>) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.select_dropdown_choose")?;
+        hub::connection().post_or_log(server::ViewSelectDropdownClosed {
+            view_id,
+            selected_item_id: item_id,
+        });
+        Ok(())
+    }
+
+    fn zoom_in(&self, tab_id: TabId) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "zoom.in")?;
+        hub::connection().post_or_log(server::ViewZoomIn { view_id });
+        Ok(())
+    }
+
+    fn zoom_out(&self, tab_id: TabId) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "zoom.out")?;
+        hub::connection().post_or_log(server::ViewZoomOut { view_id });
+        Ok(())
+    }
+
+    fn zoom_reset(&self, tab_id: TabId) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "zoom.reset")?;
+        hub::connection().post_or_log(server::ViewResetZoom { view_id });
+        Ok(())
+    }
+
+    fn open_url_in_new_tab(&self, tab_id: TabId, url: &str, activate: bool) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.open_link_in_new_tab")?;
+        let Some(parsed) = location::url_for_location(url, &startup().settings.search_url) else {
+            return Err(CommandError::InvalidArgument {
+                command: "page.open_link_in_new_tab".to_string(),
+                message: "url is empty".to_string(),
+            });
+        };
+        hub::connection().post_or_log(server::ViewOpenUrlInNewTab {
+            view_id,
+            url: parsed,
+            activate_tab: if activate {
+                Web_HTML_ActivateTab::Yes
+            } else {
+                Web_HTML_ActivateTab::No
+            },
+        });
         Ok(())
     }
 }
