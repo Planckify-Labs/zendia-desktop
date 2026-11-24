@@ -8,6 +8,7 @@
 members = [
     "Libraries/Automation",
     "Libraries/BrowserCore",
+    "Libraries/HubProtocol",
     "Libraries/Keymap",
     "Libraries/ModuleApi",
     "Libraries/Sandbox",
@@ -16,6 +17,7 @@ members = [
     "Services/ExtensionServer",
     "Services/InputServer",
     "Services/PluginHost",
+    "UI/Freya",
     "UI/Headless",
 ]
 resolver = "2"
@@ -29,6 +31,7 @@ license = "BSD-2-Clause"
 # The engine's crates, used by path so that we share its code instead of copying it.
 libipc_rust = { path = "../Libraries/LibIPC/Rust" }
 
+hub-protocol = { path = "Libraries/HubProtocol" }
 zendia-automation = { path = "Libraries/Automation" }
 zendia-browser-core = { path = "Libraries/BrowserCore" }
 zendia-keymap = { path = "Libraries/Keymap" }

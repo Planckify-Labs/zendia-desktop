@@ -1,0 +1,16 @@
+# Copyright (c) 2026-present, the Ladybird developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+[package]
+name = "hub-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2"
+libipc_rust = { workspace = true }
+url = "2.5"
+
+[dev-dependencies]

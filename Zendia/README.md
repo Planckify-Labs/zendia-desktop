@@ -15,6 +15,7 @@ change only at the few places `FORK.md` lists. The design is in `Documentation/A
 | `Documentation/` | The architecture and other design documents |
 | `Protocols/` | The `.ipc` files of our services and of the embedder channel |
 | `Libraries/BrowserCore/` | The command registry, browser model, event bus and profile data |
+| `Libraries/HubProtocol/` | The client side of upstream's Hub protocol |
 | `Libraries/ModuleApi/` | The contract plugins and extensions use |
 | `Libraries/Keymap/` | The keymap engine, profiles and compiled key tables |
 | `Libraries/Automation/` | The client side of the Automation World |
@@ -24,12 +25,13 @@ change only at the few places `FORK.md` lists. The design is in `Documentation/A
 | `Services/AgentServer/` | One AI agent session per process |
 | `Services/PluginHost/` | One plugin per process |
 | `Services/ExtensionServer/` | The cgx-webext core and its adapter |
+| `UI/Freya/` | The window (the `zendia` executable) |
 | `UI/Headless/` | The browser core without a window |
 | `Base/res/` | Resources: keyboard profiles, Automation World scripts, example plugins |
 | `Tests/` | Tests that span processes |
 | `Meta/` | The build wrapper, the upstream merge and the fork check |
 
-The crates are placeholders so far, each describing its job.
+Only the Freya UI and HubProtocol have working code so far. The other crates are placeholders that describe their job.
 The build order is at the end of `Documentation/Architecture.md`.
 
 ## Building and running

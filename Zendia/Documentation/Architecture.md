@@ -5,8 +5,9 @@ browser out of the box, and vim control is something users turn on. Following La
 process: the keymap engine, AI agents, plugins and extensions. They all drive the browser through one command registry
 in the UI process, and Ladybird's own processes stay as upstream ships them, so the fork stays easy to merge.
 
-This is the proposed design, written on 24 November 2026. The `Zendia/` layout below exists, but its crates are
-placeholders so far. cgx-webext lives in its own repository.
+This is the proposed design, written on 24 November 2026. The `Zendia/` layout below exists, but only the Freya UI's
+first steps (`Zendia/UI/Freya` and `Zendia/Libraries/HubProtocol`) have working code. The other crates are placeholders.
+cgx-webext lives in its own repository.
 
 ## Design rules
 

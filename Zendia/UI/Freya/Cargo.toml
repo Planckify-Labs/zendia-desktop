@@ -1,0 +1,22 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+[package]
+name = "zendia"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Zendia's window, written with Freya"
+
+[[bin]]
+name = "zendia"
+path = "src/main.rs"
+
+[dependencies]
+async-channel = "2.3"
+freya = { version = "0.5.4", features = ["engine"] }
+hub-protocol = { workspace = true }
+libc = "0.2"
+libipc_rust = { workspace = true }
+serde_json = "1"
