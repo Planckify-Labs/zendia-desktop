@@ -26,6 +26,15 @@ jobs:
       - name: Check the fork surface
         run: Zendia/Meta/fork-surface.sh upstream/master
 
+  licenses:
+    name: Linked crates are under licenses we allow
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the licenses
+        run: Zendia/Meta/check-licenses.py
+
   workspace:
     name: Zendia workspace (format, clippy, tests)
     runs-on: ubuntu-24.04

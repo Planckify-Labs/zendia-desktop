@@ -26,7 +26,10 @@ fi
 base="$(git merge-base HEAD "$upstream_ref")"
 ledger="Zendia/FORK.md"
 
-mapfile -t changed < <(git diff --name-only "$base" HEAD -- . ':(exclude)Zendia' ':(exclude,glob).github/workflows/zendia-*.yml')
+# NB: Our CI workflow and the README GitHub shows are files of our own outside Zendia/. Upstream has neither, so they
+#     cannot conflict.
+mapfile -t changed < <(git diff --name-only "$base" HEAD -- . ':(exclude)Zendia' ':(exclude,glob).github/workflows/zendia-*.yml' \
+    ':(exclude).github/README.md')
 
 missing=()
 for file in "${changed[@]}"; do

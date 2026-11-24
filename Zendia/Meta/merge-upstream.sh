@@ -31,7 +31,9 @@ fi
 
 git fetch "$remote"
 
-if ! git merge --no-ff --no-edit "$remote/master"; then
+# NB: Upstream's Meta/lint-commit.sh wants a "Category: Title" commit title, which git's default merge message lacks.
+title="Zendia: Merge upstream Ladybird at $(git rev-parse --short "$remote/master")"
+if ! git merge --no-ff -m "$title" "$remote/master"; then
     echo "The merge stopped on conflicts. They can only be in the files Zendia/FORK.md lists. Resolve them, commit, then"
     echo "run Zendia/Meta/fork-surface.sh $remote/master."
     exit 1

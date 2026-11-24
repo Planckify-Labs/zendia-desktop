@@ -51,6 +51,7 @@ def command_check(args: argparse.Namespace) -> None:
     run(["cargo", "clippy", "--workspace", "--all-targets"], ZENDIA_ROOT)
     run(["cargo", "test", "--workspace"], ZENDIA_ROOT)
     run([str(ZENDIA_ROOT / "Meta" / "fork-surface.sh")], SOURCE_ROOT)
+    run([sys.executable, str(ZENDIA_ROOT / "Meta" / "check-licenses.py")], SOURCE_ROOT)
 
 
 def main() -> int:
@@ -68,7 +69,7 @@ def main() -> int:
     run_parser.add_argument("arguments", nargs=argparse.REMAINDER, help="Arguments for the browser, such as URLs")
     run_parser.set_defaults(handler=command_run)
 
-    check = commands.add_parser("check", help="Format check, clippy and tests for the workspace, and the fork check")
+    check = commands.add_parser("check", help="Format check, clippy, tests, the fork check and the license check")
     check.set_defaults(handler=command_check)
 
     args = parser.parse_args()
