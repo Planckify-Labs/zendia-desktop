@@ -10,3 +10,5 @@ license.workspace = true
 description = "The browser core: the command registry, the browser model, the event bus and profile data"
 
 [dependencies]
+async-channel = "2.3"
+zendia-module-api = { workspace = true }

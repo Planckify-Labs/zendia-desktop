@@ -12,3 +12,31 @@
 //! headless.
 //!
 //! See `Zendia/Documentation/Architecture.md`, "The command layer".
+
+pub mod commands;
+pub mod events;
+pub mod model;
+pub mod stub;
+pub mod tab_source;
+
+pub use zendia_module_api::contributions;
+pub use zendia_module_api::ui;
+
+use crate::commands::{Command, CommandDescriptor, CommandResult};
+use crate::events::Subscription;
+use crate::model::BrowserModel;
+
+/// Public facade over the browser core used by Freya, headless runners, and service adapters.
+pub trait BrowserCore: Send + Sync {
+    /// Returns a snapshot of the current browser model.
+    fn model(&self) -> BrowserModel;
+
+    /// Subscribes to subsequent events published by the core.
+    fn subscribe(&self) -> Subscription;
+
+    /// Invokes a named, typed browser command.
+    fn invoke(&self, command: Command) -> CommandResult;
+
+    /// Lists descriptors for all commands registered in the core.
+    fn commands(&self) -> Vec<CommandDescriptor>;
+}
