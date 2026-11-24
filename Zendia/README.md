@@ -31,7 +31,9 @@ change only at the few places `FORK.md` lists. The design is in `Documentation/A
 | `Tests/` | Tests that span processes |
 | `Meta/` | The build wrapper, the upstream merge and the fork check |
 
-Only the Freya UI and HubProtocol have working code so far. The other crates are placeholders that describe their job.
+The Freya UI, HubProtocol, and the first parts of BrowserCore, Keymap and ModuleApi have working code. BrowserCore
+serves sample data from a stub backend until the real core lands. The other crates are placeholders that describe their
+job.
 The build order is at the end of `Documentation/Architecture.md`.
 
 ## Building and running
@@ -46,6 +48,15 @@ Zendia/Meta/zendia.py run -- --temporary-profile https://ladybird.org
 That builds upstream with `Meta/ladybird.py`, then this workspace, then starts the browser. `Zendia/Meta/zendia.py build`
 only builds, `--skip-upstream` skips the upstream build, and `Zendia/Meta/zendia.py check` runs the format check,
 clippy, the tests and the fork check.
+
+To inspect Zendia's Freya theme, component kit, icons, declared UI, page surfaces, and keymap without building upstream
+Ladybird or starting a Hub process, run the standalone UI gallery:
+
+```sh
+Zendia/Meta/zendia.py gallery
+```
+
+Pass `--debug` for faster debug builds, or pass gallery flags after `--` (for example `-- --section kit --theme light`).
 
 ## Merging upstream
 

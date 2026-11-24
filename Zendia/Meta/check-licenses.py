@@ -23,6 +23,13 @@ from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 ZENDIA_ROOT = SOURCE_ROOT / "Zendia"
+MPL_ICON_DIR = ZENDIA_ROOT / "Base" / "res" / "icons" / "zen"
+MPL_MARKERS = (
+    "SPDX-License-Identifier: MPL-2.0",
+    "Mozilla Public License",
+    "mozilla.org/MPL/",
+)
+SKIP_SCAN_DIRS = {"target", "__pycache__", ".git"}
 
 ALLOWED = {
     "0BSD",
@@ -73,6 +80,35 @@ def linked_packages(metadata: dict) -> list[dict]:
     return [packages[package_id] for package_id in seen]
 
 
+def check_mpl_exception() -> list[str]:
+    """Allows MPL-2.0 files only inside Zendia/Base/res/icons/zen/ and checks its LICENSE is present."""
+    problems = []
+    if MPL_ICON_DIR.exists() and not (MPL_ICON_DIR / "LICENSE").is_file():
+        problems.append(f"{MPL_ICON_DIR.relative_to(SOURCE_ROOT)}: missing MPL-2.0 LICENSE file")
+
+    script_path = Path(__file__).resolve()
+    for path in sorted(ZENDIA_ROOT.rglob("*")):
+        if any(part in SKIP_SCAN_DIRS for part in path.parts) or not path.is_file():
+            continue
+        resolved = path.resolve()
+        if resolved == script_path:
+            continue
+        in_mpl_icon_dir = MPL_ICON_DIR in resolved.parents
+        if in_mpl_icon_dir:
+            continue
+        # Only inspect text-like source/asset files for stray MPL-2.0 headers.
+        if path.suffix.lower() not in {".rs", ".py", ".sh", ".svg", ".css", ".js", ".mjs", ".toml", ".ipc", ".c", ".cpp", ".h"}:
+            continue
+        try:
+            head = path.read_text(encoding="utf-8", errors="ignore")[:1024]
+        except OSError:
+            continue
+        if any(marker in head for marker in MPL_MARKERS):
+            rel = path.relative_to(SOURCE_ROOT)
+            problems.append(f"{rel}: MPL-2.0 is only allowed inside Zendia/Base/res/icons/zen/")
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Checks the licenses of the crates linked into Zendia's binaries")
     parser.add_argument("--verbose", action="store_true", help="List every linked crate and its license")
@@ -105,11 +141,21 @@ def main() -> int:
         if args.verbose:
             print(f"{package['name']} {package['version']}: {license}")
 
+    mpl_problems = check_mpl_exception()
+
     print(f"Checked the licenses of {len(linked)} linked crates")
+    if MPL_ICON_DIR.exists():
+        icon_count = sum(1 for _ in MPL_ICON_DIR.rglob("*.svg"))
+        print(f"Accepted {icon_count} MPL-2.0 placeholder icons in Zendia/Base/res/icons/zen/")
     if problems:
         print("Not under a license we allow (see ALLOWED in this script):")
         for problem in problems:
             print(f"  {problem}")
+    if mpl_problems:
+        print("MPL-2.0 asset policy violations:")
+        for problem in mpl_problems:
+            print(f"  {problem}")
+    if problems or mpl_problems:
         return 1
     return 0
 

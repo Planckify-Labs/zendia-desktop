@@ -7,16 +7,11 @@
 //! Ladybird, with a UI written in Rust with Freya. Like the Qt UI, it is a process of its own, which starts the Hub and
 //! shows the views that live there.
 
-mod browser;
-mod frames;
-mod hub;
-mod input;
-mod settings;
-
 use freya::prelude::*;
 use hub_protocol::ipc_types::hub_server::messages as server;
 use hub_protocol::*;
 use libipc_rust::wire::Utf8String;
+use zendia::{browser, hub, settings};
 
 fn ui_info() -> Hub_UIInfo {
     let language = std::env::var("LANG")

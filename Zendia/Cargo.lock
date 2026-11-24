@@ -5084,6 +5084,9 @@ dependencies = [
  "libc",
  "libipc_rust",
  "serde_json",
+ "zendia-browser-core",
+ "zendia-keymap",
+ "zendia-module-api",
 ]
 
 [[package]]
@@ -5097,6 +5100,10 @@ version = "0.1.0"
 [[package]]
 name = "zendia-browser-core"
 version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "zendia-module-api",
+]
 
 [[package]]
 name = "zendia-extension-server"
@@ -5113,6 +5120,10 @@ version = "0.1.0"
 [[package]]
 name = "zendia-keymap"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
+]
 
 [[package]]
 name = "zendia-module-api"

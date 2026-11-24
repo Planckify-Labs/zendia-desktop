@@ -12,11 +12,27 @@ In the planned design (`Zendia/Documentation/Architecture.md`), this becomes a v
 
 ## Layout
 
-- `src/main.rs`: starts the Hub and opens the window.
+- `src/lib.rs`: shared library crate used by both binaries.
+- `src/main.rs`: starts the Hub and opens the `zendia` browser window.
+- `src/bin/gallery.rs`: entry point for `zendia-gallery`, the standalone UI component gallery.
 - `src/browser.rs`: the window, its tabs and toolbar, and the page view.
 - `src/frames.rs`: the backing stores the Compositor presents frames in.
 - `src/input.rs`: Freya's keyboard, mouse and wheel events, as Ladybird's.
 - `src/settings.rs`: the browser settings the Hub sends.
+- `src/ui/`: reactive core view, Tokyonight theme, shared component kit, icons, page surfaces, and keymap wiring.
+- `src/gallery/`: extensible section registry and showcase views for `zendia-gallery`.
+
+## UI Gallery
+
+`zendia-gallery` runs against `BrowserCore`'s in-memory stub backend with no Ladybird build and no Hub process. It shows
+the theme (light/dark), component kit, icon table, declared UI renderer, page-surface placeholders with the InputServer
+overlay, and the standard keymap table:
+
+```sh
+Zendia/Meta/zendia.py gallery --debug
+# or directly from Zendia/:
+cargo run -p zendia --bin zendia-gallery -- --section kit --theme light
+```
 
 ## Building and running
 

@@ -43,7 +43,15 @@ def command_run(args: argparse.Namespace) -> None:
     if not args.skip_upstream:
         build_upstream()
     arguments = args.arguments[1:] if args.arguments[:1] == ["--"] else args.arguments
-    run(["cargo", "run", "-p", "zendia", *cargo_profile(args), "--", *arguments], ZENDIA_ROOT)
+    run(["cargo", "run", "-p", "zendia", "--bin", "zendia", *cargo_profile(args), "--", *arguments], ZENDIA_ROOT)
+
+
+def command_gallery(args: argparse.Namespace) -> None:
+    arguments = args.arguments[1:] if args.arguments[:1] == ["--"] else args.arguments
+    run(
+        ["cargo", "run", "-p", "zendia", "--bin", "zendia-gallery", *cargo_profile(args), "--", *arguments],
+        ZENDIA_ROOT,
+    )
 
 
 def command_check(args: argparse.Namespace) -> None:
@@ -68,6 +76,14 @@ def main() -> int:
     run_parser.add_argument("--debug", action="store_true", help="Build Zendia's crates without optimizations")
     run_parser.add_argument("arguments", nargs=argparse.REMAINDER, help="Arguments for the browser, such as URLs")
     run_parser.set_defaults(handler=command_run)
+
+    gallery = commands.add_parser(
+        "gallery",
+        help="Run the standalone UI component gallery (zendia-gallery) without building upstream Ladybird",
+    )
+    gallery.add_argument("--debug", action="store_true", help="Build Zendia's crates without optimizations")
+    gallery.add_argument("arguments", nargs=argparse.REMAINDER, help="Arguments for zendia-gallery")
+    gallery.set_defaults(handler=command_gallery)
 
     check = commands.add_parser("check", help="Format check, clippy, tests, the fork check and the license check")
     check.set_defaults(handler=command_check)

@@ -13,6 +13,118 @@ use hub_protocol::{
     Web_UIEvents_MouseButton as WebMouseButton, Web_WheelDeltaPrecision,
 };
 use std::time::{Duration, Instant};
+use zendia_keymap::{KeyCode as MapKeyCode, KeyModifiers as MapModifiers, KeyStroke};
+
+/// Translates a Freya keyboard event into a normalized [`KeyStroke`] for [`zendia_keymap`].
+///
+/// Pure modifier presses (Shift, Control, Alt, Meta, lock keys) return `None`.
+pub fn key_stroke_from_event(key: &Key, code: Code, modifiers: Modifiers) -> Option<KeyStroke> {
+    let mut map_modifiers = MapModifiers::NONE;
+    if modifiers.contains(Modifiers::CONTROL) {
+        map_modifiers |= MapModifiers::CTRL;
+    }
+    if modifiers.contains(Modifiers::SHIFT) {
+        map_modifiers |= MapModifiers::SHIFT;
+    }
+    if modifiers.contains(Modifiers::ALT) {
+        map_modifiers |= MapModifiers::ALT;
+    }
+    if modifiers.contains(Modifiers::META) {
+        map_modifiers |= MapModifiers::SUPER;
+    }
+
+    // On X11/XKB, Ctrl+M/J/I/H/[ produce ASCII control characters that winit maps to NamedKey::Enter/Tab/Backspace/
+    // Escape. Recover the underlying character key from the physical `Code` while preserving real Ctrl+Enter/Tab/etc.
+    if map_modifiers.contains(MapModifiers::CTRL) {
+        let recovered = match (key, code) {
+            (Key::Named(NamedKey::Enter), Code::KeyM) => Some('m'),
+            (Key::Named(NamedKey::Enter), Code::KeyJ) => Some('j'),
+            (Key::Named(NamedKey::Tab), Code::KeyI) => Some('i'),
+            (Key::Named(NamedKey::Backspace), Code::KeyH) => Some('h'),
+            (Key::Named(NamedKey::Escape), Code::BracketLeft) => Some('['),
+            _ => None,
+        };
+        if let Some(ch) = recovered {
+            return Some(KeyStroke::new(map_modifiers, MapKeyCode::Char(ch)));
+        }
+    }
+
+    let map_key = match key {
+        Key::Character(text) => {
+            let mut chars = text.chars();
+            let ch = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            match ch {
+                // Some X11 layouts emit ASCII control characters (0x01..=0x1a) when Control is held (for example
+                // Ctrl+M -> '\r' = 0x0d, Ctrl+I -> '\t' = 0x09). Check this before matching control whitespace so
+                // letter chords with Control are never mistaken for Enter/Tab/Backspace.
+                c if map_modifiers.contains(MapModifiers::CTRL) && ('\x01'..='\x1a').contains(&c) => {
+                    MapKeyCode::Char((b'a' + (c as u8 - 1)) as char)
+                }
+                ' ' => MapKeyCode::Space,
+                '\t' => MapKeyCode::Tab,
+                '\r' | '\n' => MapKeyCode::Enter,
+                '\x1b' => MapKeyCode::Escape,
+                '\x08' => MapKeyCode::Backspace,
+                '\x7f' => MapKeyCode::Delete,
+                c => MapKeyCode::Char(c),
+            }
+        }
+        Key::Named(named) => match named {
+            NamedKey::Shift
+            | NamedKey::Control
+            | NamedKey::Alt
+            | NamedKey::AltGraph
+            | NamedKey::Meta
+            | NamedKey::CapsLock
+            | NamedKey::NumLock
+            | NamedKey::ScrollLock => return None,
+            NamedKey::Enter => MapKeyCode::Enter,
+            NamedKey::Tab => MapKeyCode::Tab,
+            NamedKey::Backspace => MapKeyCode::Backspace,
+            NamedKey::Delete => MapKeyCode::Delete,
+            NamedKey::Escape => MapKeyCode::Escape,
+            NamedKey::ArrowUp => MapKeyCode::Up,
+            NamedKey::ArrowDown => MapKeyCode::Down,
+            NamedKey::ArrowLeft => MapKeyCode::Left,
+            NamedKey::ArrowRight => MapKeyCode::Right,
+            NamedKey::Home => MapKeyCode::Home,
+            NamedKey::End => MapKeyCode::End,
+            NamedKey::PageUp => MapKeyCode::PageUp,
+            NamedKey::PageDown => MapKeyCode::PageDown,
+            NamedKey::Insert => MapKeyCode::Insert,
+            NamedKey::F1 => MapKeyCode::F(1),
+            NamedKey::F2 => MapKeyCode::F(2),
+            NamedKey::F3 => MapKeyCode::F(3),
+            NamedKey::F4 => MapKeyCode::F(4),
+            NamedKey::F5 => MapKeyCode::F(5),
+            NamedKey::F6 => MapKeyCode::F(6),
+            NamedKey::F7 => MapKeyCode::F(7),
+            NamedKey::F8 => MapKeyCode::F(8),
+            NamedKey::F9 => MapKeyCode::F(9),
+            NamedKey::F10 => MapKeyCode::F(10),
+            NamedKey::F11 => MapKeyCode::F(11),
+            NamedKey::F12 => MapKeyCode::F(12),
+            NamedKey::F13 => MapKeyCode::F(13),
+            NamedKey::F14 => MapKeyCode::F(14),
+            NamedKey::F15 => MapKeyCode::F(15),
+            NamedKey::F16 => MapKeyCode::F(16),
+            NamedKey::F17 => MapKeyCode::F(17),
+            NamedKey::F18 => MapKeyCode::F(18),
+            NamedKey::F19 => MapKeyCode::F(19),
+            NamedKey::F20 => MapKeyCode::F(20),
+            NamedKey::F21 => MapKeyCode::F(21),
+            NamedKey::F22 => MapKeyCode::F(22),
+            NamedKey::F23 => MapKeyCode::F(23),
+            NamedKey::F24 => MapKeyCode::F(24),
+            _ => return None,
+        },
+    };
+
+    Some(KeyStroke::new(map_modifiers, map_key))
+}
 
 /// The modifiers held once a key event is done. A modifier key's own release still reports that modifier as held, which
 /// would leave it stuck for the mouse events after it.
@@ -278,13 +390,13 @@ impl MouseState {
         &self,
         r#type: Web_MouseEvent_Type,
         position: Web_DevicePixelPoint,
+        screen_position: Web_DevicePixelPoint,
         button: WebMouseButton,
     ) -> Web_MouseEvent {
         Web_MouseEvent {
             r#type,
-            position: position.clone(),
-            // FIXME: The position on the screen, once winit lets us know where the window is.
-            screen_position: position,
+            position,
+            screen_position,
             button,
             buttons: self.buttons,
             modifiers: self.modifiers,
@@ -303,7 +415,12 @@ impl MouseState {
         }
     }
 
-    pub fn down(&mut self, position: Web_DevicePixelPoint, button: WebMouseButton) -> Web_MouseEvent {
+    pub fn down(
+        &mut self,
+        position: Web_DevicePixelPoint,
+        screen_position: Web_DevicePixelPoint,
+        button: WebMouseButton,
+    ) -> Web_MouseEvent {
         let now = Instant::now();
         let continues_clicks = self
             .last_press
@@ -317,21 +434,32 @@ impl MouseState {
         self.click_count = if continues_clicks { self.click_count + 1 } else { 1 };
         self.last_press = Some((now, position.clone(), button));
         self.buttons = self.buttons | button;
-        self.event(Web_MouseEvent_Type::MouseDown, position, button)
+        self.event(Web_MouseEvent_Type::MouseDown, position, screen_position, button)
     }
 
-    pub fn up(&mut self, position: Web_DevicePixelPoint, button: WebMouseButton) -> Web_MouseEvent {
+    pub fn up(
+        &mut self,
+        position: Web_DevicePixelPoint,
+        screen_position: Web_DevicePixelPoint,
+        button: WebMouseButton,
+    ) -> Web_MouseEvent {
         self.buttons = self.buttons & !button;
-        self.event(Web_MouseEvent_Type::MouseUp, position, button)
+        self.event(Web_MouseEvent_Type::MouseUp, position, screen_position, button)
     }
 
-    pub fn moved(&self, position: Web_DevicePixelPoint) -> Web_MouseEvent {
-        self.event(Web_MouseEvent_Type::MouseMove, position, WebMouseButton::None)
+    pub fn moved(&self, position: Web_DevicePixelPoint, screen_position: Web_DevicePixelPoint) -> Web_MouseEvent {
+        self.event(
+            Web_MouseEvent_Type::MouseMove,
+            position,
+            screen_position,
+            WebMouseButton::None,
+        )
     }
 
     pub fn left(&mut self) -> Web_MouseEvent {
         self.event(
             Web_MouseEvent_Type::MouseLeave,
+            Web_DevicePixelPoint { x: 0, y: 0 },
             Web_DevicePixelPoint { x: 0, y: 0 },
             WebMouseButton::None,
         )
@@ -342,6 +470,7 @@ impl MouseState {
     pub fn wheel(
         &self,
         position: Web_DevicePixelPoint,
+        screen_position: Web_DevicePixelPoint,
         delta_x: f64,
         delta_y: f64,
         source: WheelSource,
@@ -353,7 +482,12 @@ impl MouseState {
         const PIXELS_PER_NOTCH: f64 = 3.0 * 40.0;
         const TICKS_PER_NOTCH: f64 = 120.0;
 
-        let mut event = self.event(Web_MouseEvent_Type::MouseWheel, position, WebMouseButton::None);
+        let mut event = self.event(
+            Web_MouseEvent_Type::MouseWheel,
+            position,
+            screen_position,
+            WebMouseButton::None,
+        );
         match source {
             WheelSource::Line => {
                 let notches_x = -delta_x / FREYA_PIXELS_PER_LINE;
