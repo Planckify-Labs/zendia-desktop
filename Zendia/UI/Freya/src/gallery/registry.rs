@@ -312,6 +312,60 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "sidebar",
+        title: "Sidebar",
+        phase: 2,
+        icon: "sidebar",
+        summary: "Vertical tabs, essentials grid and promo, pinned tabs with Clear, collapsible folders, inline tab renamer, spaces with gradient cross-fade, drag reorder, and sidebar notification.",
+        states: &[
+            GalleryStateSpec {
+                id: "full-populated",
+                label: "Full Populated",
+                description: "Essentials grid (3 tiles), 2 pinned tabs, expanded UI Spec folder, collapsed Engine folder, normal tabs, and 2 spaces.",
+            },
+            GalleryStateSpec {
+                id: "collapsed-folder-active",
+                label: "Collapsed Active Child",
+                description: "Collapsed Engine folder keeping its active child tab visible below the header.",
+            },
+            GalleryStateSpec {
+                id: "tab-renamer",
+                label: "Tab Renamer",
+                description: "Inline rename field active on a tab row (Enter commits via tab.rename, Escape cancels).",
+            },
+            GalleryStateSpec {
+                id: "space-work",
+                label: "Space: Work",
+                description: "Switched to the Work space with teal-blue backdrop gradient, briefcase header, and shared essentials.",
+            },
+            GalleryStateSpec {
+                id: "notification-visible",
+                label: "Notification",
+                description: "Update Complete! sidebar notification card at the foot of the sidebar with dismiss and link rows.",
+            },
+            GalleryStateSpec {
+                id: "empty-essentials-promo",
+                label: "Essentials Promo",
+                description: "Empty essentials state displaying Zen's Add to Essentials promo card above the space.",
+            },
+            GalleryStateSpec {
+                id: "tab-states",
+                label: "Tab States",
+                description: "Audible, muted, loading spinner, hovered close button, placeholder favicon, and Clear separator button.",
+            },
+            GalleryStateSpec {
+                id: "drag-reorder",
+                label: "Drag Reorder",
+                description: "Active drag reorder preview with translucent tab ghost and accent drop insertion bar.",
+            },
+            GalleryStateSpec {
+                id: "collapsed-sidebar",
+                label: "Collapsed Sidebar",
+                description: "Collapsed icon-only sidebar showing essentials, pinned tabs, folders, normal tabs, and space switcher.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
@@ -532,6 +586,27 @@ fn format_command_detail(command: &Command) -> String {
         Command::TabActivate { tab_id } => format!("tab={}", tab_id.0),
         Command::NavigationLoadUrl { input, .. } => input.clone(),
         Command::SpaceSwitch { space_id } => format!("space={}", space_id.0),
+        Command::SpaceClearTabs { space_id } => format!("space={space_id:?}"),
+        Command::TabPin { tab_id }
+        | Command::TabUnpin { tab_id }
+        | Command::TabTogglePin { tab_id }
+        | Command::TabAddToEssentials { tab_id }
+        | Command::TabRemoveFromEssentials { tab_id }
+        | Command::TabToggleEssential { tab_id }
+        | Command::TabToggleMute { tab_id }
+        | Command::TabDuplicate { tab_id }
+        | Command::TabStartRename { tab_id } => format!("tab={tab_id:?}"),
+        Command::TabRename { tab_id, title } => format!("tab={tab_id:?} title=\"{title}\""),
+        Command::TabMove { tab_id, target } => format!("tab={} -> {target:?}", tab_id.0),
+        Command::TabMoveToFolder { tab_id, folder_id } => format!("tab={tab_id:?} folder={folder_id:?}"),
+        Command::TabMoveToSpace { tab_id, space_id } => format!("tab={tab_id:?} space={}", space_id.0),
+        Command::FolderCreate { name, space_id, .. } => format!("name={name:?} space={space_id:?}"),
+        Command::FolderRename { folder_id, name } => format!("folder={} name=\"{name}\"", folder_id.0),
+        Command::FolderStartRename { folder_id }
+        | Command::FolderDelete { folder_id }
+        | Command::FolderUnpack { folder_id }
+        | Command::FolderToggleCollapsed { folder_id } => format!("folder={}", folder_id.0),
+        Command::NotificationDismiss { notification_id } => format!("notification={}", notification_id.0),
         Command::SplitAdd { tab_id, direction } => format!("tab={} {direction:?}", tab_id.0),
         Command::PanelToggle { panel_id } => panel_id.as_str().to_string(),
         Command::AgentSend { prompt, .. } => prompt.clone(),

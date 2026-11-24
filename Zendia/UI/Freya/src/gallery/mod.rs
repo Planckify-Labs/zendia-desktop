@@ -16,6 +16,7 @@ pub use registry::{
 
 use crate::gallery::sections::render_section;
 use crate::ui::chrome::menus::{MenuLayer, use_provide_menu_state};
+use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::{use_core, use_provide_core_with_observer};
 use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
 use crate::ui::page::use_provide_keymap;
@@ -53,18 +54,28 @@ impl App for GalleryApp {
 
         let gallery_core = use_hook(|| Arc::new(GalleryCore::new(initial_theme)));
         let menu_state = use_provide_menu_state();
-        let core =
-            use_provide_core_with_observer(
-                Arc::clone(&gallery_core) as Arc<dyn BrowserCore>,
-                move |event| match event {
-                    CoreEvent::AppMenuToggleRequested => menu_state.toggle_app_menu(None),
-                    CoreEvent::AboutDialogRequested => menu_state.open_about(),
-                    CoreEvent::ClipboardCopyRequested { text } if !text.is_empty() => {
-                        let _ = freya::clipboard::Clipboard::set(text.clone());
+        let sidebar_state = use_provide_sidebar_state();
+        let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
+            let gallery_core = Arc::clone(&gallery_core);
+            move |event| match event {
+                CoreEvent::AppMenuToggleRequested => menu_state.toggle_app_menu(None),
+                CoreEvent::AboutDialogRequested => menu_state.open_about(),
+                CoreEvent::ClipboardCopyRequested { text } if !text.is_empty() => {
+                    let _ = freya::clipboard::Clipboard::set(text.clone());
+                }
+                CoreEvent::TabRenameRequested { tab_id } => {
+                    if let Some(tab) = gallery_core.model().tab(*tab_id) {
+                        sidebar_state.start_tab_rename(*tab_id, tab.display_title());
                     }
-                    _ => {}
-                },
-            );
+                }
+                CoreEvent::FolderRenameRequested { folder_id } => {
+                    if let Some(folder) = gallery_core.model().folder(*folder_id) {
+                        sidebar_state.start_folder_rename(*folder_id, folder.name.clone());
+                    }
+                }
+                _ => {}
+            }
+        });
         let _theme_state = use_provide_theme(&core);
         let keymap = use_provide_keymap();
         let theme = use_theme();

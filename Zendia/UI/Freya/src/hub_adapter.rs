@@ -193,6 +193,7 @@ impl HubTabAdapter {
             split_group_id: None,
             kind: TabKind::Normal,
             title: state.title.to_string_lossy(),
+            custom_title: None,
             url: state.displayed_url.as_str().to_string(),
             favicon: None,
             is_loading: state.is_loading,

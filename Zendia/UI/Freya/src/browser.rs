@@ -14,6 +14,7 @@ use crate::ui::chrome::WindowShell;
 use crate::ui::chrome::menus::{
     MenuLayer, MenuViewState, open_hub_context_menu, open_hub_select_dropdown, use_provide_menu_state,
 };
+use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::use_provide_core_with_observer;
 use crate::ui::page::{
     DebugInputOverlay, PageStage, PageSurface, PageSurfaceContext, use_provide_keymap, use_provide_page_surfaces,
@@ -328,6 +329,7 @@ pub fn app() -> impl IntoElement {
     let page_ctx = use_provide_page_surfaces();
     let keymap = use_provide_keymap();
     let menu_state = use_provide_menu_state();
+    let sidebar_state = use_provide_sidebar_state();
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -353,6 +355,16 @@ pub fn app() -> impl IntoElement {
             }
             CoreEvent::ClipboardCopyRequested { text } if !text.is_empty() => {
                 let _ = freya::clipboard::Clipboard::set(text.clone());
+            }
+            CoreEvent::TabRenameRequested { tab_id } => {
+                if let Some(tab) = stub_core.model().tab(*tab_id) {
+                    sidebar_state.start_tab_rename(*tab_id, tab.display_title());
+                }
+            }
+            CoreEvent::FolderRenameRequested { folder_id } => {
+                if let Some(folder) = stub_core.model().folder(*folder_id) {
+                    sidebar_state.start_folder_rename(*folder_id, folder.name.clone());
+                }
             }
             _ => {}
         }
@@ -481,7 +493,15 @@ pub fn app() -> impl IntoElement {
             rect()
                 .width(Size::fill())
                 .height(Size::fill())
-                .background((255, 255, 255))
+                .background(theme.color(ThemeRole::Surface))
+                .main_align(Alignment::center())
+                .cross_align(Alignment::center())
+                .child(
+                    label()
+                        .text("No tabs open in this space")
+                        .font_size(theme.font_sizes.md)
+                        .color(theme.color(ThemeRole::TextMuted)),
+                )
                 .into_element()
         };
 

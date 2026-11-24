@@ -8,8 +8,8 @@
 
 use crate::contributions::SidePanelId;
 use crate::model::{
-    AgentId, ChatSiteId, ConversationId, SidebarSide, SpaceId, SplitDirection, TabId, ThemeOverrides, ThemeScheme,
-    ToolbarLayout,
+    AgentId, ChatSiteId, ConversationId, FolderId, NotificationId, SidebarSide, SpaceId, SplitDirection, TabId,
+    TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
 };
 use std::fmt;
 
@@ -87,6 +87,78 @@ pub enum Command {
     },
     SpaceSwitch {
         space_id: SpaceId,
+    },
+    SpaceNext,
+    SpacePrevious,
+    SpaceClearTabs {
+        space_id: Option<SpaceId>,
+    },
+    TabPin {
+        tab_id: Option<TabId>,
+    },
+    TabUnpin {
+        tab_id: Option<TabId>,
+    },
+    TabTogglePin {
+        tab_id: Option<TabId>,
+    },
+    TabAddToEssentials {
+        tab_id: Option<TabId>,
+    },
+    TabRemoveFromEssentials {
+        tab_id: Option<TabId>,
+    },
+    TabToggleEssential {
+        tab_id: Option<TabId>,
+    },
+    TabToggleMute {
+        tab_id: Option<TabId>,
+    },
+    TabDuplicate {
+        tab_id: Option<TabId>,
+    },
+    TabRename {
+        tab_id: Option<TabId>,
+        title: String,
+    },
+    TabStartRename {
+        tab_id: Option<TabId>,
+    },
+    TabMove {
+        tab_id: TabId,
+        target: TabMoveTarget,
+    },
+    TabMoveToFolder {
+        tab_id: Option<TabId>,
+        folder_id: Option<FolderId>,
+    },
+    TabMoveToSpace {
+        tab_id: Option<TabId>,
+        space_id: SpaceId,
+    },
+    FolderCreate {
+        name: Option<String>,
+        space_id: Option<SpaceId>,
+        tab_id: Option<TabId>,
+    },
+    FolderRename {
+        folder_id: FolderId,
+        name: String,
+    },
+    FolderStartRename {
+        folder_id: FolderId,
+    },
+    FolderDelete {
+        folder_id: FolderId,
+    },
+    FolderUnpack {
+        folder_id: FolderId,
+    },
+    FolderToggleCollapsed {
+        folder_id: FolderId,
+    },
+    NotificationDismiss {
+        notification_id: NotificationId,
     },
     SplitAdd {
         tab_id: TabId,
@@ -259,6 +331,29 @@ impl Command {
             Self::NavigationStop { .. } => "navigation.stop",
             Self::NavigationLoadUrl { .. } => "navigation.load_url",
             Self::SpaceSwitch { .. } => "space.switch",
+            Self::SpaceNext => "space.next",
+            Self::SpacePrevious => "space.previous",
+            Self::SpaceClearTabs { .. } => "space.clear_tabs",
+            Self::TabPin { .. } => "tab.pin",
+            Self::TabUnpin { .. } => "tab.unpin",
+            Self::TabTogglePin { .. } => "tab.toggle_pin",
+            Self::TabAddToEssentials { .. } => "tab.add_to_essentials",
+            Self::TabRemoveFromEssentials { .. } => "tab.remove_from_essentials",
+            Self::TabToggleEssential { .. } => "tab.toggle_essential",
+            Self::TabToggleMute { .. } => "tab.toggle_mute",
+            Self::TabDuplicate { .. } => "tab.duplicate",
+            Self::TabRename { .. } => "tab.rename",
+            Self::TabStartRename { .. } => "tab.start_rename",
+            Self::TabMove { .. } => "tab.move",
+            Self::TabMoveToFolder { .. } => "tab.move_to_folder",
+            Self::TabMoveToSpace { .. } => "tab.move_to_space",
+            Self::FolderCreate { .. } => "folder.create",
+            Self::FolderRename { .. } => "folder.rename",
+            Self::FolderStartRename { .. } => "folder.start_rename",
+            Self::FolderDelete { .. } => "folder.delete",
+            Self::FolderUnpack { .. } => "folder.unpack",
+            Self::FolderToggleCollapsed { .. } => "folder.toggle_collapsed",
+            Self::NotificationDismiss { .. } => "notification.dismiss",
             Self::SplitAdd { .. } => "split.add",
             Self::PanelToggle { .. } => "panel.toggle",
             Self::AgentSend { .. } => "agent.send",
@@ -346,6 +441,101 @@ impl Command {
             }),
             "space.switch" => Ok(Self::SpaceSwitch {
                 space_id: SpaceId(parse_required_u64_arg(name, args, "space_id")?),
+            }),
+            "space.next" => Ok(Self::SpaceNext),
+            "space.previous" => Ok(Self::SpacePrevious),
+            "space.clear_tabs" => Ok(Self::SpaceClearTabs {
+                space_id: parse_optional_u64_arg(name, args, "space_id")?.map(SpaceId),
+            }),
+            "tab.pin" => Ok(Self::TabPin {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.unpin" => Ok(Self::TabUnpin {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.toggle_pin" => Ok(Self::TabTogglePin {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.add_to_essentials" => Ok(Self::TabAddToEssentials {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.remove_from_essentials" => Ok(Self::TabRemoveFromEssentials {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.toggle_essential" => Ok(Self::TabToggleEssential {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.toggle_mute" => Ok(Self::TabToggleMute {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.duplicate" => Ok(Self::TabDuplicate {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.rename" => Ok(Self::TabRename {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                title: parse_required_string_arg(name, args, "title")?,
+            }),
+            "tab.start_rename" => Ok(Self::TabStartRename {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.move" => {
+                let tab_id = TabId(parse_required_u64_arg(name, args, "tab_id")?);
+                let index = parse_optional_u64_arg(name, args, "index")?.unwrap_or(0) as usize;
+                let section = find_arg(args, "section").unwrap_or("normal");
+                let target = match section {
+                    "normal" => TabMoveTarget::Normal {
+                        space_id: parse_optional_u64_arg(name, args, "space_id")?.map(SpaceId),
+                        index,
+                    },
+                    "pinned" => TabMoveTarget::Pinned {
+                        space_id: parse_optional_u64_arg(name, args, "space_id")?.map(SpaceId),
+                        index,
+                    },
+                    "folder" => TabMoveTarget::Folder {
+                        folder_id: FolderId(parse_required_u64_arg(name, args, "folder_id")?),
+                        index,
+                    },
+                    "essential" => TabMoveTarget::Essential { index },
+                    other => {
+                        return Err(CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: format!("unknown tab.move section `{other}`"),
+                        });
+                    }
+                };
+                Ok(Self::TabMove { tab_id, target })
+            }
+            "tab.move_to_folder" => Ok(Self::TabMoveToFolder {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                folder_id: parse_optional_u64_arg(name, args, "folder_id")?.map(FolderId),
+            }),
+            "tab.move_to_space" => Ok(Self::TabMoveToSpace {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                space_id: SpaceId(parse_required_u64_arg(name, args, "space_id")?),
+            }),
+            "folder.create" | "folder.new" => Ok(Self::FolderCreate {
+                name: find_arg(args, "name").map(str::to_string),
+                space_id: parse_optional_u64_arg(name, args, "space_id")?.map(SpaceId),
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "folder.rename" => Ok(Self::FolderRename {
+                folder_id: FolderId(parse_required_u64_arg(name, args, "folder_id")?),
+                name: parse_required_string_arg(name, args, "name")?,
+            }),
+            "folder.start_rename" => Ok(Self::FolderStartRename {
+                folder_id: FolderId(parse_required_u64_arg(name, args, "folder_id")?),
+            }),
+            "folder.delete" => Ok(Self::FolderDelete {
+                folder_id: FolderId(parse_required_u64_arg(name, args, "folder_id")?),
+            }),
+            "folder.unpack" => Ok(Self::FolderUnpack {
+                folder_id: FolderId(parse_required_u64_arg(name, args, "folder_id")?),
+            }),
+            "folder.toggle_collapsed" => Ok(Self::FolderToggleCollapsed {
+                folder_id: FolderId(parse_required_u64_arg(name, args, "folder_id")?),
+            }),
+            "notification.dismiss" => Ok(Self::NotificationDismiss {
+                notification_id: NotificationId(parse_required_u64_arg(name, args, "notification_id")?),
             }),
             "split.add" => {
                 let tab_id = TabId(parse_required_u64_arg(name, args, "tab_id")?);
@@ -561,6 +751,8 @@ pub enum ArgumentType {
     Integer,
     TabId,
     SpaceId,
+    FolderId,
+    NotificationId,
     SidePanelId,
     AgentId,
     ConversationId,
@@ -732,6 +924,211 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
                 ArgumentType::SpaceId,
                 true,
                 "Destination space",
+            )],
+        },
+        CommandDescriptor {
+            name: "space.next".to_string(),
+            title: "Next Space".to_string(),
+            description: "Switch to the next workspace".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "space.previous".to_string(),
+            title: "Previous Space".to_string(),
+            description: "Switch to the previous workspace".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "space.clear_tabs".to_string(),
+            title: "Clear Unpinned Tabs".to_string(),
+            description: "Close all normal tabs in the active or specified space".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "space_id",
+                ArgumentType::SpaceId,
+                false,
+                "Target space (defaults to active space)",
+            )],
+        },
+        CommandDescriptor {
+            name: "tab.pin".to_string(),
+            title: "Pin Tab".to_string(),
+            description: "Pin a tab to the current space".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "tab.unpin".to_string(),
+            title: "Unpin Tab".to_string(),
+            description: "Return a pinned tab to the normal tab list".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "tab.toggle_pin".to_string(),
+            title: "Toggle Pin Tab".to_string(),
+            description: "Pin or unpin the active or specified tab".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "tab.add_to_essentials".to_string(),
+            title: "Add to Essentials".to_string(),
+            description: "Promote a tab into the shared essentials grid".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "tab.remove_from_essentials".to_string(),
+            title: "Remove from Essentials".to_string(),
+            description: "Move an essential tab back to the active space".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "tab.toggle_essential".to_string(),
+            title: "Toggle Essential Tab".to_string(),
+            description: "Add or remove a tab from shared essentials".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "tab.toggle_mute".to_string(),
+            title: "Mute / Unmute Tab".to_string(),
+            description: "Toggle audio mute state on a tab".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "tab.duplicate".to_string(),
+            title: "Duplicate Tab".to_string(),
+            description: "Open a duplicate of the specified tab".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "tab.rename".to_string(),
+            title: "Rename Tab".to_string(),
+            description: "Assign or clear a custom title on a tab".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab"),
+                ArgumentSchema::new(
+                    "title",
+                    ArgumentType::String,
+                    true,
+                    "Custom title (empty clears the override)",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "tab.start_rename".to_string(),
+            title: "Start Renaming Tab".to_string(),
+            description: "Focus the inline rename field for a tab".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "tab.move".to_string(),
+            title: "Move Tab".to_string(),
+            description: "Reorder a tab within normal tabs, pinned tabs, a folder, or essentials".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, true, "Tab to move"),
+                ArgumentSchema::new(
+                    "section",
+                    ArgumentType::String,
+                    true,
+                    "Destination section (normal, pinned, folder, or essential)",
+                ),
+                ArgumentSchema::new("index", ArgumentType::Integer, false, "Insertion index"),
+                ArgumentSchema::new("space_id", ArgumentType::SpaceId, false, "Destination space"),
+                ArgumentSchema::new("folder_id", ArgumentType::FolderId, false, "Destination folder"),
+            ],
+        },
+        CommandDescriptor {
+            name: "tab.move_to_folder".to_string(),
+            title: "Move Tab to Folder".to_string(),
+            description: "Move a tab into a folder or out of its current folder".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab"),
+                ArgumentSchema::new(
+                    "folder_id",
+                    ArgumentType::FolderId,
+                    false,
+                    "Destination folder (omit to remove from folder)",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "tab.move_to_space".to_string(),
+            title: "Move Tab to Space".to_string(),
+            description: "Move a tab into another workspace".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab"),
+                ArgumentSchema::new("space_id", ArgumentType::SpaceId, true, "Destination space"),
+            ],
+        },
+        CommandDescriptor {
+            name: "folder.create".to_string(),
+            title: "New Folder".to_string(),
+            description: "Create a tab folder in the active or specified space".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("name", ArgumentType::String, false, "Folder name"),
+                ArgumentSchema::new("space_id", ArgumentType::SpaceId, false, "Target space"),
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Optional initial tab"),
+            ],
+        },
+        CommandDescriptor {
+            name: "folder.rename".to_string(),
+            title: "Rename Folder".to_string(),
+            description: "Change the name of a tab folder".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("folder_id", ArgumentType::FolderId, true, "Target folder"),
+                ArgumentSchema::new("name", ArgumentType::String, true, "New folder name"),
+            ],
+        },
+        CommandDescriptor {
+            name: "folder.start_rename".to_string(),
+            title: "Start Renaming Folder".to_string(),
+            description: "Focus the inline rename field for a folder".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "folder_id",
+                ArgumentType::FolderId,
+                true,
+                "Target folder",
+            )],
+        },
+        CommandDescriptor {
+            name: "folder.delete".to_string(),
+            title: "Delete Folder".to_string(),
+            description: "Delete a folder and close its tabs".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "folder_id",
+                ArgumentType::FolderId,
+                true,
+                "Target folder",
+            )],
+        },
+        CommandDescriptor {
+            name: "folder.unpack".to_string(),
+            title: "Unpack Folder".to_string(),
+            description: "Remove a folder while keeping its tabs".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "folder_id",
+                ArgumentType::FolderId,
+                true,
+                "Target folder",
+            )],
+        },
+        CommandDescriptor {
+            name: "folder.toggle_collapsed".to_string(),
+            title: "Toggle Folder Collapsed".to_string(),
+            description: "Expand or collapse a tab folder".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "folder_id",
+                ArgumentType::FolderId,
+                true,
+                "Target folder",
+            )],
+        },
+        CommandDescriptor {
+            name: "notification.dismiss".to_string(),
+            title: "Dismiss Sidebar Notification".to_string(),
+            description: "Dismiss a notification card from the sidebar".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "notification_id",
+                ArgumentType::NotificationId,
+                true,
+                "Notification to dismiss",
             )],
         },
         CommandDescriptor {

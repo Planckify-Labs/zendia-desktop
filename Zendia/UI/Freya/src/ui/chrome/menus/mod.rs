@@ -24,12 +24,11 @@ use crate::ui::page::PageSurfaceContext;
 use freya::prelude::*;
 use hub_protocol::{Gfx_IntPoint, Web_HTML_SelectItem, WebView_ContextMenuKind, WebView_ContextMenuRequest};
 use zendia_browser_core::BrowserCore;
-use zendia_browser_core::contributions::{MenuEntry, MenuLocation};
 use zendia_browser_core::menus::{
-    MediaMenuContext, PageContextMenuKind, PageContextMenuRequest, ResolvedMenuItem, SelectDropdownItem, SelectOption,
-    TAB_CONTEXT_GROUPS, build_page_context_menu, resolve_contributed_menu,
+    MediaMenuContext, PageContextMenuKind, PageContextMenuRequest, SelectDropdownItem, SelectOption,
+    build_folder_context_menu, build_page_context_menu, build_space_context_menu, build_tab_context_menu,
 };
-use zendia_browser_core::model::TabId;
+use zendia_browser_core::model::{BrowserModel, FolderId, SpaceId, TabId};
 use zendia_keymap::KeyTable;
 
 /// Single overlay host placed once at the window root above all chrome and page surfaces.
@@ -214,10 +213,9 @@ pub fn open_hub_select_dropdown(
 }
 
 /// Opens the tab context menu for `tab_id` at `position`, built from the core's tab menu contributions.
-pub fn open_tab_context_menu(menu_state: &MenuViewState, entries: &[MenuEntry], tab_id: TabId, position: (f32, f32)) {
+pub fn open_tab_context_menu(menu_state: &MenuViewState, model: &BrowserModel, tab_id: TabId, position: (f32, f32)) {
     let key_table = KeyTable::standard();
-    let mut items = resolve_contributed_menu(entries, MenuLocation::TabContext, Some(&key_table), TAB_CONTEXT_GROUPS);
-    aim_at_tab(&mut items, tab_id);
+    let items = build_tab_context_menu(model, tab_id, Some(&key_table));
     if !items.is_empty() {
         menu_state.open_context_menu(OpenContextMenu {
             position,
@@ -227,12 +225,38 @@ pub fn open_tab_context_menu(menu_state: &MenuViewState, entries: &[MenuEntry], 
     }
 }
 
-/// The tab menu's contributions don't name a tab, so each entry is given the one that was right-clicked.
-fn aim_at_tab(items: &mut [ResolvedMenuItem], tab_id: TabId) {
-    for item in items {
-        if !item.command.is_empty() && !item.command_args.iter().any(|(name, _)| name == "tab_id") {
-            item.command_args.push(("tab_id".to_string(), tab_id.0.to_string()));
-        }
-        aim_at_tab(&mut item.children, tab_id);
+/// Opens the folder context menu for `folder_id` at `position`, built from the core's folder menu contributions.
+pub fn open_folder_context_menu(
+    menu_state: &MenuViewState,
+    model: &BrowserModel,
+    folder_id: FolderId,
+    position: (f32, f32),
+) {
+    let key_table = KeyTable::standard();
+    let items = build_folder_context_menu(model, folder_id, Some(&key_table));
+    if !items.is_empty() {
+        menu_state.open_context_menu(OpenContextMenu {
+            position,
+            items,
+            tab_id: None,
+        });
+    }
+}
+
+/// Opens the space context menu for `space_id` at `position`, built from the core's space menu contributions.
+pub fn open_space_context_menu(
+    menu_state: &MenuViewState,
+    model: &BrowserModel,
+    space_id: SpaceId,
+    position: (f32, f32),
+) {
+    let key_table = KeyTable::standard();
+    let items = build_space_context_menu(model, space_id, Some(&key_table));
+    if !items.is_empty() {
+        menu_state.open_context_menu(OpenContextMenu {
+            position,
+            items,
+            tab_id: None,
+        });
     }
 }

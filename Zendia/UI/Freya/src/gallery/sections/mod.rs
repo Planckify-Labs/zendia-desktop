@@ -12,6 +12,7 @@ pub mod keymap;
 pub mod kit;
 pub mod menus;
 pub mod page;
+pub mod sidebar;
 pub mod theme;
 pub mod window_shell;
 
@@ -59,6 +60,11 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
         .into_element(),
         "menus" => menus::MenusSection {
             state_id: state_id.to_string(),
+        }
+        .into_element(),
+        "sidebar" => sidebar::SidebarSection {
+            state_id: state_id.to_string(),
+            gallery_core: Arc::clone(gallery_core),
         }
         .into_element(),
         other => rect()

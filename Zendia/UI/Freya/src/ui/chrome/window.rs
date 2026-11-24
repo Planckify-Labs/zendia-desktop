@@ -8,14 +8,16 @@
 //! inset page card.
 
 use crate::ui::chrome::layout::{
-    ChromePalette, PAGE_CARD_RADIUS, ToolbarSlots, page_card_margins, window_backdrop_gradient,
+    BackdropEndpoints, ChromePalette, PAGE_CARD_RADIUS, SPACE_GRADIENT_CROSSFADE, ToolbarSlots, page_card_margins,
+    window_backdrop_endpoints,
 };
 use crate::ui::chrome::sidebar::{SidebarFrame, SidebarResizeHandle};
 use crate::ui::chrome::toolbar::TopToolbar;
 use crate::ui::core_view::use_core;
-use crate::ui::theme::{ResolvedScheme, use_theme};
+use crate::ui::theme::{ResolvedScheme, motion, use_theme};
+use freya::animation::*;
 use freya::prelude::*;
-use zendia_browser_core::model::SidebarSide;
+use zendia_browser_core::model::{SidebarSide, SpaceId};
 
 /// Composes Zendia's complete browser window shell around a caller-supplied page element (real [`PageStage`] in the
 /// live window, or a placeholder card in the UI gallery).
@@ -68,7 +70,31 @@ impl Component for WindowShell {
             )
         };
 
-        let backdrop = window_backdrop_gradient(active_space.as_ref(), theme.scheme);
+        let target_endpoints = window_backdrop_endpoints(active_space.as_ref(), theme.scheme);
+        let gradient_key: (Option<SpaceId>, ResolvedScheme) = (active_space.as_ref().map(|s| s.id), theme.scheme);
+
+        let mut from_endpoints = use_state(|| target_endpoints);
+        let mut to_endpoints = use_state(|| target_endpoints);
+        let mut last_gradient_key = use_state(|| gradient_key);
+
+        if *last_gradient_key.peek() != gradient_key {
+            let prev = *to_endpoints.peek();
+            from_endpoints.set(prev);
+            to_endpoints.set(target_endpoints);
+            last_gradient_key.set(gradient_key);
+        }
+
+        let crossfade = use_animation_with_dependencies(&gradient_key, move |conf, _| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            AnimNum::new(0.0, 1.0)
+                .duration(SPACE_GRADIENT_CROSSFADE)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+
+        let t = crossfade.get().value().clamp(0.0, 1.0);
+        let backdrop = BackdropEndpoints::lerp(&from_endpoints.read(), &to_endpoints.read(), t).to_gradient();
         let slots = ToolbarSlots::resolve(&toolbar_items, &layout);
         let (card_top, card_right, card_bottom, card_left) = page_card_margins(&layout);
 

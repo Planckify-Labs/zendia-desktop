@@ -8,8 +8,8 @@
 
 use crate::contributions::{Contributions, SidePanelId};
 use crate::model::{
-    Conversation, InputMode, LayoutSettings, ServiceState, SpaceId, SplitGroup, Tab, TabId, ThemeSettings,
-    WhichKeyState,
+    Conversation, Essential, Folder, FolderId, InputMode, LayoutSettings, NotificationId, PinnedTab, ServiceState,
+    SidebarNotification, Space, SpaceId, SplitGroup, Tab, TabId, ThemeSettings, WhichKeyState,
 };
 use std::fmt;
 use std::sync::Mutex;
@@ -32,6 +32,45 @@ pub enum Event {
     },
     SpaceSwitched {
         space_id: SpaceId,
+    },
+    SpacesUpdated {
+        spaces: Vec<Space>,
+    },
+    TabsReordered {
+        tabs: Vec<Tab>,
+        essentials: Vec<Essential>,
+        pinned_tabs: Vec<PinnedTab>,
+        folders: Vec<Folder>,
+    },
+    EssentialsChanged {
+        essentials: Vec<Essential>,
+    },
+    PinnedTabsChanged {
+        pinned_tabs: Vec<PinnedTab>,
+    },
+    FolderCreated {
+        folder: Folder,
+    },
+    FolderUpdated {
+        folder: Folder,
+    },
+    FolderDeleted {
+        folder_id: FolderId,
+    },
+    SidebarNotificationAdded {
+        notification: SidebarNotification,
+    },
+    SidebarNotificationDismissed {
+        notification_id: NotificationId,
+    },
+    EssentialsPromoChanged {
+        visible: bool,
+    },
+    TabRenameRequested {
+        tab_id: TabId,
+    },
+    FolderRenameRequested {
+        folder_id: FolderId,
     },
     SplitGroupUpdated {
         group: SplitGroup,

@@ -45,6 +45,38 @@ pub struct HistoryEntryId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MediaSessionId(pub u64);
 
+/// Stable identifier for a sidebar notification card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NotificationId(pub u64);
+
+/// One clickable link row inside a [`SidebarNotification`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarNotificationLink {
+    pub label: String,
+    pub icon: String,
+    pub url: Option<String>,
+    pub command: Option<String>,
+    pub special: bool,
+}
+
+/// Core-published notification card displayed at the foot of the expanded sidebar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarNotification {
+    pub id: NotificationId,
+    pub heading: String,
+    pub links: Vec<SidebarNotificationLink>,
+    pub auto_hide_ms: Option<u64>,
+}
+
+/// Destination section and insertion index for a `tab.move` reorder command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabMoveTarget {
+    Normal { space_id: Option<SpaceId>, index: usize },
+    Pinned { space_id: Option<SpaceId>, index: usize },
+    Folder { folder_id: FolderId, index: usize },
+    Essential { index: usize },
+}
+
 /// Stable identifier for an installed AI agent.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(pub String);
@@ -117,6 +149,8 @@ pub struct Space {
     pub name: String,
     pub icon: String,
     pub gradient: SpaceGradient,
+    /// Last tab that was active while viewing this space, restored when switching back.
+    pub last_active_tab: Option<TabId>,
 }
 
 /// Where a tab lives in the sidebar hierarchy.
@@ -138,6 +172,8 @@ pub struct Tab {
     pub split_group_id: Option<SplitGroupId>,
     pub kind: TabKind,
     pub title: String,
+    /// User-assigned custom title from `tab.rename`, preserved across page title updates.
+    pub custom_title: Option<String>,
     pub url: String,
     pub favicon: Option<String>,
     pub is_loading: bool,
@@ -151,7 +187,11 @@ pub struct Tab {
 impl Tab {
     /// Human-readable label shown in tab strips and pickers.
     pub fn display_title(&self) -> String {
-        if !self.title.is_empty() {
+        if let Some(custom) = &self.custom_title
+            && !custom.is_empty()
+        {
+            custom.clone()
+        } else if !self.title.is_empty() {
             self.title.clone()
         } else if !self.url.is_empty() && self.url != "about:blank" {
             self.url.clone()
@@ -532,6 +572,8 @@ pub struct BrowserModel {
     pub downloads: Vec<Download>,
     pub history: Vec<HistoryEntry>,
     pub media_sessions: Vec<MediaSession>,
+    pub sidebar_notifications: Vec<SidebarNotification>,
+    pub show_essentials_promo: bool,
     pub contributions: Contributions,
     pub agents: Vec<Agent>,
     pub conversations: Vec<Conversation>,
@@ -560,9 +602,140 @@ impl BrowserModel {
         self.active_tab.and_then(|id| self.tab(id))
     }
 
+    pub fn space(&self, space_id: SpaceId) -> Option<&Space> {
+        self.spaces.iter().find(|space| space.id == space_id)
+    }
+
+    pub fn folder(&self, folder_id: FolderId) -> Option<&Folder> {
+        self.folders.iter().find(|folder| folder.id == folder_id)
+    }
+
     pub fn active_space(&self) -> Option<&Space> {
-        self.active_space
-            .and_then(|id| self.spaces.iter().find(|space| space.id == id))
+        self.active_space.and_then(|id| self.space(id))
+    }
+
+    /// Essential tabs shared across all spaces, in their configured tile order.
+    pub fn essential_tabs(&self) -> Vec<&Tab> {
+        let mut ordered = self.essentials.clone();
+        ordered.sort_by_key(|item| item.order);
+        let mut out = Vec::new();
+        for item in &ordered {
+            if let Some(tab) = self.tab(item.tab_id)
+                && tab.kind == TabKind::Essential
+            {
+                out.push(tab);
+            }
+        }
+        for tab in &self.tabs {
+            if tab.kind == TabKind::Essential && !out.iter().any(|existing| existing.id == tab.id) {
+                out.push(tab);
+            }
+        }
+        out
+    }
+
+    /// Top-level pinned tabs belonging to `space_id` (excluding tabs nested inside folders), in pinned order.
+    pub fn pinned_tabs_in_space(&self, space_id: SpaceId) -> Vec<&Tab> {
+        let mut ordered: Vec<&PinnedTab> = self
+            .pinned_tabs
+            .iter()
+            .filter(|item| item.space_id == space_id)
+            .collect();
+        ordered.sort_by_key(|item| item.order);
+        let mut out = Vec::new();
+        for item in ordered {
+            if let Some(tab) = self.tab(item.tab_id)
+                && tab.kind == TabKind::Pinned
+                && tab.space_id == Some(space_id)
+                && tab.folder_id.is_none()
+            {
+                out.push(tab);
+            }
+        }
+        for tab in &self.tabs {
+            if tab.kind == TabKind::Pinned
+                && tab.space_id == Some(space_id)
+                && tab.folder_id.is_none()
+                && !out.iter().any(|existing| existing.id == tab.id)
+            {
+                out.push(tab);
+            }
+        }
+        out
+    }
+
+    /// Folders belonging to `space_id`, in sidebar order.
+    pub fn folders_in_space(&self, space_id: SpaceId) -> Vec<&Folder> {
+        self.folders
+            .iter()
+            .filter(|folder| folder.space_id == space_id)
+            .collect()
+    }
+
+    /// All tabs contained in `folder_id`, in folder order.
+    pub fn folder_tabs(&self, folder_id: FolderId) -> Vec<&Tab> {
+        let Some(folder) = self.folder(folder_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for tab_id in &folder.tab_ids {
+            if let Some(tab) = self.tab(*tab_id)
+                && tab.folder_id == Some(folder_id)
+            {
+                out.push(tab);
+            }
+        }
+        for tab in &self.tabs {
+            if tab.folder_id == Some(folder_id) && !out.iter().any(|existing| existing.id == tab.id) {
+                out.push(tab);
+            }
+        }
+        out
+    }
+
+    /// Tabs currently visible under `folder_id`: all tabs when expanded, or only the active tab when collapsed.
+    pub fn visible_folder_tabs(&self, folder_id: FolderId) -> Vec<&Tab> {
+        let Some(folder) = self.folder(folder_id) else {
+            return Vec::new();
+        };
+        let all = self.folder_tabs(folder_id);
+        if !folder.collapsed {
+            return all;
+        }
+        all.into_iter().filter(|tab| self.active_tab == Some(tab.id)).collect()
+    }
+
+    /// Normal (unpinned, non-essential, non-folder) tabs belonging to `space_id`, in sidebar order.
+    pub fn normal_tabs_in_space(&self, space_id: SpaceId) -> Vec<&Tab> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.kind == TabKind::Normal && tab.space_id == Some(space_id) && tab.folder_id.is_none())
+            .collect()
+    }
+
+    /// Ordered list of tabs reachable in the active space (essentials, pinned, folders, then normal tabs).
+    pub fn tabs_in_active_space_order(&self) -> Vec<TabId> {
+        let mut out: Vec<TabId> = self.essential_tabs().into_iter().map(|tab| tab.id).collect();
+        if let Some(space_id) = self.active_space {
+            for tab in self.pinned_tabs_in_space(space_id) {
+                out.push(tab.id);
+            }
+            for folder in self.folders_in_space(space_id) {
+                for tab in self.folder_tabs(folder.id) {
+                    out.push(tab.id);
+                }
+            }
+            for tab in self.normal_tabs_in_space(space_id) {
+                out.push(tab.id);
+            }
+        } else {
+            for tab in &self.tabs {
+                if !out.contains(&tab.id) {
+                    out.push(tab.id);
+                }
+            }
+        }
+        out
     }
 
     pub fn service_state(&self, service: ServiceId) -> Option<&ServiceState> {
@@ -602,6 +775,11 @@ impl BrowserModel {
                 for folder in &mut self.folders {
                     folder.tab_ids.retain(|id| id != tab_id);
                 }
+                for space in &mut self.spaces {
+                    if space.last_active_tab == Some(*tab_id) {
+                        space.last_active_tab = None;
+                    }
+                }
                 for group in &mut self.split_groups {
                     group.tab_ids.retain(|id| id != tab_id);
                 }
@@ -618,6 +796,12 @@ impl BrowserModel {
                 if let Some(window) = self.windows.first_mut() {
                     window.active_tab = *tab_id;
                 }
+                if let Some(id) = *tab_id
+                    && let Some(space_id) = self.tab(id).and_then(|tab| tab.space_id)
+                    && let Some(space) = self.spaces.iter_mut().find(|s| s.id == space_id)
+                {
+                    space.last_active_tab = Some(id);
+                }
                 true
             }
             Event::SpaceSwitched { space_id } => {
@@ -625,6 +809,71 @@ impl BrowserModel {
                 if let Some(window) = self.windows.first_mut() {
                     window.active_space = Some(*space_id);
                 }
+                true
+            }
+            Event::SpacesUpdated { spaces } => {
+                self.spaces = spaces.clone();
+                true
+            }
+            Event::TabsReordered {
+                tabs,
+                essentials,
+                pinned_tabs,
+                folders,
+            } => {
+                self.tabs = tabs.clone();
+                self.essentials = essentials.clone();
+                self.pinned_tabs = pinned_tabs.clone();
+                self.folders = folders.clone();
+                true
+            }
+            Event::EssentialsChanged { essentials } => {
+                self.essentials = essentials.clone();
+                true
+            }
+            Event::PinnedTabsChanged { pinned_tabs } => {
+                self.pinned_tabs = pinned_tabs.clone();
+                true
+            }
+            Event::FolderCreated { folder } => {
+                if self.folders.iter().any(|existing| existing.id == folder.id) {
+                    return false;
+                }
+                self.folders.push(folder.clone());
+                true
+            }
+            Event::FolderUpdated { folder } => {
+                if let Some(existing) = self.folders.iter_mut().find(|existing| existing.id == folder.id) {
+                    *existing = folder.clone();
+                    true
+                } else {
+                    false
+                }
+            }
+            Event::FolderDeleted { folder_id } => {
+                let before = self.folders.len();
+                self.folders.retain(|folder| folder.id != *folder_id);
+                self.folders.len() != before
+            }
+            Event::SidebarNotificationAdded { notification } => {
+                if let Some(existing) = self
+                    .sidebar_notifications
+                    .iter_mut()
+                    .find(|item| item.id == notification.id)
+                {
+                    *existing = notification.clone();
+                } else {
+                    self.sidebar_notifications.push(notification.clone());
+                }
+                true
+            }
+            Event::SidebarNotificationDismissed { notification_id } => {
+                let before = self.sidebar_notifications.len();
+                self.sidebar_notifications.retain(|item| item.id != *notification_id);
+                self.sidebar_notifications.len() != before
+            }
+            Event::EssentialsPromoChanged { visible } => {
+                self.show_essentials_promo = *visible;
                 true
             }
             Event::SplitGroupUpdated { group } => {
@@ -689,6 +938,8 @@ impl BrowserModel {
             | Event::AboutDialogRequested
             | Event::QuitRequested
             | Event::ClipboardCopyRequested { .. }
+            | Event::TabRenameRequested { .. }
+            | Event::FolderRenameRequested { .. }
             | Event::ModelReplaced => false,
         }
     }

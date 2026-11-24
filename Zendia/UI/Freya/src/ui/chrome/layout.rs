@@ -36,6 +36,8 @@ pub const TAB_ROW_RADIUS: f32 = 8.0;
 pub const RESIZE_HANDLE_WIDTH: f32 = 8.0;
 /// Expand/collapse animation duration for the vertical sidebar.
 pub const SIDEBAR_EXPAND_DURATION: Duration = Duration::from_millis(220);
+/// Cross-fade duration when switching between per-space backdrop gradients.
+pub const SPACE_GRADIENT_CROSSFADE: Duration = Duration::from_millis(260);
 
 /// Toolbar contributions partitioned by resolved [`ToolbarArea`] for the active [`LayoutSettings`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -130,20 +132,52 @@ pub fn compute_resized_sidebar_width(start_width: f32, start_x: f32, current_x: 
     LayoutSettings::clamp_sidebar_width(start_width + delta)
 }
 
-/// Builds the subtle space gradient painted behind the sidebar, toolbar, and inset page card.
-pub fn window_backdrop_gradient(space: Option<&Space>, scheme: ResolvedScheme) -> LinearGradient {
-    let (base_start, base_end, tint_weight) = match scheme {
-        ResolvedScheme::Dark => (Rgba::rgb(23, 23, 26), Rgba::rgb(17, 17, 20), 0.22),
-        ResolvedScheme::Light => (Rgba::rgb(233, 233, 236), Rgba::rgb(225, 226, 231), 0.10),
+/// Resolved linear-gradient endpoints for a space's window backdrop, interpolated during space cross-fades.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackdropEndpoints {
+    pub start: Rgba,
+    pub end: Rgba,
+    pub angle_deg: f32,
+}
+
+impl BackdropEndpoints {
+    /// Linearly interpolates between `self` and `other` at `t` in `0.0..=1.0`.
+    pub fn lerp(&self, other: &Self, t: f32) -> Self {
+        let clamped = t.clamp(0.0, 1.0);
+        Self {
+            start: self.start.mix(other.start, clamped),
+            end: self.end.mix(other.end, clamped),
+            angle_deg: self.angle_deg + (other.angle_deg - self.angle_deg) * clamped,
+        }
+    }
+
+    pub fn to_gradient(self) -> LinearGradient {
+        LinearGradient::new()
+            .angle(self.angle_deg)
+            .stop((Color::from(self.start), 0.0))
+            .stop((Color::from(self.end), 100.0))
+    }
+}
+
+/// Computes the resolved gradient endpoints for `space` in `scheme`, matching Zen's per-space backdrop tint.
+pub fn window_backdrop_endpoints(space: Option<&Space>, scheme: ResolvedScheme) -> BackdropEndpoints {
+    let (base_start, base_end, tint_weight, pastel_lift) = match scheme {
+        ResolvedScheme::Dark => (Rgba::rgb(20, 21, 28), Rgba::rgb(16, 17, 23), 0.44, 0.0),
+        ResolvedScheme::Light => (Rgba::rgb(242, 243, 248), Rgba::rgb(236, 238, 245), 0.52, 0.58),
     };
 
-    let (start, end, angle) = match space {
+    let (start, end, angle_deg) = match space {
         Some(space) if !space.gradient.stops.is_empty() => {
             let first = space.gradient.stops[0];
             let last = *space.gradient.stops.last().unwrap_or(&first);
-            let tint_a = Rgba::rgb(first.0, first.1, first.2);
-            let tint_b = Rgba::rgb(last.0, last.1, last.2);
-            let weight = (tint_weight * space.gradient.opacity.clamp(0.0, 1.0)).clamp(0.0, 0.35);
+            let mut tint_a = Rgba::rgb(first.0, first.1, first.2);
+            let mut tint_b = Rgba::rgb(last.0, last.1, last.2);
+            if pastel_lift > 0.0 {
+                let white = Rgba::rgb(255, 255, 255);
+                tint_a = tint_a.mix(white, pastel_lift);
+                tint_b = tint_b.mix(white, pastel_lift);
+            }
+            let weight = (tint_weight * space.gradient.opacity.clamp(0.0, 1.0)).clamp(0.0, 0.60);
             (
                 base_start.mix(tint_a, weight),
                 base_end.mix(tint_b, weight),
@@ -153,10 +187,13 @@ pub fn window_backdrop_gradient(space: Option<&Space>, scheme: ResolvedScheme) -
         _ => (base_start, base_end, 135.0),
     };
 
-    LinearGradient::new()
-        .angle(angle)
-        .stop((Color::from(start), 0.0))
-        .stop((Color::from(end), 100.0))
+    BackdropEndpoints { start, end, angle_deg }
+}
+
+/// Builds the per-space backdrop gradient painted behind the sidebar, toolbar, and inset page card.
+#[allow(dead_code)]
+pub fn window_backdrop_gradient(space: Option<&Space>, scheme: ResolvedScheme) -> LinearGradient {
+    window_backdrop_endpoints(space, scheme).to_gradient()
 }
 
 /// Neutral surface tints for chrome elements (URL bar, selected tab pill, hover fills, dividers) matching Zen's

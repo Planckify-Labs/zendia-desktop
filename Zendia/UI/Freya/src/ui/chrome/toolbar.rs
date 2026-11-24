@@ -164,17 +164,23 @@ impl Component for ToolbarItemView {
             } else {
                 palette.surface_pill
             };
+            let pill_h = if self.tight { 24.0 } else { 26.0 };
+            let pill_pad = if self.tight {
+                Gaps::new(0.0, 7.0, 0.0, 6.0)
+            } else {
+                Gaps::new(0.0, 10.0, 0.0, 8.0)
+            };
             return rect()
                 .a11y_id(a11y_id)
                 .a11y_focusable(effective_enabled)
                 .a11y_role(AccessibilityRole::Button)
                 .a11y_alt(a11y_label)
-                .height(Size::px(26.0))
-                .padding(Gaps::new(0.0, 10.0, 0.0, 8.0))
+                .height(Size::px(pill_h))
+                .padding(pill_pad)
                 .direction(Direction::Horizontal)
                 .cross_align(Alignment::center())
                 .main_align(Alignment::center())
-                .spacing(5.0)
+                .spacing(if self.tight { 4.0 } else { 5.0 })
                 .corner_radius(CornerRadius::new_all(999.0))
                 .background(bg)
                 .border(focus_border)
@@ -187,11 +193,15 @@ impl Component for ToolbarItemView {
                 .on_pointer_enter(move |_| hovered.set_if_modified(true))
                 .on_pointer_leave(move |_| hovered.set_if_modified(false))
                 .on_press(on_press)
-                .child(Icon::new(effective_icon).size(13.5).role(ThemeRole::Text))
+                .child(
+                    Icon::new(effective_icon)
+                        .size(if self.tight { 12.5 } else { 13.5 })
+                        .role(ThemeRole::Text),
+                )
                 .child(
                     label()
                         .text(self.item.title.clone())
-                        .font_size(12.0)
+                        .font_size(if self.tight { 11.0 } else { 12.0 })
                         .font_weight(FontWeight::SEMI_BOLD)
                         .color(palette.text)
                         .max_lines(1),
@@ -275,8 +285,16 @@ impl Component for ToolbarItemView {
             .a11y_focusable(effective_enabled)
             .a11y_role(AccessibilityRole::Button)
             .a11y_alt(a11y_label)
-            .width(Size::px(if is_zendia_capsule { 26.0 } else { button_width }))
-            .height(Size::px(if is_zendia_capsule { 26.0 } else { button_height }))
+            .width(Size::px(if is_zendia_capsule {
+                if self.tight { 24.0 } else { 26.0 }
+            } else {
+                button_width
+            }))
+            .height(Size::px(if is_zendia_capsule {
+                if self.tight { 24.0 } else { 26.0 }
+            } else {
+                button_height
+            }))
             .corner_radius(CornerRadius::new_all(radius))
             .background(bg)
             .border(focus_border)

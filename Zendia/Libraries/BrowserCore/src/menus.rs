@@ -10,7 +10,7 @@
 //! All types and functions here are pure data and independent of any UI toolkit.
 
 use crate::contributions::{ContributionId, ContributionSource, MenuEntry, MenuEntryKind, MenuLocation};
-use crate::model::TabId;
+use crate::model::{BrowserModel, FolderId, SpaceId, TabId, TabKind};
 use std::collections::BTreeSet;
 use zendia_keymap::{KeyModifiers, KeyTable};
 
@@ -25,6 +25,12 @@ pub const APP_MENU_GROUPS: &[&str] = &["new", "library", "page", "zoom", "tools"
 
 /// Preferred top-level group order for the tab context menu.
 pub const TAB_CONTEXT_GROUPS: &[&str] = &["zendia_ask", "organize", "tab_state", "manage", "close", "routing"];
+
+/// Preferred top-level group order for the folder context menu.
+pub const FOLDER_CONTEXT_GROUPS: &[&str] = &["edit", "organize", "danger"];
+
+/// Preferred top-level group order for the space context menu.
+pub const SPACE_CONTEXT_GROUPS: &[&str] = &["switch", "tabs", "manage"];
 
 /// Preferred group order for contributed page context menu items.
 pub const PAGE_CONTEXT_GROUPS: &[&str] = &["zendia"];
@@ -822,23 +828,11 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
             loc,
             "New Folder…",
             None,
-            "folder.new",
+            "folder.create",
             "create",
             10,
         ),
-        MenuEntry {
-            command_args: vec![("folder_id".to_string(), "1".to_string())],
-            ..child_entry(
-                "zendia.tab.move_to_folder.docs",
-                "zendia.tab.move_to_folder",
-                loc,
-                "Docs",
-                None,
-                "tab.move_to_folder",
-                "folders",
-                20,
-            )
-        },
+        submenu_entry("zendia.tab.move_to_space", loc, "Move to Space", None, "organize", 15),
         menu_entry(
             "zendia.tab.add_split",
             loc,
@@ -868,15 +862,7 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
             "tab_state",
             20,
         ),
-        menu_entry(
-            "zendia.tab.pin",
-            loc,
-            "Pin Tab",
-            None,
-            "tab.toggle_pin",
-            "tab_state",
-            30,
-        ),
+        menu_entry("zendia.tab.pin", loc, "Pin Tab", None, "tab.pin", "tab_state", 30),
         MenuEntry {
             badge: Some(format!("{essentials_count} / 12")),
             ..menu_entry(
@@ -884,11 +870,20 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
                 loc,
                 "Add to Essentials",
                 None,
-                "tab.toggle_essential",
+                "tab.add_to_essentials",
                 "tab_state",
                 40,
             )
         },
+        menu_entry(
+            "zendia.tab.rename",
+            loc,
+            "Rename Tab",
+            None,
+            "tab.start_rename",
+            "tab_state",
+            45,
+        ),
         menu_entry(
             "zendia.tab.duplicate",
             loc,
@@ -1111,12 +1106,312 @@ pub fn builtin_page_context_entries(chat_site_name: &str) -> Vec<MenuEntry> {
     ]
 }
 
+/// Built-in folder context menu contributions matching Zen's folder actions menu.
+pub fn builtin_folder_context_entries() -> Vec<MenuEntry> {
+    let loc = MenuLocation::FolderContext;
+    vec![
+        menu_entry(
+            "zendia.folder.rename",
+            loc,
+            "Rename Folder",
+            None,
+            "folder.start_rename",
+            "edit",
+            10,
+        ),
+        menu_entry(
+            "zendia.folder.toggle_collapsed",
+            loc,
+            "Collapse Folder",
+            None,
+            "folder.toggle_collapsed",
+            "edit",
+            20,
+        ),
+        menu_entry("zendia.folder.new_tab", loc, "New Tab", None, "tab.new", "organize", 10),
+        menu_entry(
+            "zendia.folder.unpack",
+            loc,
+            "Unpack Folder",
+            None,
+            "folder.unpack",
+            "danger",
+            10,
+        ),
+        menu_entry(
+            "zendia.folder.delete",
+            loc,
+            "Delete Folder",
+            None,
+            "folder.delete",
+            "danger",
+            20,
+        ),
+    ]
+}
+
+/// Built-in space context menu contributions for space headers and switcher icons.
+pub fn builtin_space_context_entries() -> Vec<MenuEntry> {
+    let loc = MenuLocation::SpaceContext;
+    vec![
+        menu_entry(
+            "zendia.space.switch",
+            loc,
+            "Switch to Space",
+            None,
+            "space.switch",
+            "switch",
+            10,
+        ),
+        menu_entry(
+            "zendia.space.previous",
+            loc,
+            "Previous Space",
+            None,
+            "space.previous",
+            "switch",
+            20,
+        ),
+        menu_entry("zendia.space.next", loc, "Next Space", None, "space.next", "switch", 30),
+        menu_entry(
+            "zendia.space.new_folder",
+            loc,
+            "New Folder",
+            None,
+            "folder.create",
+            "tabs",
+            10,
+        ),
+        menu_entry(
+            "zendia.space.clear_tabs",
+            loc,
+            "Clear Unpinned Tabs",
+            None,
+            "space.clear_tabs",
+            "tabs",
+            20,
+        ),
+    ]
+}
+
 /// All built-in menu contributions registered by the browser core at startup.
 pub fn builtin_menu_entries(vim_mode_enabled: bool, chat_site_name: &str, essentials_count: usize) -> Vec<MenuEntry> {
     let mut entries = builtin_app_menu_entries(vim_mode_enabled);
     entries.extend(builtin_tab_context_entries(chat_site_name, essentials_count));
+    entries.extend(builtin_folder_context_entries());
+    entries.extend(builtin_space_context_entries());
     entries.extend(builtin_page_context_entries(chat_site_name));
     entries
+}
+
+/// Resolves the tab context menu for `tab_id` from the core's contributions, adapting dynamic labels (Pin/Unpin,
+/// Add/Remove Essentials, Mute/Unmute) and populating folder/space destination submenus from `model`.
+pub fn build_tab_context_menu(
+    model: &BrowserModel,
+    tab_id: TabId,
+    key_table: Option<&KeyTable>,
+) -> Vec<ResolvedMenuItem> {
+    let mut items = resolve_contributed_menu(
+        &model.contributions.menu_entries,
+        MenuLocation::TabContext,
+        key_table,
+        TAB_CONTEXT_GROUPS,
+    );
+    let tab = model.tab(tab_id);
+    let essentials_count = model.essential_tabs().len();
+    let tab_space = tab.and_then(|t| t.space_id).or(model.active_space);
+
+    for item in &mut items {
+        match item.id.as_str() {
+            "zendia.tab.pin" => {
+                if let Some(tab) = tab {
+                    match tab.kind {
+                        TabKind::Pinned => {
+                            item.label = "Unpin Tab".to_string();
+                            item.command = "tab.unpin".to_string();
+                        }
+                        TabKind::Normal => {
+                            item.label = "Pin Tab".to_string();
+                            item.command = "tab.pin".to_string();
+                        }
+                        TabKind::Essential => {
+                            item.label = "Pin Tab".to_string();
+                            item.command = "tab.pin".to_string();
+                            item.enabled = false;
+                        }
+                    }
+                }
+            }
+            "zendia.tab.essentials" => {
+                if let Some(tab) = tab
+                    && tab.kind == TabKind::Essential
+                {
+                    item.label = "Remove from Essentials".to_string();
+                    item.command = "tab.remove_from_essentials".to_string();
+                    item.badge = Some(format!("{essentials_count} / 12"));
+                } else {
+                    item.label = "Add to Essentials".to_string();
+                    item.command = "tab.add_to_essentials".to_string();
+                    item.badge = Some(format!("{essentials_count} / 12"));
+                    item.enabled = essentials_count < 12;
+                }
+            }
+            "zendia.tab.mute" => {
+                if tab.is_some_and(|t| t.is_muted) {
+                    item.label = "Unmute Tab".to_string();
+                } else {
+                    item.label = "Mute Tab".to_string();
+                }
+            }
+            "zendia.tab.rename" => {
+                if tab.is_some_and(|t| t.kind == TabKind::Essential) {
+                    item.enabled = false;
+                }
+            }
+            "zendia.tab.move_to_folder" => {
+                let mut children = vec![
+                    ResolvedMenuItem::action("zendia.tab.move_to_folder.new", "New Folder…", "folder.create")
+                        .with_arg("tab_id", tab_id.0.to_string()),
+                ];
+                if let Some(space_id) = tab_space {
+                    let folders = model.folders_in_space(space_id);
+                    if !folders.is_empty() {
+                        children.push(ResolvedMenuItem::separator("zendia.tab.move_to_folder.sep"));
+                        for folder in folders {
+                            let already_in = tab.and_then(|t| t.folder_id) == Some(folder.id);
+                            children.push(
+                                ResolvedMenuItem::action(
+                                    format!("zendia.tab.move_to_folder.{}", folder.id.0),
+                                    folder.name.clone(),
+                                    "tab.move_to_folder",
+                                )
+                                .with_arg("tab_id", tab_id.0.to_string())
+                                .with_arg("folder_id", folder.id.0.to_string())
+                                .with_enabled(!already_in),
+                            );
+                        }
+                    }
+                }
+                if tab.is_some_and(|t| t.folder_id.is_some()) {
+                    children.push(ResolvedMenuItem::separator("zendia.tab.move_to_folder.remove_sep"));
+                    children.push(
+                        ResolvedMenuItem::action(
+                            "zendia.tab.move_to_folder.remove",
+                            "Remove from Folder",
+                            "tab.move_to_folder",
+                        )
+                        .with_arg("tab_id", tab_id.0.to_string()),
+                    );
+                }
+                item.children = children;
+            }
+            "zendia.tab.move_to_space" => {
+                let mut children = Vec::new();
+                for space in &model.spaces {
+                    let is_current = tab_space == Some(space.id) && tab.is_some_and(|t| t.kind != TabKind::Essential);
+                    children.push(
+                        ResolvedMenuItem::action(
+                            format!("zendia.tab.move_to_space.{}", space.id.0),
+                            space.name.clone(),
+                            "tab.move_to_space",
+                        )
+                        .with_arg("tab_id", tab_id.0.to_string())
+                        .with_arg("space_id", space.id.0.to_string())
+                        .with_enabled(!is_current),
+                    );
+                }
+                item.enabled = !children.is_empty();
+                item.children = children;
+            }
+            _ => {}
+        }
+    }
+
+    inject_arg_recursive(&mut items, "tab_id", &tab_id.0.to_string());
+    items
+}
+
+/// Resolves the folder context menu for `folder_id` from the core's `MenuLocation::FolderContext` contributions.
+pub fn build_folder_context_menu(
+    model: &BrowserModel,
+    folder_id: FolderId,
+    key_table: Option<&KeyTable>,
+) -> Vec<ResolvedMenuItem> {
+    let mut items = resolve_contributed_menu(
+        &model.contributions.menu_entries,
+        MenuLocation::FolderContext,
+        key_table,
+        FOLDER_CONTEXT_GROUPS,
+    );
+    let collapsed = model.folder(folder_id).is_some_and(|folder| folder.collapsed);
+    for item in &mut items {
+        if item.id.as_str() == "zendia.folder.toggle_collapsed" {
+            item.label = if collapsed {
+                "Expand Folder".to_string()
+            } else {
+                "Collapse Folder".to_string()
+            };
+        }
+    }
+    inject_arg_recursive(&mut items, "folder_id", &folder_id.0.to_string());
+    items
+}
+
+/// Resolves the space context menu for `space_id` from the core's `MenuLocation::SpaceContext` contributions.
+pub fn build_space_context_menu(
+    model: &BrowserModel,
+    space_id: SpaceId,
+    key_table: Option<&KeyTable>,
+) -> Vec<ResolvedMenuItem> {
+    let mut items = resolve_contributed_menu(
+        &model.contributions.menu_entries,
+        MenuLocation::SpaceContext,
+        key_table,
+        SPACE_CONTEXT_GROUPS,
+    );
+    let is_active = model.active_space == Some(space_id);
+    let has_normal_tabs = !model.normal_tabs_in_space(space_id).is_empty();
+    let multi_space = model.spaces.len() > 1;
+    for item in &mut items {
+        match item.id.as_str() {
+            "zendia.space.switch" => {
+                item.enabled = !is_active;
+            }
+            "zendia.space.next" | "zendia.space.previous" => {
+                item.enabled = multi_space;
+            }
+            "zendia.space.clear_tabs" => {
+                item.enabled = has_normal_tabs;
+            }
+            _ => {}
+        }
+    }
+    inject_arg_recursive(&mut items, "space_id", &space_id.0.to_string());
+    items
+}
+
+fn inject_arg_recursive(items: &mut [ResolvedMenuItem], arg_key: &str, arg_value: &str) {
+    for item in items {
+        let should_inject = match arg_key {
+            "tab_id" => {
+                !item.command.is_empty()
+                    && !matches!(
+                        item.command.as_str(),
+                        "tab.new" | "space.next" | "space.previous" | "space.switch"
+                    )
+            }
+            "folder_id" => item.command.starts_with("folder."),
+            "space_id" => matches!(
+                item.command.as_str(),
+                "space.switch" | "space.clear_tabs" | "folder.create"
+            ),
+            _ => false,
+        };
+        if should_inject && !item.command_args.iter().any(|(name, _)| name == arg_key) {
+            item.command_args.push((arg_key.to_string(), arg_value.to_string()));
+        }
+        inject_arg_recursive(&mut item.children, arg_key, arg_value);
+    }
 }
 
 /// Kind of element that triggered a page context menu (mirrors Ladybird's `WebView::ContextMenuKind`).
@@ -2137,5 +2432,83 @@ mod tests {
         assert_eq!(info.engine_line, "Based on Ladybird");
         assert!(!info.primary_links.is_empty());
         assert!(!info.legal_links.is_empty());
+    }
+
+    #[test]
+    fn tab_folder_and_space_context_menus_reflect_model_state() {
+        use crate::BrowserCore;
+        use crate::stub::StubBackend;
+
+        let core = StubBackend::new();
+        let model = core.model();
+        let table = KeyTable::standard();
+
+        // Normal tab in Space 1 shows Pin Tab, Add to Essentials, Rename Tab, Move to Folder, Move to Space.
+        let normal_tab = model.normal_tabs_in_space(SpaceId(1))[0].id;
+        let tab_items = build_tab_context_menu(&model, normal_tab, Some(&table));
+        assert!(tab_items.iter().any(|i| i.label == "Pin Tab" && i.command == "tab.pin"));
+        assert!(
+            tab_items
+                .iter()
+                .any(|i| i.label == "Add to Essentials" && i.command == "tab.add_to_essentials")
+        );
+        assert!(
+            tab_items
+                .iter()
+                .any(|i| i.label == "Rename Tab" && i.command == "tab.start_rename")
+        );
+        let move_folder = tab_items
+            .iter()
+            .find(|i| i.id.as_str() == "zendia.tab.move_to_folder")
+            .unwrap();
+        assert!(move_folder.children.iter().any(|c| c.label == "UI Spec"));
+        assert!(move_folder.children.iter().any(|c| c.label == "Engine"));
+        let move_space = tab_items
+            .iter()
+            .find(|i| i.id.as_str() == "zendia.tab.move_to_space")
+            .unwrap();
+        assert!(move_space.children.iter().any(|c| c.label == "Work" && c.enabled));
+
+        // Pinned tab flips to Unpin Tab.
+        let pinned_tab = model.pinned_tabs_in_space(SpaceId(1))[0].id;
+        let pinned_items = build_tab_context_menu(&model, pinned_tab, Some(&table));
+        assert!(
+            pinned_items
+                .iter()
+                .any(|i| i.label == "Unpin Tab" && i.command == "tab.unpin")
+        );
+
+        // Essential tab flips to Remove from Essentials.
+        let ess_tab = model.essential_tabs()[0].id;
+        let ess_items = build_tab_context_menu(&model, ess_tab, Some(&table));
+        assert!(
+            ess_items
+                .iter()
+                .any(|i| i.label == "Remove from Essentials" && i.command == "tab.remove_from_essentials")
+        );
+
+        // Folder menu toggles Expand / Collapse label based on collapsed state.
+        let open_folder = build_folder_context_menu(&model, FolderId(1), Some(&table));
+        assert!(open_folder.iter().any(|i| i.label == "Collapse Folder"));
+        let collapsed_folder = build_folder_context_menu(&model, FolderId(2), Some(&table));
+        assert!(collapsed_folder.iter().any(|i| i.label == "Expand Folder"));
+
+        // Space menu disables Switch to Space for the active space and enables it for inactive spaces.
+        let active_space_menu = build_space_context_menu(&model, SpaceId(1), Some(&table));
+        assert!(
+            !active_space_menu
+                .iter()
+                .find(|i| i.id.as_str() == "zendia.space.switch")
+                .unwrap()
+                .enabled
+        );
+        let inactive_space_menu = build_space_context_menu(&model, SpaceId(2), Some(&table));
+        assert!(
+            inactive_space_menu
+                .iter()
+                .find(|i| i.id.as_str() == "zendia.space.switch")
+                .unwrap()
+                .enabled
+        );
     }
 }

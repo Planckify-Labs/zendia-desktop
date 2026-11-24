@@ -131,3 +131,19 @@ description = "Zoom out"
 keys = ["<C-0>", "<D-0>"]
 command = "zoom.reset"
 description = "Reset zoom"
+
+# Sidebar spaces and tab management shortcuts (matching Zen defaults).
+[[bindings]]
+keys = ["<C-A-Right>", "<D-A-Right>"]
+command = "space.next"
+description = "Next space"
+
+[[bindings]]
+keys = ["<C-A-Left>", "<D-A-Left>"]
+command = "space.previous"
+description = "Previous space"
+
+[[bindings]]
+keys = ["<C-S-d>", "<D-S-d>"]
+command = "tab.toggle_pin"
+description = "Pin or unpin tab"

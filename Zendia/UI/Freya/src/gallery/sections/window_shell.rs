@@ -9,6 +9,7 @@
 
 use crate::ui::chrome::WindowShell;
 use crate::ui::chrome::menus::try_use_menu_state;
+use crate::ui::chrome::sidebar::try_use_sidebar_state;
 use crate::ui::core_view::use_core;
 use crate::ui::kit::{Icon, KitChip, Pill};
 use crate::ui::theme::{ThemeRole, use_theme};
@@ -94,10 +95,14 @@ impl Component for WindowShellSection {
         let core = use_core();
         let theme = use_theme();
         let menu_state = try_use_menu_state();
+        let sidebar_state = try_use_sidebar_state();
 
         let mut applied_state = use_state(String::new);
         if *applied_state.peek() != self.state_id {
             applied_state.set(self.state_id.clone());
+            if let Some(state) = sidebar_state {
+                state.reset();
+            }
             let (layout, side, expanded) = state_target(&self.state_id);
             core.invoke_or_log(Command::LayoutSetToolbarLayout { layout });
             core.invoke_or_log(Command::SidebarSetSide { side });

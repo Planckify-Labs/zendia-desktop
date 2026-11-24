@@ -170,6 +170,7 @@ pub enum MenuLocation {
     TabContext,
     PageContext,
     FolderContext,
+    SpaceContext,
     SidebarContext,
 }
 

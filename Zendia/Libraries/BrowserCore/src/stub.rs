@@ -21,17 +21,21 @@ use crate::menus::{APP_MENU_VIM_MODE_ID, builtin_menu_entries};
 use crate::model::{
     Agent, AgentId, BrowserModel, ChatSite, ChatSiteId, Conversation, ConversationId, ConversationStatus,
     ConversationStep, Download, DownloadId, DownloadStatus, Essential, Folder, FolderId, HistoryEntry, HistoryEntryId,
-    InputMode, LayoutSettings, MediaSession, MediaSessionId, ModelEffort, ModelId, ModelInfo, PinnedTab, ServiceId,
-    ServiceState, ServiceStatus, SidebarSide, Space, SpaceGradient, SpaceId, SplitDirection, SplitGroup, SplitGroupId,
-    StepId, StepKind, StepStatus, Tab, TabId, TabKind, ThemeOverrides, ThemeScheme, ThemeSettings, ToolbarLayout,
-    WhichKeyEntry, WhichKeyState, Window, WindowId,
+    InputMode, LayoutSettings, MediaSession, MediaSessionId, ModelEffort, ModelId, ModelInfo, NotificationId,
+    PinnedTab, ServiceId, ServiceState, ServiceStatus, SidebarNotification, SidebarNotificationLink, SidebarSide,
+    Space, SpaceGradient, SpaceId, SplitDirection, SplitGroup, SplitGroupId, StepId, StepKind, StepStatus, Tab, TabId,
+    TabKind, TabMoveTarget, ThemeOverrides, ThemeScheme, ThemeSettings, ToolbarLayout, WhichKeyEntry, WhichKeyState,
+    Window, WindowId,
 };
 use crate::tab_source::{TabSource, TabUpdate};
 use std::sync::{Arc, Mutex};
 
+const MAX_ESSENTIALS: usize = 12;
+
 struct StubState {
     model: BrowserModel,
     next_tab_id: u64,
+    next_folder_id: u64,
     next_split_id: u64,
     next_conversation_id: u64,
     next_step_id: u64,
@@ -67,6 +71,7 @@ impl StubBackend {
 
     fn from_model(model: BrowserModel) -> Self {
         let next_tab_id = model.tabs.iter().map(|tab| tab.id.0).max().unwrap_or(0) + 1;
+        let next_folder_id = model.folders.iter().map(|folder| folder.id.0).max().unwrap_or(0) + 1;
         let next_split_id = model.split_groups.iter().map(|group| group.id.0).max().unwrap_or(0) + 1;
         let next_conversation_id = model.conversations.iter().map(|conv| conv.id.0).max().unwrap_or(0) + 1;
         let next_step_id = model
@@ -81,6 +86,7 @@ impl StubBackend {
             state: Mutex::new(StubState {
                 model,
                 next_tab_id,
+                next_folder_id,
                 next_split_id,
                 next_conversation_id,
                 next_step_id,
@@ -89,6 +95,60 @@ impl StubBackend {
             tab_source: Mutex::new(None),
             bus: EventBus::new(),
         }
+    }
+
+    /// Replaces the stub model snapshot wholesale (preserving current theme scheme) and publishes
+    /// [`Event::ModelReplaced`]. Used by gallery states to reset deterministic fixtures.
+    pub fn replace_model(&self, mut model: BrowserModel) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            model.theme = state.model.theme.clone();
+            state.next_tab_id = model.tabs.iter().map(|tab| tab.id.0).max().unwrap_or(0) + 1;
+            state.next_folder_id = model.folders.iter().map(|folder| folder.id.0).max().unwrap_or(0) + 1;
+            state.next_split_id = model.split_groups.iter().map(|group| group.id.0).max().unwrap_or(0) + 1;
+            state.next_conversation_id = model.conversations.iter().map(|conv| conv.id.0).max().unwrap_or(0) + 1;
+            state.next_step_id = model
+                .conversations
+                .iter()
+                .flat_map(|conv| conv.steps.iter().map(|step| step.id.0))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            state.model = model;
+        }
+        self.bus.publish(Event::ModelReplaced);
+    }
+
+    /// Resets the stub backend to its default populated sample model (preserving current theme).
+    pub fn reset_to_sample(&self) {
+        self.replace_model(sample_model(true));
+    }
+
+    /// Publishes a sidebar notification card into the model.
+    pub fn show_notification(&self, notification: SidebarNotification) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(existing) = state
+                .model
+                .sidebar_notifications
+                .iter_mut()
+                .find(|item| item.id == notification.id)
+            {
+                *existing = notification.clone();
+            } else {
+                state.model.sidebar_notifications.push(notification.clone());
+            }
+        }
+        self.bus.publish(Event::SidebarNotificationAdded { notification });
+    }
+
+    /// Shows or hides the empty-essentials promo card in the sidebar.
+    pub fn set_essentials_promo(&self, visible: bool) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.show_essentials_promo = visible;
+        }
+        self.bus.publish(Event::EssentialsPromoChanged { visible });
     }
 
     /// Attaches a real tab source so tab and navigation commands forward to it.
@@ -123,6 +183,11 @@ impl StubBackend {
                 state.model.active_tab = Some(tab.id);
                 if let Some(window) = state.model.windows.first_mut() {
                     window.active_tab = Some(tab.id);
+                }
+                if let Some(space_id) = tab.space_id
+                    && let Some(space) = state.model.spaces.iter_mut().find(|s| s.id == space_id)
+                {
+                    space.last_active_tab = Some(tab.id);
                 }
                 Some(Event::TabActivated { tab_id: Some(tab.id) })
             } else {
@@ -182,6 +247,12 @@ impl StubBackend {
             if let Some(window) = state.model.windows.first_mut() {
                 window.active_tab = tab_id;
             }
+            if let Some(id) = tab_id
+                && let Some(space_id) = state.model.tab(id).and_then(|tab| tab.space_id)
+                && let Some(space) = state.model.spaces.iter_mut().find(|s| s.id == space_id)
+            {
+                space.last_active_tab = Some(id);
+            }
         }
         self.bus.publish(Event::TabActivated { tab_id });
     }
@@ -192,11 +263,19 @@ impl StubBackend {
         let (removed, was_active, next_tab) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let index = state.model.tabs.iter().position(|tab| tab.id == tab_id)?;
+            let closed_space = state.model.tabs[index].space_id;
             state.model.tabs.remove(index);
             state.model.essentials.retain(|item| item.tab_id != tab_id);
+            normalize_essential_orders(&mut state.model.essentials);
             state.model.pinned_tabs.retain(|item| item.tab_id != tab_id);
+            normalize_pinned_orders(&mut state.model.pinned_tabs);
             for folder in &mut state.model.folders {
                 folder.tab_ids.retain(|id| *id != tab_id);
+            }
+            for space in &mut state.model.spaces {
+                if space.last_active_tab == Some(tab_id) {
+                    space.last_active_tab = None;
+                }
             }
             for group in &mut state.model.split_groups {
                 group.tab_ids.retain(|id| *id != tab_id);
@@ -208,11 +287,25 @@ impl StubBackend {
                 if let Some(window) = state.model.windows.first_mut() {
                     window.active_tab = None;
                 }
-                state
-                    .model
-                    .tabs
-                    .get(index.min(state.model.tabs.len().saturating_sub(1)))
-                    .map(|tab| tab.id)
+                // Prefer another tab in the same space, then any visible tab in the active space, then any tab.
+                let same_space_tab = closed_space.and_then(|space_id| {
+                    state
+                        .model
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.space_id == Some(space_id))
+                        .map(|tab| tab.id)
+                });
+                same_space_tab.or_else(|| {
+                    let active_order = state.model.tabs_in_active_space_order();
+                    active_order.first().copied().or_else(|| {
+                        state
+                            .model
+                            .tabs
+                            .get(index.min(state.model.tabs.len().saturating_sub(1)))
+                            .map(|tab| tab.id)
+                    })
+                })
             } else {
                 None
             };
@@ -328,17 +421,18 @@ impl StubBackend {
 
     fn adjacent_tab_id(&self, delta: isize) -> Option<TabId> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let len = state.model.tabs.len();
+        let ordered = state.model.tabs_in_active_space_order();
+        let len = ordered.len();
         if len < 2 {
             return None;
         }
         let current = state
             .model
             .active_tab
-            .and_then(|active_id| state.model.tabs.iter().position(|tab| tab.id == active_id))
+            .and_then(|active_id| ordered.iter().position(|id| *id == active_id))
             .unwrap_or(0);
         let next = (current as isize + delta).rem_euclid(len as isize) as usize;
-        Some(state.model.tabs[next].id)
+        Some(ordered[next])
     }
 
     /// Updates a child service's reported health state.
@@ -390,6 +484,7 @@ impl StubBackend {
                 split_group_id: None,
                 kind: TabKind::Normal,
                 title: String::new(),
+                custom_title: None,
                 url: resolved_url,
                 favicon: None,
                 is_loading: false,
@@ -408,6 +503,11 @@ impl StubBackend {
                 state.model.active_tab = Some(id);
                 if let Some(window) = state.model.windows.first_mut() {
                     window.active_tab = Some(id);
+                }
+                if let Some(space_id) = tab.space_id
+                    && let Some(space) = state.model.spaces.iter_mut().find(|s| s.id == space_id)
+                {
+                    space.last_active_tab = Some(id);
                 }
                 Some(Event::TabActivated { tab_id: Some(id) })
             } else {
@@ -457,7 +557,7 @@ impl StubBackend {
     }
 
     fn handle_space_switch(&self, space_id: SpaceId) -> CommandResult {
-        {
+        let (spaces_snapshot, target_tab, should_forward_to_source) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if !state.model.spaces.iter().any(|space| space.id == space_id) {
                 return Err(CommandError::TargetNotFound {
@@ -465,12 +565,847 @@ impl StubBackend {
                     target: format!("space {}", space_id.0),
                 });
             }
+
+            // Record the leaving space's last active tab when it belongs to that space.
+            if let (Some(prev_space_id), Some(prev_tab_id)) = (state.model.active_space, state.model.active_tab)
+                && state
+                    .model
+                    .tab(prev_tab_id)
+                    .is_some_and(|tab| tab.space_id == Some(prev_space_id))
+                && let Some(prev_space) = state.model.spaces.iter_mut().find(|s| s.id == prev_space_id)
+            {
+                prev_space.last_active_tab = Some(prev_tab_id);
+            }
+
             state.model.active_space = Some(space_id);
             if let Some(window) = state.model.windows.first_mut() {
                 window.active_space = Some(space_id);
             }
-        }
+
+            // Restore the destination space's last active tab (if still present in that space), or its first tab.
+            let remembered = state
+                .model
+                .space(space_id)
+                .and_then(|space| space.last_active_tab)
+                .filter(|tab_id| {
+                    state
+                        .model
+                        .tab(*tab_id)
+                        .is_some_and(|tab| tab.space_id == Some(space_id))
+                });
+            let next_tab = remembered.or_else(|| {
+                state
+                    .model
+                    .pinned_tabs_in_space(space_id)
+                    .first()
+                    .map(|tab| tab.id)
+                    .or_else(|| {
+                        state
+                            .model
+                            .folders_in_space(space_id)
+                            .into_iter()
+                            .flat_map(|folder| state.model.folder_tabs(folder.id))
+                            .next()
+                            .map(|tab| tab.id)
+                    })
+                    .or_else(|| state.model.normal_tabs_in_space(space_id).first().map(|tab| tab.id))
+            });
+
+            let has_view = next_tab
+                .and_then(|id| state.model.tab(id))
+                .is_some_and(|tab| tab.view_id.is_some());
+            state.model.active_tab = next_tab;
+            if let Some(window) = state.model.windows.first_mut() {
+                window.active_tab = next_tab;
+            }
+            if let Some(id) = next_tab
+                && let Some(space) = state.model.spaces.iter_mut().find(|s| s.id == space_id)
+            {
+                space.last_active_tab = Some(id);
+            }
+            (state.model.spaces.clone(), next_tab, has_view)
+        };
+
+        self.bus.publish(Event::SpacesUpdated {
+            spaces: spaces_snapshot,
+        });
         self.bus.publish(Event::SpaceSwitched { space_id });
+        if should_forward_to_source && let (Some(source), Some(tab_id)) = (self.current_tab_source(), target_tab) {
+            source.activate_tab(tab_id)?;
+        } else {
+            self.bus.publish(Event::TabActivated { tab_id: target_tab });
+        }
+        Ok(())
+    }
+
+    fn handle_space_step(&self, delta: isize) -> CommandResult {
+        let next_space = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let len = state.model.spaces.len();
+            if len < 2 {
+                return Ok(());
+            }
+            let current = state
+                .model
+                .active_space
+                .and_then(|id| state.model.spaces.iter().position(|space| space.id == id))
+                .unwrap_or(0);
+            let next = (current as isize + delta).rem_euclid(len as isize) as usize;
+            state.model.spaces[next].id
+        };
+        self.handle_space_switch(next_space)
+    }
+
+    fn handle_space_clear_tabs(&self, space_id: Option<SpaceId>) -> CommandResult {
+        let normal_ids: Vec<TabId> = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let target_space = space_id
+                .or(state.model.active_space)
+                .ok_or_else(|| CommandError::TargetNotFound {
+                    command: "space.clear_tabs".to_string(),
+                    target: "active space".to_string(),
+                })?;
+            if state.model.space(target_space).is_none() {
+                return Err(CommandError::TargetNotFound {
+                    command: "space.clear_tabs".to_string(),
+                    target: format!("space {}", target_space.0),
+                });
+            }
+            state
+                .model
+                .normal_tabs_in_space(target_space)
+                .into_iter()
+                .map(|tab| tab.id)
+                .collect()
+        };
+
+        let tab_source = self.current_tab_source();
+        for tab_id in normal_ids {
+            if let Some(source) = &tab_source {
+                source.close_tab(tab_id, false)?;
+            } else {
+                self.handle_stub_tab_close(tab_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_tab_pin(&self, tab_id: TabId) -> CommandResult {
+        let (updated_tab, pinned_tabs, essentials_changed, updated_folder) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let active_space = state.model.active_space.unwrap_or(SpaceId(1));
+            let Some(tab) = state.model.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.pin".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            let target_space = tab.space_id.unwrap_or(active_space);
+            let old_folder = tab.folder_id.take();
+            let was_essential = tab.kind == TabKind::Essential;
+            tab.kind = TabKind::Pinned;
+            tab.space_id = Some(target_space);
+            let updated_tab = tab.clone();
+
+            let mut updated_folder = None;
+            if let Some(folder_id) = old_folder
+                && let Some(folder) = state.model.folders.iter_mut().find(|f| f.id == folder_id)
+            {
+                folder.tab_ids.retain(|id| *id != tab_id);
+                updated_folder = Some(folder.clone());
+            }
+
+            let essentials_changed = if was_essential {
+                state.model.essentials.retain(|item| item.tab_id != tab_id);
+                normalize_essential_orders(&mut state.model.essentials);
+                Some(state.model.essentials.clone())
+            } else {
+                None
+            };
+
+            if !state
+                .model
+                .pinned_tabs
+                .iter()
+                .any(|item| item.tab_id == tab_id && item.space_id == target_space)
+            {
+                state.model.pinned_tabs.retain(|item| item.tab_id != tab_id);
+                let order = state
+                    .model
+                    .pinned_tabs
+                    .iter()
+                    .filter(|item| item.space_id == target_space)
+                    .count();
+                state.model.pinned_tabs.push(PinnedTab {
+                    tab_id,
+                    space_id: target_space,
+                    order,
+                });
+                normalize_pinned_orders(&mut state.model.pinned_tabs);
+            }
+
+            (
+                updated_tab,
+                state.model.pinned_tabs.clone(),
+                essentials_changed,
+                updated_folder,
+            )
+        };
+
+        self.bus.publish(Event::TabUpdated { tab: updated_tab });
+        self.bus.publish(Event::PinnedTabsChanged { pinned_tabs });
+        if let Some(essentials) = essentials_changed {
+            self.bus.publish(Event::EssentialsChanged { essentials });
+        }
+        if let Some(folder) = updated_folder {
+            self.bus.publish(Event::FolderUpdated { folder });
+        }
+        Ok(())
+    }
+
+    fn handle_tab_unpin(&self, tab_id: TabId) -> CommandResult {
+        let (updated_tab, pinned_tabs) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let active_space = state.model.active_space.unwrap_or(SpaceId(1));
+            let Some(tab) = state.model.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.unpin".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            if tab.kind == TabKind::Pinned {
+                tab.kind = TabKind::Normal;
+                if tab.space_id.is_none() {
+                    tab.space_id = Some(active_space);
+                }
+            }
+            let updated_tab = tab.clone();
+            state.model.pinned_tabs.retain(|item| item.tab_id != tab_id);
+            normalize_pinned_orders(&mut state.model.pinned_tabs);
+            (updated_tab, state.model.pinned_tabs.clone())
+        };
+
+        self.bus.publish(Event::TabUpdated { tab: updated_tab });
+        self.bus.publish(Event::PinnedTabsChanged { pinned_tabs });
+        Ok(())
+    }
+
+    fn handle_tab_toggle_pin(&self, tab_id: TabId) -> CommandResult {
+        let is_pinned = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .model
+                .tab(tab_id)
+                .ok_or_else(|| CommandError::TargetNotFound {
+                    command: "tab.toggle_pin".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                })?
+                .kind
+                == TabKind::Pinned
+        };
+        if is_pinned {
+            self.handle_tab_unpin(tab_id)
+        } else {
+            self.handle_tab_pin(tab_id)
+        }
+    }
+
+    fn handle_tab_add_to_essentials(&self, tab_id: TabId) -> CommandResult {
+        let (updated_tab, essentials, pinned_changed, updated_folder, promo_hidden) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let already_essential = state
+                .model
+                .tab(tab_id)
+                .ok_or_else(|| CommandError::TargetNotFound {
+                    command: "tab.add_to_essentials".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                })?
+                .kind
+                == TabKind::Essential;
+            if !already_essential && state.model.essentials.len() >= MAX_ESSENTIALS {
+                return Err(CommandError::Failed(format!(
+                    "essentials limit ({MAX_ESSENTIALS}) reached"
+                )));
+            }
+            let tab = state.model.tabs.iter_mut().find(|t| t.id == tab_id).unwrap();
+            let old_folder = tab.folder_id.take();
+            let was_pinned = tab.kind == TabKind::Pinned;
+            tab.kind = TabKind::Essential;
+            tab.space_id = None;
+            let updated_tab = tab.clone();
+
+            let mut updated_folder = None;
+            if let Some(folder_id) = old_folder
+                && let Some(folder) = state.model.folders.iter_mut().find(|f| f.id == folder_id)
+            {
+                folder.tab_ids.retain(|id| *id != tab_id);
+                updated_folder = Some(folder.clone());
+            }
+
+            let pinned_changed = if was_pinned {
+                state.model.pinned_tabs.retain(|item| item.tab_id != tab_id);
+                normalize_pinned_orders(&mut state.model.pinned_tabs);
+                Some(state.model.pinned_tabs.clone())
+            } else {
+                None
+            };
+
+            if !state.model.essentials.iter().any(|item| item.tab_id == tab_id) {
+                let order = state.model.essentials.len();
+                state.model.essentials.push(Essential { tab_id, order });
+                normalize_essential_orders(&mut state.model.essentials);
+            }
+
+            let promo_hidden = if state.model.show_essentials_promo {
+                state.model.show_essentials_promo = false;
+                true
+            } else {
+                false
+            };
+
+            (
+                updated_tab,
+                state.model.essentials.clone(),
+                pinned_changed,
+                updated_folder,
+                promo_hidden,
+            )
+        };
+
+        self.bus.publish(Event::TabUpdated { tab: updated_tab });
+        self.bus.publish(Event::EssentialsChanged { essentials });
+        if let Some(pinned_tabs) = pinned_changed {
+            self.bus.publish(Event::PinnedTabsChanged { pinned_tabs });
+        }
+        if let Some(folder) = updated_folder {
+            self.bus.publish(Event::FolderUpdated { folder });
+        }
+        if promo_hidden {
+            self.bus.publish(Event::EssentialsPromoChanged { visible: false });
+        }
+        Ok(())
+    }
+
+    fn handle_tab_remove_from_essentials(&self, tab_id: TabId) -> CommandResult {
+        let (updated_tab, essentials) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let active_space = state.model.active_space.unwrap_or(SpaceId(1));
+            let Some(tab) = state.model.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.remove_from_essentials".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            if tab.kind == TabKind::Essential {
+                tab.kind = TabKind::Normal;
+                tab.space_id = Some(active_space);
+            }
+            let updated_tab = tab.clone();
+            state.model.essentials.retain(|item| item.tab_id != tab_id);
+            normalize_essential_orders(&mut state.model.essentials);
+            (updated_tab, state.model.essentials.clone())
+        };
+
+        self.bus.publish(Event::TabUpdated { tab: updated_tab });
+        self.bus.publish(Event::EssentialsChanged { essentials });
+        Ok(())
+    }
+
+    fn handle_tab_toggle_essential(&self, tab_id: TabId) -> CommandResult {
+        let is_essential = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .model
+                .tab(tab_id)
+                .ok_or_else(|| CommandError::TargetNotFound {
+                    command: "tab.toggle_essential".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                })?
+                .kind
+                == TabKind::Essential
+        };
+        if is_essential {
+            self.handle_tab_remove_from_essentials(tab_id)
+        } else {
+            self.handle_tab_add_to_essentials(tab_id)
+        }
+    }
+
+    fn handle_tab_toggle_mute(&self, tab_id: TabId) -> CommandResult {
+        let updated_tab = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(tab) = state.model.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.toggle_mute".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            tab.is_muted = !tab.is_muted;
+            tab.clone()
+        };
+        self.bus.publish(Event::TabUpdated { tab: updated_tab });
+        Ok(())
+    }
+
+    fn handle_tab_duplicate(&self, tab_id: TabId) -> CommandResult {
+        let url = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .model
+                .tab(tab_id)
+                .ok_or_else(|| CommandError::TargetNotFound {
+                    command: "tab.duplicate".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                })?
+                .url
+                .clone()
+        };
+        if let Some(source) = self.current_tab_source() {
+            source.new_tab(Some(&url), Some(tab_id), true)
+        } else {
+            self.handle_stub_tab_new(Some(url), Some(tab_id), true)
+        }
+    }
+
+    fn handle_tab_rename(&self, tab_id: TabId, title: String) -> CommandResult {
+        let trimmed = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        let updated_tab = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(tab) = state.model.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.rename".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            tab.custom_title = if trimmed.is_empty() { None } else { Some(trimmed) };
+            tab.clone()
+        };
+        self.bus.publish(Event::TabUpdated { tab: updated_tab });
+        Ok(())
+    }
+
+    fn handle_tab_start_rename(&self, tab_id: TabId) -> CommandResult {
+        self.bus.publish(Event::TabRenameRequested { tab_id });
+        Ok(())
+    }
+
+    fn handle_tab_move(&self, tab_id: TabId, target: TabMoveTarget) -> CommandResult {
+        let (tabs, essentials, pinned_tabs, folders) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(tab_pos) = state.model.tabs.iter().position(|t| t.id == tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.move".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+
+            let active_space = state.model.active_space.unwrap_or(SpaceId(1));
+
+            // Validate destination space/folder before mutating state.
+            match target {
+                TabMoveTarget::Normal { space_id, .. } | TabMoveTarget::Pinned { space_id, .. } => {
+                    let resolved = space_id.unwrap_or(active_space);
+                    if state.model.space(resolved).is_none() {
+                        return Err(CommandError::TargetNotFound {
+                            command: "tab.move".to_string(),
+                            target: format!("space {}", resolved.0),
+                        });
+                    }
+                }
+                TabMoveTarget::Folder { folder_id, .. } => {
+                    if state.model.folder(folder_id).is_none() {
+                        return Err(CommandError::TargetNotFound {
+                            command: "tab.move".to_string(),
+                            target: format!("folder {}", folder_id.0),
+                        });
+                    }
+                }
+                TabMoveTarget::Essential { .. } => {
+                    let already_essential = state.model.essentials.iter().any(|e| e.tab_id == tab_id);
+                    if !already_essential && state.model.essentials.len() >= MAX_ESSENTIALS {
+                        return Err(CommandError::Failed(format!(
+                            "essentials limit ({MAX_ESSENTIALS}) reached"
+                        )));
+                    }
+                }
+            }
+
+            // Strip old section memberships.
+            state.model.essentials.retain(|item| item.tab_id != tab_id);
+            state.model.pinned_tabs.retain(|item| item.tab_id != tab_id);
+            for folder in &mut state.model.folders {
+                folder.tab_ids.retain(|id| *id != tab_id);
+            }
+
+            let mut tab = state.model.tabs.remove(tab_pos);
+
+            match target {
+                TabMoveTarget::Normal { space_id, index } => {
+                    let dest_space = space_id.unwrap_or(active_space);
+                    tab.kind = TabKind::Normal;
+                    tab.space_id = Some(dest_space);
+                    tab.folder_id = None;
+
+                    let normal_positions: Vec<usize> = state
+                        .model
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| {
+                            t.kind == TabKind::Normal && t.space_id == Some(dest_space) && t.folder_id.is_none()
+                        })
+                        .map(|(idx, _)| idx)
+                        .collect();
+                    let insert_pos = if normal_positions.is_empty() {
+                        state.model.tabs.len()
+                    } else if index >= normal_positions.len() {
+                        normal_positions[normal_positions.len() - 1] + 1
+                    } else {
+                        normal_positions[index]
+                    };
+                    state.model.tabs.insert(insert_pos, tab);
+                }
+                TabMoveTarget::Pinned { space_id, index } => {
+                    let dest_space = space_id.unwrap_or(active_space);
+                    tab.kind = TabKind::Pinned;
+                    tab.space_id = Some(dest_space);
+                    tab.folder_id = None;
+                    let insert_idx = tab_pos.min(state.model.tabs.len());
+                    state.model.tabs.insert(insert_idx, tab);
+
+                    let mut space_pinned: Vec<TabId> = state
+                        .model
+                        .pinned_tabs
+                        .iter()
+                        .filter(|item| item.space_id == dest_space)
+                        .map(|item| item.tab_id)
+                        .collect();
+                    let clamped = index.min(space_pinned.len());
+                    space_pinned.insert(clamped, tab_id);
+                    state.model.pinned_tabs.retain(|item| item.space_id != dest_space);
+                    for (order, id) in space_pinned.into_iter().enumerate() {
+                        state.model.pinned_tabs.push(PinnedTab {
+                            tab_id: id,
+                            space_id: dest_space,
+                            order,
+                        });
+                    }
+                }
+                TabMoveTarget::Folder { folder_id, index } => {
+                    let folder_space = state.model.folder(folder_id).unwrap().space_id;
+                    tab.kind = TabKind::Normal;
+                    tab.space_id = Some(folder_space);
+                    tab.folder_id = Some(folder_id);
+                    let insert_idx = tab_pos.min(state.model.tabs.len());
+                    state.model.tabs.insert(insert_idx, tab);
+                    if let Some(folder) = state.model.folders.iter_mut().find(|f| f.id == folder_id) {
+                        let clamped = index.min(folder.tab_ids.len());
+                        folder.tab_ids.insert(clamped, tab_id);
+                    }
+                }
+                TabMoveTarget::Essential { index } => {
+                    tab.kind = TabKind::Essential;
+                    tab.space_id = None;
+                    tab.folder_id = None;
+                    let insert_idx = tab_pos.min(state.model.tabs.len());
+                    state.model.tabs.insert(insert_idx, tab);
+
+                    let mut ordered: Vec<TabId> = state.model.essentials.iter().map(|item| item.tab_id).collect();
+                    let clamped = index.min(ordered.len());
+                    ordered.insert(clamped, tab_id);
+                    state.model.essentials = ordered
+                        .into_iter()
+                        .enumerate()
+                        .map(|(order, id)| Essential { tab_id: id, order })
+                        .collect();
+                }
+            }
+
+            normalize_essential_orders(&mut state.model.essentials);
+            normalize_pinned_orders(&mut state.model.pinned_tabs);
+
+            (
+                state.model.tabs.clone(),
+                state.model.essentials.clone(),
+                state.model.pinned_tabs.clone(),
+                state.model.folders.clone(),
+            )
+        };
+
+        self.bus.publish(Event::TabsReordered {
+            tabs,
+            essentials,
+            pinned_tabs,
+            folders,
+        });
+        Ok(())
+    }
+
+    fn handle_tab_move_to_folder(&self, tab_id: TabId, folder_id: Option<FolderId>) -> CommandResult {
+        let target = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(tab) = state.model.tab(tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.move_to_folder".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            match folder_id {
+                Some(folder_id) => {
+                    let Some(folder) = state.model.folder(folder_id) else {
+                        return Err(CommandError::TargetNotFound {
+                            command: "tab.move_to_folder".to_string(),
+                            target: format!("folder {}", folder_id.0),
+                        });
+                    };
+                    TabMoveTarget::Folder {
+                        folder_id,
+                        index: folder.tab_ids.len(),
+                    }
+                }
+                None => {
+                    let space_id = tab.space_id.or(state.model.active_space);
+                    let count = space_id
+                        .map(|sid| state.model.normal_tabs_in_space(sid).len())
+                        .unwrap_or(0);
+                    TabMoveTarget::Normal { space_id, index: count }
+                }
+            }
+        };
+        self.handle_tab_move(tab_id, target)
+    }
+
+    fn handle_tab_move_to_space(&self, tab_id: TabId, space_id: SpaceId) -> CommandResult {
+        let (target, was_active_in_old_space) = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(tab) = state.model.tab(tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.move_to_space".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            if state.model.space(space_id).is_none() {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.move_to_space".to_string(),
+                    target: format!("space {}", space_id.0),
+                });
+            }
+            let target = match tab.kind {
+                TabKind::Pinned => TabMoveTarget::Pinned {
+                    space_id: Some(space_id),
+                    index: state.model.pinned_tabs_in_space(space_id).len(),
+                },
+                TabKind::Normal | TabKind::Essential => TabMoveTarget::Normal {
+                    space_id: Some(space_id),
+                    index: state.model.normal_tabs_in_space(space_id).len(),
+                },
+            };
+            let was_active = state.model.active_tab == Some(tab_id) && state.model.active_space != Some(space_id);
+            (target, was_active)
+        };
+
+        self.handle_tab_move(tab_id, target)?;
+
+        if was_active_in_old_space {
+            let replacement = {
+                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.model.tabs_in_active_space_order().first().copied()
+            };
+            if let (Some(source), Some(next_id)) = (self.current_tab_source(), replacement) {
+                let _ = source.activate_tab(next_id);
+            } else {
+                self.feed_tab_activated(replacement);
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_folder_create(
+        &self,
+        name: Option<String>,
+        space_id: Option<SpaceId>,
+        tab_id: Option<TabId>,
+    ) -> CommandResult {
+        let (folder, moved_tab_id) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let target_space = space_id
+                .or_else(|| tab_id.and_then(|id| state.model.tab(id)).and_then(|t| t.space_id))
+                .or(state.model.active_space)
+                .ok_or_else(|| CommandError::TargetNotFound {
+                    command: "folder.create".to_string(),
+                    target: "active space".to_string(),
+                })?;
+            if state.model.space(target_space).is_none() {
+                return Err(CommandError::TargetNotFound {
+                    command: "folder.create".to_string(),
+                    target: format!("space {}", target_space.0),
+                });
+            }
+            if let Some(id) = tab_id
+                && state.model.tab(id).is_none()
+            {
+                return Err(CommandError::TargetNotFound {
+                    command: "folder.create".to_string(),
+                    target: format!("tab {}", id.0),
+                });
+            }
+
+            let folder_id = FolderId(state.next_folder_id);
+            state.next_folder_id += 1;
+            let folder_name = name
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "New Folder".to_string());
+            let folder = Folder {
+                id: folder_id,
+                space_id: target_space,
+                name: folder_name,
+                icon: "folder".to_string(),
+                collapsed: false,
+                tab_ids: Vec::new(),
+            };
+            state.model.folders.push(folder.clone());
+            (folder, tab_id)
+        };
+
+        let folder_id = folder.id;
+        self.bus.publish(Event::FolderCreated { folder });
+        if let Some(tab_id) = moved_tab_id {
+            self.handle_tab_move(tab_id, TabMoveTarget::Folder { folder_id, index: 0 })?;
+        }
+        Ok(())
+    }
+
+    fn handle_folder_rename(&self, folder_id: FolderId, name: String) -> CommandResult {
+        let trimmed = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if trimmed.is_empty() {
+            return Err(CommandError::InvalidArgument {
+                command: "folder.rename".to_string(),
+                message: "folder name must not be empty".to_string(),
+            });
+        }
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(folder) = state.model.folders.iter_mut().find(|f| f.id == folder_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "folder.rename".to_string(),
+                    target: format!("folder {}", folder_id.0),
+                });
+            };
+            folder.name = trimmed;
+            folder.clone()
+        };
+        self.bus.publish(Event::FolderUpdated { folder: updated });
+        Ok(())
+    }
+
+    fn handle_folder_start_rename(&self, folder_id: FolderId) -> CommandResult {
+        let exists = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.folder(folder_id).is_some()
+        };
+        if !exists {
+            return Err(CommandError::TargetNotFound {
+                command: "folder.start_rename".to_string(),
+                target: format!("folder {}", folder_id.0),
+            });
+        }
+        self.bus.publish(Event::FolderRenameRequested { folder_id });
+        Ok(())
+    }
+
+    fn handle_folder_toggle_collapsed(&self, folder_id: FolderId) -> CommandResult {
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(folder) = state.model.folders.iter_mut().find(|f| f.id == folder_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "folder.toggle_collapsed".to_string(),
+                    target: format!("folder {}", folder_id.0),
+                });
+            };
+            folder.collapsed = !folder.collapsed;
+            folder.clone()
+        };
+        self.bus.publish(Event::FolderUpdated { folder: updated });
+        Ok(())
+    }
+
+    fn handle_folder_unpack(&self, folder_id: FolderId) -> CommandResult {
+        let updated_tabs = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(pos) = state.model.folders.iter().position(|f| f.id == folder_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "folder.unpack".to_string(),
+                    target: format!("folder {}", folder_id.0),
+                });
+            };
+            let folder = state.model.folders.remove(pos);
+            let mut changed = Vec::new();
+            for tab in &mut state.model.tabs {
+                if tab.folder_id == Some(folder_id) || folder.tab_ids.contains(&tab.id) {
+                    tab.folder_id = None;
+                    tab.space_id = Some(folder.space_id);
+                    changed.push(tab.clone());
+                }
+            }
+            changed
+        };
+        for tab in updated_tabs {
+            self.bus.publish(Event::TabUpdated { tab });
+        }
+        self.bus.publish(Event::FolderDeleted { folder_id });
+        Ok(())
+    }
+
+    fn handle_folder_delete(&self, folder_id: FolderId) -> CommandResult {
+        let child_tabs = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(pos) = state.model.folders.iter().position(|f| f.id == folder_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "folder.delete".to_string(),
+                    target: format!("folder {}", folder_id.0),
+                });
+            };
+            let folder = state.model.folders.remove(pos);
+            let mut ids: Vec<TabId> = folder.tab_ids;
+            for tab in &state.model.tabs {
+                if tab.folder_id == Some(folder_id) && !ids.contains(&tab.id) {
+                    ids.push(tab.id);
+                }
+            }
+            ids
+        };
+
+        self.bus.publish(Event::FolderDeleted { folder_id });
+        let tab_source = self.current_tab_source();
+        for tab_id in child_tabs {
+            if let Some(source) = &tab_source {
+                source.close_tab(tab_id, false)?;
+            } else {
+                self.handle_stub_tab_close(tab_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_notification_dismiss(&self, notification_id: NotificationId) -> CommandResult {
+        let removed = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let before = state.model.sidebar_notifications.len();
+            state
+                .model
+                .sidebar_notifications
+                .retain(|item| item.id != notification_id);
+            state.model.sidebar_notifications.len() != before
+        };
+        if !removed {
+            return Err(CommandError::TargetNotFound {
+                command: "notification.dismiss".to_string(),
+                target: format!("notification {}", notification_id.0),
+            });
+        }
+        self.bus
+            .publish(Event::SidebarNotificationDismissed { notification_id });
         Ok(())
     }
 
@@ -944,6 +1879,65 @@ impl BrowserCore for StubBackend {
                 }
             }
             Command::SpaceSwitch { space_id } => self.handle_space_switch(space_id),
+            Command::SpaceNext => self.handle_space_step(1),
+            Command::SpacePrevious => self.handle_space_step(-1),
+            Command::SpaceClearTabs { space_id } => self.handle_space_clear_tabs(space_id),
+            Command::TabPin { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_pin(target)
+            }
+            Command::TabUnpin { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_unpin(target)
+            }
+            Command::TabTogglePin { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_toggle_pin(target)
+            }
+            Command::TabAddToEssentials { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_add_to_essentials(target)
+            }
+            Command::TabRemoveFromEssentials { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_remove_from_essentials(target)
+            }
+            Command::TabToggleEssential { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_toggle_essential(target)
+            }
+            Command::TabToggleMute { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_toggle_mute(target)
+            }
+            Command::TabDuplicate { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_duplicate(target)
+            }
+            Command::TabRename { tab_id, title } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_rename(target, title)
+            }
+            Command::TabStartRename { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_start_rename(target)
+            }
+            Command::TabMove { tab_id, target } => self.handle_tab_move(tab_id, target),
+            Command::TabMoveToFolder { tab_id, folder_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_move_to_folder(target, folder_id)
+            }
+            Command::TabMoveToSpace { tab_id, space_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_move_to_space(target, space_id)
+            }
+            Command::FolderCreate { name, space_id, tab_id } => self.handle_folder_create(name, space_id, tab_id),
+            Command::FolderRename { folder_id, name } => self.handle_folder_rename(folder_id, name),
+            Command::FolderStartRename { folder_id } => self.handle_folder_start_rename(folder_id),
+            Command::FolderDelete { folder_id } => self.handle_folder_delete(folder_id),
+            Command::FolderUnpack { folder_id } => self.handle_folder_unpack(folder_id),
+            Command::FolderToggleCollapsed { folder_id } => self.handle_folder_toggle_collapsed(folder_id),
+            Command::NotificationDismiss { notification_id } => self.handle_notification_dismiss(notification_id),
             Command::SplitAdd { tab_id, direction } => self.handle_split_add(tab_id, direction),
             Command::PanelToggle { panel_id } => self.handle_panel_toggle(panel_id),
             Command::AgentSend {
@@ -1109,6 +2103,59 @@ impl BrowserCore for StubBackend {
 
     fn commands(&self) -> Vec<CommandDescriptor> {
         builtin_command_descriptors()
+    }
+}
+
+fn normalize_essential_orders(essentials: &mut [Essential]) {
+    essentials.sort_by_key(|item| item.order);
+    for (idx, item) in essentials.iter_mut().enumerate() {
+        item.order = idx;
+    }
+}
+
+fn normalize_pinned_orders(pinned_tabs: &mut [PinnedTab]) {
+    pinned_tabs.sort_by(|a, b| a.space_id.cmp(&b.space_id).then_with(|| a.order.cmp(&b.order)));
+    let mut current_space: Option<SpaceId> = None;
+    let mut next_order = 0usize;
+    for item in pinned_tabs.iter_mut() {
+        if current_space != Some(item.space_id) {
+            current_space = Some(item.space_id);
+            next_order = 0;
+        }
+        item.order = next_order;
+        next_order += 1;
+    }
+}
+
+/// Sample sidebar update notification matching Zen's "Update Complete!" card.
+pub fn sample_update_notification() -> SidebarNotification {
+    SidebarNotification {
+        id: NotificationId(1),
+        heading: "Update Complete!".to_string(),
+        links: vec![
+            SidebarNotificationLink {
+                label: "What's new in Zendia".to_string(),
+                icon: "sparkles".to_string(),
+                url: Some("https://github.com/Planckify-Labs/zendia/releases".to_string()),
+                command: None,
+                special: true,
+            },
+            SidebarNotificationLink {
+                label: "Support Zendia".to_string(),
+                icon: "heart-circle-fill".to_string(),
+                url: Some("https://github.com/sponsors/Planckify-Labs".to_string()),
+                command: None,
+                special: false,
+            },
+            SidebarNotificationLink {
+                label: "Something broke?".to_string(),
+                icon: "warning".to_string(),
+                url: Some("https://github.com/Planckify-Labs/zendia/issues".to_string()),
+                command: None,
+                special: false,
+            },
+        ],
+        auto_hide_ms: None,
     }
 }
 
@@ -1404,52 +2451,49 @@ fn sample_contributions() -> Contributions {
     }
 }
 
-fn sample_model(include_sample_tabs: bool) -> BrowserModel {
-    let work_space = SpaceId(1);
-    let research_space = SpaceId(2);
+pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
+    let default_space = SpaceId(1);
+    let work_space = SpaceId(2);
 
-    let spaces = vec![
-        Space {
-            id: work_space,
-            name: "Work".to_string(),
-            icon: "briefcase".to_string(),
-            gradient: SpaceGradient {
-                stops: vec![(34, 36, 54), (47, 51, 77)],
-                angle_deg: 135.0,
-                opacity: 0.9,
-            },
-        },
-        Space {
-            id: research_space,
-            name: "Research".to_string(),
-            icon: "book".to_string(),
-            gradient: SpaceGradient {
-                stops: vec![(30, 42, 58), (45, 63, 118)],
-                angle_deg: 150.0,
-                opacity: 0.9,
-            },
-        },
-    ];
-
-    let (tabs, active_tab, essentials, pinned_tabs, folders, split_groups, media_sessions) = if include_sample_tabs {
-        let essential_tab = TabId(1);
-        let pinned_tab = TabId(2);
-        let folder_tab = TabId(3);
-        let split_left = TabId(4);
-        let split_right = TabId(5);
-        let research_tab = TabId(6);
-        let folder_id = FolderId(1);
+    let (
+        tabs,
+        active_tab,
+        default_last_tab,
+        work_last_tab,
+        essentials,
+        pinned_tabs,
+        folders,
+        split_groups,
+        media_sessions,
+    ) = if include_sample_tabs {
+        let ess_mail = TabId(1);
+        let ess_arch = TabId(2);
+        let ess_tokens = TabId(3);
+        let pinned_arch = TabId(4);
+        let pinned_releases = TabId(5);
+        let folder_docs = TabId(6);
+        let folder_tokens = TabId(7);
+        let folder_engine_hub = TabId(8);
+        let normal_releases = TabId(9);
+        let normal_tokens = TabId(10);
+        let normal_arch = TabId(11);
+        let normal_docs = TabId(12);
+        let work_arch = TabId(13);
+        let work_spec = TabId(14);
+        let ui_spec_folder = FolderId(1);
+        let engine_folder = FolderId(2);
         let split_id = SplitGroupId(1);
 
         let tabs = vec![
             Tab {
-                id: essential_tab,
+                id: ess_mail,
                 view_id: None,
                 space_id: None,
                 folder_id: None,
                 split_group_id: None,
                 kind: TabKind::Essential,
                 title: "Mail".to_string(),
+                custom_title: None,
                 url: "https://mail.example.org/".to_string(),
                 favicon: Some("mail".to_string()),
                 is_loading: false,
@@ -1460,15 +2504,52 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
                 closing: false,
             },
             Tab {
-                id: pinned_tab,
+                id: ess_arch,
                 view_id: None,
-                space_id: Some(work_space),
+                space_id: None,
+                folder_id: None,
+                split_group_id: None,
+                kind: TabKind::Essential,
+                title: "Architecture".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/architecture".to_string(),
+                favicon: Some("code".to_string()),
+                is_loading: false,
+                can_navigate_back: false,
+                can_navigate_forward: false,
+                is_audible: false,
+                is_muted: false,
+                closing: false,
+            },
+            Tab {
+                id: ess_tokens,
+                view_id: None,
+                space_id: None,
+                folder_id: None,
+                split_group_id: None,
+                kind: TabKind::Essential,
+                title: "Design System".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/design-system".to_string(),
+                favicon: Some("sparkles".to_string()),
+                is_loading: false,
+                can_navigate_back: false,
+                can_navigate_forward: false,
+                is_audible: false,
+                is_muted: false,
+                closing: false,
+            },
+            Tab {
+                id: pinned_arch,
+                view_id: None,
+                space_id: Some(default_space),
                 folder_id: None,
                 split_group_id: None,
                 kind: TabKind::Pinned,
-                title: "Ladybird".to_string(),
-                url: "https://ladybird.org/".to_string(),
-                favicon: Some("globe".to_string()),
+                title: "Architecture — Zendia".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/architecture".to_string(),
+                favicon: Some("code".to_string()),
                 is_loading: false,
                 can_navigate_back: true,
                 can_navigate_forward: false,
@@ -1477,14 +2558,141 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
                 closing: false,
             },
             Tab {
-                id: folder_tab,
+                id: pinned_releases,
                 view_id: None,
-                space_id: Some(work_space),
-                folder_id: Some(folder_id),
+                space_id: Some(default_space),
+                folder_id: None,
+                split_group_id: None,
+                kind: TabKind::Pinned,
+                title: "Releases — Zendia".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/releases".to_string(),
+                favicon: Some("flame".to_string()),
+                is_loading: false,
+                can_navigate_back: true,
+                can_navigate_forward: false,
+                is_audible: false,
+                is_muted: false,
+                closing: false,
+            },
+            Tab {
+                id: folder_docs,
+                view_id: None,
+                space_id: Some(default_space),
+                folder_id: Some(ui_spec_folder),
                 split_group_id: None,
                 kind: TabKind::Normal,
-                title: "Freya Docs".to_string(),
-                url: "https://book.freyaui.dev/".to_string(),
+                title: "Zendia Documentation".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/docs".to_string(),
+                favicon: Some("book".to_string()),
+                is_loading: false,
+                can_navigate_back: true,
+                can_navigate_forward: false,
+                is_audible: false,
+                is_muted: false,
+                closing: false,
+            },
+            Tab {
+                id: folder_tokens,
+                view_id: None,
+                space_id: Some(default_space),
+                folder_id: Some(ui_spec_folder),
+                split_group_id: None,
+                kind: TabKind::Normal,
+                title: "Design Tokens — Zendia".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/tokens".to_string(),
+                favicon: Some("palette".to_string()),
+                is_loading: false,
+                can_navigate_back: false,
+                can_navigate_forward: false,
+                is_audible: false,
+                is_muted: false,
+                closing: false,
+            },
+            Tab {
+                id: folder_engine_hub,
+                view_id: None,
+                space_id: Some(default_space),
+                folder_id: Some(engine_folder),
+                split_group_id: None,
+                kind: TabKind::Normal,
+                title: "Hub Protocol Spec".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/engine/hub".to_string(),
+                favicon: Some("terminal".to_string()),
+                is_loading: false,
+                can_navigate_back: false,
+                can_navigate_forward: false,
+                is_audible: false,
+                is_muted: false,
+                closing: false,
+            },
+            Tab {
+                id: normal_releases,
+                view_id: None,
+                space_id: Some(default_space),
+                folder_id: None,
+                split_group_id: None,
+                kind: TabKind::Normal,
+                title: "Releases — Zendia".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/releases".to_string(),
+                favicon: Some("flame".to_string()),
+                is_loading: false,
+                can_navigate_back: true,
+                can_navigate_forward: false,
+                is_audible: true,
+                is_muted: false,
+                closing: false,
+            },
+            Tab {
+                id: normal_tokens,
+                view_id: None,
+                space_id: Some(default_space),
+                folder_id: None,
+                split_group_id: None,
+                kind: TabKind::Normal,
+                title: "Design Tokens — Zendia".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/tokens".to_string(),
+                favicon: Some("palette".to_string()),
+                is_loading: false,
+                can_navigate_back: false,
+                can_navigate_forward: false,
+                is_audible: false,
+                is_muted: false,
+                closing: false,
+            },
+            Tab {
+                id: normal_arch,
+                view_id: None,
+                space_id: Some(default_space),
+                folder_id: None,
+                split_group_id: Some(split_id),
+                kind: TabKind::Normal,
+                title: "Architecture — Zendia".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/architecture".to_string(),
+                favicon: Some("code".to_string()),
+                is_loading: false,
+                can_navigate_back: true,
+                can_navigate_forward: true,
+                is_audible: false,
+                is_muted: false,
+                closing: false,
+            },
+            Tab {
+                id: normal_docs,
+                view_id: None,
+                space_id: Some(default_space),
+                folder_id: None,
+                split_group_id: Some(split_id),
+                kind: TabKind::Normal,
+                title: "Zendia Documentation".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/docs".to_string(),
                 favicon: Some("book".to_string()),
                 is_loading: false,
                 can_navigate_back: false,
@@ -1494,47 +2702,32 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
                 closing: false,
             },
             Tab {
-                id: split_left,
+                id: work_arch,
                 view_id: None,
                 space_id: Some(work_space),
                 folder_id: None,
-                split_group_id: Some(split_id),
+                split_group_id: None,
                 kind: TabKind::Normal,
-                title: "Rust Reference".to_string(),
-                url: "https://doc.rust-lang.org/reference/".to_string(),
+                title: "Architecture — Zendia".to_string(),
+                custom_title: None,
+                url: "https://zendia.local/architecture".to_string(),
                 favicon: Some("code".to_string()),
                 is_loading: false,
                 can_navigate_back: true,
-                can_navigate_forward: true,
-                is_audible: true,
-                is_muted: false,
-                closing: false,
-            },
-            Tab {
-                id: split_right,
-                view_id: None,
-                space_id: Some(work_space),
-                folder_id: None,
-                split_group_id: Some(split_id),
-                kind: TabKind::Normal,
-                title: "Zendia Architecture".to_string(),
-                url: "https://zendia.local/architecture".to_string(),
-                favicon: Some("compass".to_string()),
-                is_loading: false,
-                can_navigate_back: false,
                 can_navigate_forward: false,
                 is_audible: false,
                 is_muted: false,
                 closing: false,
             },
             Tab {
-                id: research_tab,
+                id: work_spec,
                 view_id: None,
-                space_id: Some(research_space),
+                space_id: Some(work_space),
                 folder_id: None,
                 split_group_id: None,
                 kind: TabKind::Normal,
                 title: "HTML Living Standard".to_string(),
+                custom_title: None,
                 url: "https://html.spec.whatwg.org/".to_string(),
                 favicon: Some("book".to_string()),
                 is_loading: false,
@@ -1546,33 +2739,60 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
             },
         ];
 
-        let essentials = vec![Essential {
-            tab_id: essential_tab,
-            order: 0,
-        }];
-        let pinned_tabs = vec![PinnedTab {
-            tab_id: pinned_tab,
-            space_id: work_space,
-            order: 0,
-        }];
-        let folders = vec![Folder {
-            id: folder_id,
-            space_id: work_space,
-            name: "Docs".to_string(),
-            icon: "folder".to_string(),
-            collapsed: false,
-            tab_ids: vec![folder_tab],
-        }];
+        let essentials = vec![
+            Essential {
+                tab_id: ess_mail,
+                order: 0,
+            },
+            Essential {
+                tab_id: ess_arch,
+                order: 1,
+            },
+            Essential {
+                tab_id: ess_tokens,
+                order: 2,
+            },
+        ];
+        let pinned_tabs = vec![
+            PinnedTab {
+                tab_id: pinned_arch,
+                space_id: default_space,
+                order: 0,
+            },
+            PinnedTab {
+                tab_id: pinned_releases,
+                space_id: default_space,
+                order: 1,
+            },
+        ];
+        let folders = vec![
+            Folder {
+                id: ui_spec_folder,
+                space_id: default_space,
+                name: "UI Spec".to_string(),
+                icon: "folder".to_string(),
+                collapsed: false,
+                tab_ids: vec![folder_docs, folder_tokens],
+            },
+            Folder {
+                id: engine_folder,
+                space_id: default_space,
+                name: "Engine".to_string(),
+                icon: "folder".to_string(),
+                collapsed: true,
+                tab_ids: vec![folder_engine_hub],
+            },
+        ];
         let split_groups = vec![SplitGroup {
             id: split_id,
-            space_id: work_space,
+            space_id: default_space,
             direction: SplitDirection::Horizontal,
-            tab_ids: vec![split_left, split_right],
+            tab_ids: vec![normal_arch, normal_docs],
             ratios: vec![0.5, 0.5],
         }];
         let media_sessions = vec![MediaSession {
             id: MediaSessionId(1),
-            tab_id: split_left,
+            tab_id: normal_releases,
             title: "Focus Radio — Night Coding".to_string(),
             artist: "Zendia Sample Stream".to_string(),
             is_playing: true,
@@ -1583,7 +2803,9 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
 
         (
             tabs,
-            Some(split_left),
+            Some(folder_docs),
+            Some(folder_docs),
+            Some(work_arch),
             essentials,
             pinned_tabs,
             folders,
@@ -1594,6 +2816,8 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         (
             Vec::new(),
             None,
+            None,
+            None,
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -1601,6 +2825,31 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
             Vec::new(),
         )
     };
+
+    let spaces = vec![
+        Space {
+            id: default_space,
+            name: "Space".to_string(),
+            icon: String::new(),
+            gradient: SpaceGradient {
+                stops: vec![(62, 54, 102), (96, 64, 118)],
+                angle_deg: 135.0,
+                opacity: 0.9,
+            },
+            last_active_tab: default_last_tab,
+        },
+        Space {
+            id: work_space,
+            name: "Work".to_string(),
+            icon: "briefcase".to_string(),
+            gradient: SpaceGradient {
+                stops: vec![(20, 74, 92), (32, 118, 138)],
+                angle_deg: 150.0,
+                opacity: 0.9,
+            },
+            last_active_tab: work_last_tab,
+        },
+    ];
 
     let downloads = vec![
         Download {
@@ -1776,14 +3025,14 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
     let windows = vec![Window {
         id: WindowId(1),
         title: "Zendia".to_string(),
-        active_space: Some(work_space),
+        active_space: Some(default_space),
         active_tab,
     }];
 
     BrowserModel {
         windows,
         spaces,
-        active_space: Some(work_space),
+        active_space: Some(default_space),
         tabs,
         active_tab,
         essentials,
@@ -1793,6 +3042,8 @@ fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         downloads,
         history,
         media_sessions,
+        sidebar_notifications: Vec::new(),
+        show_essentials_promo: false,
         contributions: sample_contributions(),
         agents,
         conversations,
@@ -1851,6 +3102,7 @@ mod tests {
                 split_group_id: None,
                 kind: TabKind::Normal,
                 title: "Hub Page".to_string(),
+                custom_title: None,
                 url: url.unwrap_or("about:newtab").to_string(),
                 favicon: None,
                 is_loading: false,
@@ -2007,6 +3259,7 @@ mod tests {
             input: "ladybird.org".to_string(),
         })
         .unwrap();
+        assert_eq!(core.model().active_tab().unwrap().url, "https://ladybird.org");
         core.invoke(Command::SpaceSwitch { space_id: SpaceId(2) }).unwrap();
         core.invoke(Command::AgentSend {
             conversation_id: Some(ConversationId(1)),
@@ -2030,6 +3283,14 @@ mod tests {
         assert!(saw_panel_toggle);
         assert_eq!(view_model, core.model());
         assert_eq!(view_model.active_space, Some(SpaceId(2)));
+        assert_eq!(view_model.active_tab().unwrap().space_id, Some(SpaceId(2)));
+
+        // Switching back to Space 1 restores the tab that was last active there.
+        core.invoke(Command::SpaceSwitch { space_id: SpaceId(1) }).unwrap();
+        while let Ok(event) = sub.try_recv() {
+            view_model.apply_event(&event);
+        }
+        assert_eq!(view_model, core.model());
         assert_eq!(view_model.active_tab().unwrap().url, "https://ladybird.org");
     }
 
@@ -2237,7 +3498,7 @@ mod tests {
     #[test]
     fn tab_next_and_previous_wrap_around() {
         let core = StubBackend::new();
-        let initial_tabs: Vec<TabId> = core.model().tabs.iter().map(|tab| tab.id).collect();
+        let initial_tabs = core.model().tabs_in_active_space_order();
         assert!(initial_tabs.len() >= 2);
         let first = initial_tabs[0];
         let last = *initial_tabs.last().unwrap();
@@ -2566,6 +3827,369 @@ mod tests {
         assert_eq!(
             multiple.resolve_toolbar_area(item("builtin.app_menu").placement_rules),
             Some(ToolbarArea::TopBarEnd)
+        );
+    }
+
+    #[test]
+    fn space_switching_filters_tabs_and_restores_last_active_tab() {
+        let core = StubBackend::new();
+        let mut view_model = core.model();
+        let sub = core.subscribe();
+
+        assert_eq!(view_model.active_space, Some(SpaceId(1)));
+        assert_eq!(view_model.spaces.len(), 2);
+        assert_eq!(view_model.spaces[0].name, "Space");
+        assert_eq!(view_model.spaces[1].name, "Work");
+
+        // Activate a specific normal tab in Space 1.
+        let space1_normal = view_model.normal_tabs_in_space(SpaceId(1))[0].id;
+        core.invoke(Command::TabActivate { tab_id: space1_normal }).unwrap();
+
+        // Switch to next space ("Work"): activates Work's last active tab.
+        core.invoke(Command::SpaceNext).unwrap();
+        while let Ok(event) = sub.try_recv() {
+            view_model.apply_event(&event);
+        }
+        assert_eq!(view_model, core.model());
+        assert_eq!(view_model.active_space, Some(SpaceId(2)));
+        assert_eq!(view_model.active_tab().unwrap().space_id, Some(SpaceId(2)));
+
+        // New tabs belong to the active space ("Work").
+        core.invoke(Command::TabNew {
+            url: Some("https://work.example/".to_string()),
+            after: None,
+            activate: true,
+        })
+        .unwrap();
+        let new_work_tab = core.model().active_tab.unwrap();
+        assert_eq!(core.model().tab(new_work_tab).unwrap().space_id, Some(SpaceId(2)));
+
+        // Essentials are shared across spaces; Space 1's folders/pinned tabs do not show in Space 2.
+        assert_eq!(core.model().essential_tabs().len(), 3);
+        assert!(core.model().folders_in_space(SpaceId(2)).is_empty());
+        assert!(core.model().pinned_tabs_in_space(SpaceId(2)).is_empty());
+
+        // Switching back to Space 1 via SpacePrevious restores Space 1's last active tab.
+        core.invoke(Command::SpacePrevious).unwrap();
+        while let Ok(event) = sub.try_recv() {
+            view_model.apply_event(&event);
+        }
+        assert_eq!(view_model, core.model());
+        assert_eq!(view_model.active_space, Some(SpaceId(1)));
+        assert_eq!(view_model.active_tab, Some(space1_normal));
+
+        // Switching back to Work restores the newly opened Work tab.
+        core.invoke(Command::SpaceSwitch { space_id: SpaceId(2) }).unwrap();
+        assert_eq!(core.model().active_tab, Some(new_work_tab));
+    }
+
+    #[test]
+    fn essentials_pin_unpin_and_clear_tabs_enforce_section_rules() {
+        let core = StubBackend::new();
+        let mut view_model = core.model();
+        let sub = core.subscribe();
+
+        let normal_tab = view_model.normal_tabs_in_space(SpaceId(1))[0].id;
+        let pinned_before = view_model.pinned_tabs_in_space(SpaceId(1)).len();
+        let essentials_before = view_model.essential_tabs().len();
+
+        // Pin normal tab.
+        core.invoke(Command::TabPin {
+            tab_id: Some(normal_tab),
+        })
+        .unwrap();
+        assert_eq!(core.model().tab(normal_tab).unwrap().kind, TabKind::Pinned);
+        assert_eq!(core.model().pinned_tabs_in_space(SpaceId(1)).len(), pinned_before + 1);
+
+        // Unpin back to normal.
+        core.invoke(Command::TabUnpin {
+            tab_id: Some(normal_tab),
+        })
+        .unwrap();
+        assert_eq!(core.model().tab(normal_tab).unwrap().kind, TabKind::Normal);
+        assert_eq!(core.model().pinned_tabs_in_space(SpaceId(1)).len(), pinned_before);
+
+        // Promote to essentials (shared across spaces: space_id becomes None).
+        core.invoke(Command::TabAddToEssentials {
+            tab_id: Some(normal_tab),
+        })
+        .unwrap();
+        assert_eq!(core.model().tab(normal_tab).unwrap().kind, TabKind::Essential);
+        assert_eq!(core.model().tab(normal_tab).unwrap().space_id, None);
+        assert_eq!(core.model().essential_tabs().len(), essentials_before + 1);
+
+        // Remove from essentials while in Space 2 -> lands in Space 2.
+        core.invoke(Command::SpaceSwitch { space_id: SpaceId(2) }).unwrap();
+        core.invoke(Command::TabRemoveFromEssentials {
+            tab_id: Some(normal_tab),
+        })
+        .unwrap();
+        assert_eq!(core.model().tab(normal_tab).unwrap().kind, TabKind::Normal);
+        assert_eq!(core.model().tab(normal_tab).unwrap().space_id, Some(SpaceId(2)));
+        assert_eq!(core.model().essential_tabs().len(), essentials_before);
+
+        // Switch back to Space 1 and clear normal tabs: pinned, folders, and essentials remain intact.
+        core.invoke(Command::SpaceSwitch { space_id: SpaceId(1) }).unwrap();
+        let pinned_count = core.model().pinned_tabs_in_space(SpaceId(1)).len();
+        let folder_count = core.model().folders_in_space(SpaceId(1)).len();
+        core.invoke(Command::SpaceClearTabs { space_id: None }).unwrap();
+
+        while let Ok(event) = sub.try_recv() {
+            view_model.apply_event(&event);
+        }
+        assert_eq!(view_model, core.model());
+        assert!(view_model.normal_tabs_in_space(SpaceId(1)).is_empty());
+        assert_eq!(view_model.pinned_tabs_in_space(SpaceId(1)).len(), pinned_count);
+        assert_eq!(view_model.folders_in_space(SpaceId(1)).len(), folder_count);
+        assert_eq!(view_model.essential_tabs().len(), essentials_before);
+    }
+
+    #[test]
+    fn folders_collapse_with_active_child_and_support_crud_commands() {
+        let core = StubBackend::new();
+        let mut view_model = core.model();
+        let sub = core.subscribe();
+
+        // Collapsed folder "Engine" (FolderId(2)) hides its inactive child tab.
+        let engine_folder = FolderId(2);
+        assert!(view_model.folder(engine_folder).unwrap().collapsed);
+        assert!(view_model.visible_folder_tabs(engine_folder).is_empty());
+
+        // Activating the child inside the collapsed folder keeps that active child visible.
+        let engine_child = view_model.folder_tabs(engine_folder)[0].id;
+        core.invoke(Command::TabActivate { tab_id: engine_child }).unwrap();
+        assert_eq!(
+            core.model()
+                .visible_folder_tabs(engine_folder)
+                .iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>(),
+            vec![engine_child]
+        );
+
+        // Toggle collapsed expands it, then rename and create/unpack/delete folders.
+        core.invoke(Command::FolderToggleCollapsed {
+            folder_id: engine_folder,
+        })
+        .unwrap();
+        assert!(!core.model().folder(engine_folder).unwrap().collapsed);
+
+        core.invoke(Command::FolderRename {
+            folder_id: engine_folder,
+            name: "Core Engine".to_string(),
+        })
+        .unwrap();
+        assert_eq!(core.model().folder(engine_folder).unwrap().name, "Core Engine");
+
+        let normal_tab = core.model().normal_tabs_in_space(SpaceId(1))[0].id;
+        core.invoke(Command::FolderCreate {
+            name: Some("Reading".to_string()),
+            space_id: Some(SpaceId(1)),
+            tab_id: Some(normal_tab),
+        })
+        .unwrap();
+        let created_id = core.model().folders.iter().find(|f| f.name == "Reading").unwrap().id;
+        assert_eq!(core.model().tab(normal_tab).unwrap().folder_id, Some(created_id));
+
+        // Unpack keeps the tab and deletes the folder.
+        core.invoke(Command::FolderUnpack { folder_id: created_id }).unwrap();
+        assert!(core.model().folder(created_id).is_none());
+        assert!(core.model().tab(normal_tab).is_some());
+        assert_eq!(core.model().tab(normal_tab).unwrap().folder_id, None);
+
+        // Delete removes the folder and closes its tabs.
+        core.invoke(Command::FolderDelete {
+            folder_id: engine_folder,
+        })
+        .unwrap();
+        assert!(core.model().folder(engine_folder).is_none());
+        assert!(core.model().tab(engine_child).is_none());
+
+        while let Ok(event) = sub.try_recv() {
+            view_model.apply_event(&event);
+        }
+        assert_eq!(view_model, core.model());
+    }
+
+    #[test]
+    fn tab_move_reorders_within_and_across_sections() {
+        let core = StubBackend::new();
+        let mut view_model = core.model();
+        let sub = core.subscribe();
+
+        let normals: Vec<TabId> = view_model
+            .normal_tabs_in_space(SpaceId(1))
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(normals.len() >= 3);
+        let moved = normals[2];
+
+        // Move third normal tab to index 0.
+        core.invoke(Command::TabMove {
+            tab_id: moved,
+            target: TabMoveTarget::Normal {
+                space_id: Some(SpaceId(1)),
+                index: 0,
+            },
+        })
+        .unwrap();
+        assert_eq!(core.model().normal_tabs_in_space(SpaceId(1))[0].id, moved);
+
+        // Move into folder UI Spec at index 0.
+        core.invoke(Command::TabMove {
+            tab_id: moved,
+            target: TabMoveTarget::Folder {
+                folder_id: FolderId(1),
+                index: 0,
+            },
+        })
+        .unwrap();
+        assert_eq!(core.model().folder_tabs(FolderId(1))[0].id, moved);
+
+        // Move into pinned tabs at index 0.
+        core.invoke(Command::TabMove {
+            tab_id: moved,
+            target: TabMoveTarget::Pinned {
+                space_id: Some(SpaceId(1)),
+                index: 0,
+            },
+        })
+        .unwrap();
+        assert_eq!(core.model().pinned_tabs_in_space(SpaceId(1))[0].id, moved);
+
+        // Move to Space 2 via tab.move_to_space.
+        core.invoke(Command::TabMoveToSpace {
+            tab_id: Some(moved),
+            space_id: SpaceId(2),
+        })
+        .unwrap();
+        assert_eq!(core.model().tab(moved).unwrap().space_id, Some(SpaceId(2)));
+
+        while let Ok(event) = sub.try_recv() {
+            view_model.apply_event(&event);
+        }
+        assert_eq!(view_model, core.model());
+    }
+
+    #[test]
+    fn tab_rename_and_sidebar_notification_commands_publish_events() {
+        let core = StubBackend::new();
+        let mut view_model = core.model();
+        let sub = core.subscribe();
+
+        let target = view_model.normal_tabs_in_space(SpaceId(1))[0].id;
+        core.invoke(Command::TabRename {
+            tab_id: Some(target),
+            title: "  Sprint   Notes  ".to_string(),
+        })
+        .unwrap();
+        assert_eq!(core.model().tab(target).unwrap().display_title(), "Sprint Notes");
+
+        // Page title updates preserve custom_title.
+        core.feed_tab_updated(
+            target,
+            TabUpdate {
+                title: Some("Original Page Title".to_string()),
+                ..TabUpdate::default()
+            },
+        );
+        assert_eq!(core.model().tab(target).unwrap().display_title(), "Sprint Notes");
+
+        // Empty rename clears the custom title back to the page title.
+        core.invoke(Command::TabRename {
+            tab_id: Some(target),
+            title: "   ".to_string(),
+        })
+        .unwrap();
+        assert_eq!(core.model().tab(target).unwrap().display_title(), "Original Page Title");
+
+        // Sidebar notification add and dismiss.
+        let notif = sample_update_notification();
+        let notif_id = notif.id;
+        core.show_notification(notif);
+        assert_eq!(core.model().sidebar_notifications.len(), 1);
+        core.invoke(Command::NotificationDismiss {
+            notification_id: notif_id,
+        })
+        .unwrap();
+        assert!(core.model().sidebar_notifications.is_empty());
+
+        while let Ok(event) = sub.try_recv() {
+            view_model.apply_event(&event);
+        }
+        assert_eq!(view_model, core.model());
+    }
+
+    #[test]
+    fn phase2_commands_parse_and_have_descriptors() {
+        let core = StubBackend::new();
+        let names: Vec<String> = core.commands().into_iter().map(|d| d.name).collect();
+        for required in [
+            "space.switch",
+            "space.next",
+            "space.previous",
+            "space.clear_tabs",
+            "tab.pin",
+            "tab.unpin",
+            "tab.toggle_pin",
+            "tab.add_to_essentials",
+            "tab.remove_from_essentials",
+            "tab.toggle_essential",
+            "tab.toggle_mute",
+            "tab.duplicate",
+            "tab.rename",
+            "tab.start_rename",
+            "tab.move",
+            "tab.move_to_folder",
+            "tab.move_to_space",
+            "folder.create",
+            "folder.rename",
+            "folder.start_rename",
+            "folder.delete",
+            "folder.unpack",
+            "folder.toggle_collapsed",
+            "notification.dismiss",
+        ] {
+            assert!(names.iter().any(|n| n == required), "missing descriptor `{required}`");
+        }
+
+        assert_eq!(
+            Command::from_name_and_args("space.next", &[]).unwrap(),
+            Command::SpaceNext
+        );
+        assert_eq!(
+            Command::from_name_and_args("space.previous", &[]).unwrap(),
+            Command::SpacePrevious
+        );
+        assert_eq!(
+            Command::from_name_and_args(
+                "tab.move",
+                &[
+                    ("tab_id".to_string(), "9".to_string()),
+                    ("section".to_string(), "folder".to_string()),
+                    ("folder_id".to_string(), "1".to_string()),
+                    ("index".to_string(), "2".to_string()),
+                ]
+            )
+            .unwrap(),
+            Command::TabMove {
+                tab_id: TabId(9),
+                target: TabMoveTarget::Folder {
+                    folder_id: FolderId(1),
+                    index: 2,
+                },
+            }
+        );
+        assert_eq!(
+            Command::from_name_and_args(
+                "notification.dismiss",
+                &[("notification_id".to_string(), "1".to_string())]
+            )
+            .unwrap(),
+            Command::NotificationDismiss {
+                notification_id: NotificationId(1),
+            }
         );
     }
 }
