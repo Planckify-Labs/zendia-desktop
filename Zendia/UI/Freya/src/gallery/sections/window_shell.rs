@@ -7,7 +7,8 @@
 //! Window shell gallery section: every toolbar layout × sidebar side × expanded/collapsed state in light and dark
 //! themes, with gray placeholder rectangles where Hub pages go.
 
-use crate::ui::chrome::{WindowShell, try_use_chrome_view_state};
+use crate::ui::chrome::WindowShell;
+use crate::ui::chrome::menus::try_use_menu_state;
 use crate::ui::core_view::use_core;
 use crate::ui::kit::{Icon, KitChip, Pill};
 use crate::ui::theme::{ThemeRole, use_theme};
@@ -88,7 +89,7 @@ impl Component for WindowShellSection {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();
-        let chrome_state = try_use_chrome_view_state();
+        let menu_state = try_use_menu_state();
 
         let mut applied_state = use_state(String::new);
         if *applied_state.peek() != self.state_id {
@@ -124,7 +125,7 @@ impl Component for WindowShellSection {
             location.set(active_url.clone());
         }
 
-        let app_menu_open = chrome_state.is_some_and(|s| *s.app_menu_open.read());
+        let app_menu_open = menu_state.is_some_and(|s| *s.app_menu_open.read());
         let side_core = core.clone();
         let expand_core = core.clone();
         let reset_width_core = core.clone();

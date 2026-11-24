@@ -7,12 +7,12 @@
 //! Vertical sidebar frame: top toolbar row (in single-toolbar layout), space header, vertical tab column, bottom row,
 //! expand/collapse motion, and the interactive width resize handle.
 
-use crate::ui::chrome::context_menu_seam;
 use crate::ui::chrome::layout::{
     ChromePalette, RESIZE_HANDLE_WIDTH, SIDEBAR_EXPAND_DURATION, SIDEBAR_PADDING_COLLAPSED, SIDEBAR_PADDING_EXPANDED,
     SIDEBAR_TOP_ROW_HEIGHT, TAB_ROW_HEIGHT, TAB_ROW_RADIUS, ToolbarSlots, compute_resized_sidebar_width,
     show_window_controls_in_sidebar_top,
 };
+use crate::ui::chrome::menus::{open_tab_context_menu, try_use_menu_state};
 use crate::ui::chrome::toolbar::{ToolbarItemView, WindowControls};
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
@@ -405,10 +405,16 @@ impl Component for VerticalTabRow {
         let on_press = move |_: Event<PressEventData>| {
             activate_core.invoke_or_log(Command::TabActivate { tab_id });
         };
+        let menu_state = try_use_menu_state();
+        let menu_core = core.clone();
         let on_mouse_down = move |e: Event<MouseEventData>| {
             if e.button == Some(MouseButton::Right) {
                 e.stop_propagation();
-                context_menu_seam::open_tab_context_menu(tab_id, e.global_location);
+                if let Some(menu_state) = &menu_state {
+                    let entries = menu_core.model().peek().contributions.menu_entries.clone();
+                    let position = (e.global_location.x as f32, e.global_location.y as f32);
+                    open_tab_context_menu(menu_state, &entries, tab_id, position);
+                }
             }
         };
 

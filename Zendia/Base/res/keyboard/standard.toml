@@ -64,3 +64,70 @@ description = "Go forward"
 keys = "<C-A-m>"
 command = "debug.cycle_input_state"
 description = "Cycle sample vim input state (debug)"
+
+# Menu and window shell shortcuts.
+[[bindings]]
+keys = ["<A-f>", "<F10>"]
+command = "menu.app.toggle"
+description = "Toggle application menu"
+
+[[bindings]]
+keys = ["<C-n>", "<D-n>"]
+command = "window.new"
+description = "New window"
+
+[[bindings]]
+keys = ["<C-S-n>", "<D-S-n>"]
+command = "window.new_blank"
+description = "New blank window"
+
+[[bindings]]
+keys = ["<C-S-p>", "<D-S-p>"]
+command = "window.new_private"
+description = "New private window"
+
+[[bindings]]
+keys = ["<C-S-y>", "<D-S-y>"]
+command = "library.open"
+description = "Open downloads"
+args = { section = "downloads" }
+
+[[bindings]]
+keys = ["<C-S-f>", "<D-S-f>"]
+command = "extensions.open"
+description = "Extensions and themes"
+
+[[bindings]]
+keys = ["<C-p>", "<D-p>"]
+command = "page.print"
+description = "Print page"
+
+[[bindings]]
+keys = ["<C-S-A-s>", "<D-S-A-s>"]
+command = "page.save"
+description = "Save page as"
+
+[[bindings]]
+keys = ["<C-f>", "<D-f>"]
+command = "page.find"
+description = "Find in page"
+
+[[bindings]]
+keys = ["<C-q>", "<D-q>"]
+command = "app.quit"
+description = "Quit Zendia"
+
+[[bindings]]
+keys = ["<C-=>", "<C-+>", "<D-=>", "<D-+>"]
+command = "zoom.in"
+description = "Zoom in"
+
+[[bindings]]
+keys = ["<C-->", "<D-->"]
+command = "zoom.out"
+description = "Zoom out"
+
+[[bindings]]
+keys = ["<C-0>", "<D-0>"]
+command = "zoom.reset"
+description = "Reset zoom"

@@ -30,6 +30,21 @@ view_reload
 view_stop_loading
 view_traverse_the_history_by_delta
 view_request_close
+view_inspect_context_menu_element
+view_do_context_menu_media_action
+view_select_dropdown_closed
+view_cut_selection
+view_paste
+view_select_all
+view_request_selected_text
+view_get_source
+view_replace_context_menu_misspelling
+view_ignore_misspelling
+view_learn_misspelling
+view_open_url_in_new_tab
+view_zoom_in
+view_zoom_out
+view_reset_zoom
 
 [HubClient]
 app_open_new_tab
@@ -62,6 +77,9 @@ view_finish_handling_key_event
 view_finish_handling_mouse_event
 view_release_input
 view_page_background_color_change
+view_request_context_menu
+view_request_select_dropdown
+view_selected_text
 
 # Declared types that only the types in src/ipc_types.rs carry.
 [Types]

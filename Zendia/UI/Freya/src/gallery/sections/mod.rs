@@ -10,6 +10,7 @@ pub mod declared;
 pub mod icons;
 pub mod keymap;
 pub mod kit;
+pub mod menus;
 pub mod page;
 pub mod theme;
 pub mod window_shell;
@@ -50,6 +51,10 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
         }
         .into_element(),
         "window-shell" => window_shell::WindowShellSection {
+            state_id: state_id.to_string(),
+        }
+        .into_element(),
+        "menus" => menus::MenusSection {
             state_id: state_id.to_string(),
         }
         .into_element(),

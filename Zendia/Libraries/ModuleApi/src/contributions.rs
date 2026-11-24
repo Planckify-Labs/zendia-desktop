@@ -173,6 +173,24 @@ pub enum MenuLocation {
     SidebarContext,
 }
 
+/// Structural kind of a menu entry (action, submenu container, checkable item, toggle switch, widget row, or separator).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum MenuEntryKind {
+    #[default]
+    Action,
+    Submenu,
+    Checkable {
+        checked: bool,
+    },
+    Toggle {
+        checked: bool,
+    },
+    Widget {
+        widget_id: String,
+    },
+    Separator,
+}
+
 /// A contributed entry inside an application or context menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuEntry {
@@ -187,6 +205,13 @@ pub struct MenuEntry {
     pub order: i32,
     pub enabled: bool,
     pub source: ContributionSource,
+    /// When set, nests this entry inside the submenu with the matching [`ContributionId`].
+    pub parent: Option<ContributionId>,
+    pub kind: MenuEntryKind,
+    /// Optional trailing badge text (for example an essentials quota like `"0 / 12"`).
+    pub badge: Option<String>,
+    /// When true, activating this entry keeps the menu open (used for switches and inline widgets).
+    pub keeps_menu_open: bool,
 }
 
 /// An actionable entry listed in the command palette.

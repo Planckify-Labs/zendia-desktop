@@ -10,7 +10,7 @@ use crate::ui::chrome::layout::{
     ChromePalette, TOP_TOOLBAR_HEIGHT, ToolbarSlots, URL_BAR_HEIGHT_SINGLE, URL_BAR_HEIGHT_TOP,
     show_window_controls_in_top_bar,
 };
-use crate::ui::chrome::view_state::try_use_chrome_view_state;
+use crate::ui::chrome::menus::{AnchorRect, try_use_menu_state};
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
 use crate::ui::page::PageSurfaceContext;
@@ -79,7 +79,7 @@ impl Component for ToolbarItemView {
         let core = use_core();
         let theme = use_theme();
         let palette = ChromePalette::for_scheme(theme.scheme);
-        let chrome_state = try_use_chrome_view_state();
+        let menu_state = try_use_menu_state();
         let mut hovered = use_state(|| false);
 
         if self.item.kind == ToolbarItemKind::UrlBar {
@@ -121,7 +121,7 @@ impl Component for ToolbarItemView {
         };
 
         let is_app_menu = self.item.kind == ToolbarItemKind::AppMenu;
-        let is_pressed = is_app_menu && chrome_state.is_some_and(|state| *state.app_menu_open.read());
+        let is_pressed = is_app_menu && menu_state.is_some_and(|state| *state.app_menu_open.read());
         let is_zendia_capsule = self.item.id.as_str().starts_with("zendia.");
 
         let a11y_id = use_a11y();
@@ -131,12 +131,6 @@ impl Component for ToolbarItemView {
         let press_core = core.clone();
         let on_press = move |_: Event<PressEventData>| {
             if !effective_enabled {
-                return;
-            }
-            if item.kind == ToolbarItemKind::AppMenu {
-                if let Some(state) = chrome_state {
-                    state.toggle_app_menu();
-                }
                 return;
             }
             if item.command == "navigation.reload" && is_loading {
@@ -302,8 +296,9 @@ impl Component for ToolbarItemView {
         if is_app_menu {
             button
                 .on_sized(move |e: Event<SizedEventData>| {
-                    if let Some(state) = chrome_state {
-                        state.set_app_menu_anchor(e.area);
+                    if let Some(state) = menu_state {
+                        let mut anchor = state.app_menu_anchor;
+                        anchor.set_if_modified(AnchorRect::from_area(e.area));
                     }
                 })
                 .into_element()
