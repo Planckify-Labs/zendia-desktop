@@ -36,10 +36,16 @@ Written on 24 November 2026, against the fork at `2e03e3785` and Freya 0.5.4.
 - The agent harness, the MCP server, CLI detection, model lists, run traces.
 - Writing prompts into a chat site's box (the Ask flow) and dictation. Both act on the site's page, so they come with
   the Automation World. The chat sites themselves load for real, since they are ordinary websites.
-- CAPTCHA watching and solving, uBlock Origin, sync, session restore, live folder providers, the mods marketplace.
+- CAPTCHA watching and solving, uBlock Origin, sync, session restore, the mods marketplace.
 - The keymap engine. Vim keys that only move through a surface's own UI (j/k in a list) are in scope, because they are
   part of how that surface works. Vim modes, counts, macros, the `:` line and page hints in the page are not. They come
   with InputServer and the Automation World.
+
+**Not ported:**
+
+- Zen's boosts: the per-site restyle editor, boost sharing and receiving, and the element selector and zap that only
+  the boosts editor uses.
+- Zen's live folders.
 
 Every action whose effect lies outside the UI is a command, invoked through `BrowserCore`. During the port, a stub
 backend answers those commands with sample data (see "Foundations"). When the real registry and services land, the
@@ -121,7 +127,7 @@ and gradient fills; `use_animation` and `use_animation_transition` with easings;
 | Address bar results, library history and downloads | Browser core profile data | Sample data |
 | Toolbar, menus, palette | Browser core contributions | Built-in contributions registered at startup |
 | Mode indicator, which-key, explorer and toolbar focus, window mode | InputServer events | A debug shortcut emits sample events |
-| Page hints, region capture, boosts selector | Automation World | Sample rectangles |
+| Page hints, region capture | Automation World | Sample rectangles |
 | Agent panel, agents panel, model card, instructions, CAPTCHA summary | AgentServer, through the core's events | Sample conversations and runs |
 | Extension buttons, site panel's extensions | ExtensionServer contributions | One sample contribution |
 | Mods list, plugin panels | PluginHost contributions | One sample plugin |
@@ -172,7 +178,6 @@ needs the multi-view work in phase 1.
 | Essentials | same, `ZenEssentialsPromo.mjs` | 70 + 50 | Grid of icon tiles above the space, promo card when empty |
 | Tab renamer | `ZenTabRenamer.mjs` | 168 | Inline rename field in a row |
 | Folders | `folders/ZenFolders.mjs`, `ZenFolder.mjs`, `zen-folders.css` | 2,434 + 331 + 338 | Folder rows with icon, collapse and expand animation, nested tabs, active tab shown in a collapsed folder |
-| Live folders | `live-folders/ZenLiveFoldersUI.sys.mjs` | 258 | Folder variant with a provider badge (RSS, GitHub). Sample items |
 | Spaces | `spaces/ZenSpaceManager.mjs`, `ZenSpace.mjs`, `zen-workspaces.css` | 3,737 + 752 + 535 | Space switcher icons, space header (icon, name), per-space gradient, swipe between spaces |
 | Space creation | `ZenSpaceCreation.mjs`, `create-workspace-form.css`, `ZenSpaceIcons.mjs` | 456 + 184 + 274 | Form: name, icon picker, container, theme |
 | Gradient generator | `ZenGradientGenerator.mjs`, `zen-gradient-generator.css` | 2,516 + 460 | Color dots on a wheel, texture and opacity, presets, light and dark |
@@ -210,9 +215,6 @@ needs the multi-view work in phase 1.
 
 | Surface | Fork source | Lines | What to port |
 | --- | --- | --- | --- |
-| Boosts editor | `boosts/ZenBoostsEditor.mjs`, `zen-boosts.css`, `zen-boost-editor.inc.xhtml` | 1,823 + 892 + 161 | Per-site restyle panel: color dots, brightness, contrast, saturation, fonts, size, zap, CSS editor |
-| Boost share and receive | `ZenBoostShareDialog.mjs`, `zen-boosts-share.css` | 545 + 715 | Share card and receive dialog |
-| Element selector and zap | `ZenSelectorComponent.sys.mjs`, `ZenZapDissolve.sys.mjs` | 795 + 636 | Element highlight over the page, dissolve effect. Needs the Automation World later |
 | Share | `share/ZenShareManager.mjs`, `zen-share-confirm.inc.xhtml` | 872 + 60 | Share confirmation popup |
 | Settings | `browser/components/preferences/zen*.inc.xhtml`, `zen-settings.js` | ~230 + JS | Look and feel (toolbar layout, compact mode, window drag), tab management (pinned tab close behavior, essentials), spaces, Glance triggers, mods |
 | Mods | `mods/ZenMods.mjs`, `zenMarketplace.inc.xhtml` | 769 | List of installed mods with switches. In Zendia this is the plugin list (see "Open decisions") |
@@ -336,7 +338,7 @@ own. Each phase also adds to `BrowserCore` the model types, commands and events 
 | --- | --- | --- | --- | --- |
 | 0 | Foundations | Theme, kit, icons, page surfaces, gallery | Interface, stub backend, Hub tab adapter | |
 | 1 | Window shell | Window layout, toolbar layouts, sidebar frame, app menu, context menus, about dialog. The horizontal tab strip goes away | Toolbar and menu contributions, layout settings | 0 |
-| 2 | Sidebar content | Vertical tabs, pinned, essentials, folders, live folders, tab renamer, space switcher, space header and gradient, sidebar notification | Spaces, folders, essentials, pinned tabs and their commands | 1 |
+| 2 | Sidebar content | Vertical tabs, pinned, essentials, folders, tab renamer, space switcher, space header and gradient, sidebar notification | Spaces, folders, essentials, pinned tabs and their commands | 1 |
 | 3 | Address bar and palette | Floating bar, results, site data panel, command palette | Palette entries, result providers, site permissions view | 1 |
 | 4 | Page layouts | Split view and its sidebar group, Glance, compact mode, tab switch motion, media controls, download animation, toasts | Split groups, Glance, media sessions, downloads | 0, 2 |
 | 5 | Vim surfaces | Mode indicator and mascot, which-key, picker, hints, explorer and toolbar focus, window mode, region picker, vim mode switch | Mode and pending-key events, the vim mode setting | 2, 4 |
@@ -346,7 +348,7 @@ own. Each phase also adds to `BrowserCore` the model types, commands and events 
 | 9 | Library | Library shell, sections, media preview, keyboard layer | History, downloads, space routing | 2 |
 | 10 | Onboarding | All seven pages, mascot scenes, audio | First-run settings | 5 |
 | 11 | Spaces editing | Space creation form, gradient generator, space swipe | Space appearance | 2 |
-| 12 | Boosts and share | Boosts editor, share and receive dialogs, share popup. The selector and zap wait for the Automation World | Per-site boosts | 4 |
+| 12 | Share | Share popup | The share command | 4 |
 | 13 | Settings, plugins and extensions | The native settings window: Zen's groups and Zendia's own (vim mode, agents, web chat sites, theme), with a link to `about:settings` for Ladybird's own settings. Plugin list, extension buttons, service states | Settings, module contributions, service state events | 1, 6 |
 
 Phases 1 to 4 give a browser that looks like Zen. Phases 5 to 8 add what makes Zendia different, which is why they come
@@ -374,7 +376,7 @@ The UI stays as it is when the services behind it arrive. The stub backend gives
 | 2. Browser core | The real registry and model. Tabs, spaces, folders, essentials and split groups become real, and so does `invoke` |
 | 3. Service template | Service state events, so the "service down" states show for real |
 | 4. InputServer | Mode and pending-key events drive the vim surfaces. The UI resolves keys from compiled tables |
-| 5. Automation World | Page hints, region capture, the boosts selector and zap |
+| 5. Automation World | Page hints and region capture |
 | 6. Profile data | History, bookmarks, downloads and sessions in the library and the address bar |
 | 7. PluginHost and Module API | Plugin contributions, and declared UI drawn with the kit in side panels |
 | 8. cgx-webext docking | Extension buttons, menus and sidebars as contributions, and the site panel's extensions |
