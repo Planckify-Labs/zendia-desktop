@@ -11,3 +11,6 @@
 //! types and modules build without Freya.
 //!
 //! See `Zendia/Documentation/Architecture.md`, "Shared hooks".
+
+pub mod contributions;
+pub mod ui;
