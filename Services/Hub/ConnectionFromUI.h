@@ -213,6 +213,16 @@ private:
     virtual void view_zoom_in(u64 view_id) override;
     virtual void view_zoom_out(u64 view_id) override;
     virtual void view_reset_zoom(u64 view_id) override;
+    virtual void view_set_zoom(u64 view_id, double zoom_level) override;
+
+    virtual Messages::HubServer::ExtensionCoreAvailableResponse extension_core_available() override;
+    virtual Messages::HubServer::ExtensionHostEventResponse extension_host_event(ByteString name, ByteString args_json) override;
+    virtual Messages::HubServer::ExtensionReadFileResponse extension_read_file(ByteString extension_id, ByteString path) override;
+    virtual Messages::HubServer::ExtensionForUrlResponse extension_for_url(ByteString url) override;
+    virtual void extension_remove(ByteString extension_id) override;
+    virtual void extension_host_call_finished(u64 request_id, bool succeeded, ByteString payload) override;
+    virtual void extension_prompt_answered(u64 request_id, bool accepted) override;
+    virtual void extension_set_popup_view(u64 view_id, bool is_popup) override;
     virtual void view_set_display_metadata(u64 view_id, Optional<u64> display_id, double maximum_frames_per_second, bool screen_shows_high_dynamic_range) override;
     virtual void view_set_scales_frames_to_fit(u64 view_id, bool scales_frames_to_fit) override;
     virtual void view_enable_picture_in_picture_controls(u64 view_id) override;

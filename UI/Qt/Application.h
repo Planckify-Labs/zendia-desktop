@@ -286,6 +286,7 @@ private:
 #endif
     void open_file(String const& path) const;
 #if defined(ENABLE_WEBEXT)
+    using ExtensionPrompt = WebView::Application::ExtensionPrompt;
     virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const override;
     virtual void extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply) override;
     virtual void extension_ui_changed(StringView extension_id, StringView what) override;

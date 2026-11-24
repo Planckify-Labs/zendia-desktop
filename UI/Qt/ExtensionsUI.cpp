@@ -15,10 +15,14 @@
 #    include <LibURL/Parser.h>
 #    include <LibWebView/Application.h>
 #    include <LibWebView/Extensions/ExtensionManager.h>
+#    include <LibWebView/HistoryStore.h>
+#    include <LibWebView/SearchEngine.h>
 #    include <UI/Qt/Application.h>
+#    include <UI/Qt/BookmarkStore.h>
 #    include <UI/Qt/BrowserWindow.h>
 #    include <UI/Qt/ChromeStyle.h>
 #    include <UI/Qt/ExtensionsUI.h>
+#    include <UI/Qt/HubConnection.h>
 #    include <UI/Qt/Popover.h>
 #    include <UI/Qt/StringUtils.h>
 #    include <UI/Qt/Tab.h>
@@ -28,6 +32,7 @@
 #    include <QApplication>
 #    include <QBuffer>
 #    include <QDateTime>
+#    include <QFontDatabase>
 #    include <QFrame>
 #    include <QHBoxLayout>
 #    include <QImage>
@@ -54,18 +59,67 @@ static constexpr int POPUP_MIN = 25;
 static constexpr int POPUP_MAX_WIDTH = 800;
 static constexpr int POPUP_MAX_HEIGHT = 600;
 
-static WebView::ExtensionManager* manager()
+// The extension core lives in the Hub. Where the Hub runs in a process of its own, it is reached over IPC; otherwise
+// directly.
+static bool core_is_available()
 {
-    return WebView::Application::extension_manager();
+#    if defined(LADYBIRD_HUB_IN_OWN_PROCESS)
+    auto* hub = HubConnection::the_if_connected();
+    return hub && hub->extension_core_available();
+#    else
+    return WebView::Application::extension_manager() != nullptr;
+#    endif
+}
+
+static ByteString core_host_event(StringView name, StringView args_json)
+{
+#    if defined(LADYBIRD_HUB_IN_OWN_PROCESS)
+    auto* hub = HubConnection::the_if_connected();
+    return hub ? hub->extension_host_event(name, args_json) : ByteString {};
+#    else
+    auto* manager = WebView::Application::extension_manager();
+    return manager ? manager->host_event(name, args_json) : ByteString {};
+#    endif
+}
+
+static Optional<ByteBuffer> core_read_file(StringView extension_id, StringView path)
+{
+#    if defined(LADYBIRD_HUB_IN_OWN_PROCESS)
+    auto* hub = HubConnection::the_if_connected();
+    return hub ? hub->extension_read_file(extension_id, path) : Optional<ByteBuffer> {};
+#    else
+    auto* manager = WebView::Application::extension_manager();
+    return manager ? manager->read_file(extension_id, path) : Optional<ByteBuffer> {};
+#    endif
+}
+
+static Optional<ByteString> core_extension_for_url(StringView url)
+{
+#    if defined(LADYBIRD_HUB_IN_OWN_PROCESS)
+    auto* hub = HubConnection::the_if_connected();
+    return hub ? hub->extension_for_url(url) : Optional<ByteString> {};
+#    else
+    auto* manager = WebView::Application::extension_manager();
+    return manager ? manager->extension_for_url(url) : Optional<ByteString> {};
+#    endif
+}
+
+static void core_remove_extension(ByteString const& extension_id)
+{
+#    if defined(LADYBIRD_HUB_IN_OWN_PROCESS)
+    if (auto* hub = HubConnection::the_if_connected())
+        hub->async_extension_remove(extension_id);
+#    else
+    WebView::Application::the().remove_extension(extension_id);
+#    endif
 }
 
 static JsonValue ask_core(StringView name, JsonObject const& args)
 {
-    auto* m = manager();
-    if (!m)
+    if (!core_is_available())
         return JsonValue {};
     auto request = args.serialized();
-    auto response = JsonValue::from_string(m->host_event(name, request.bytes_as_string_view()));
+    auto response = JsonValue::from_string(core_host_event(name, request.bytes_as_string_view()));
     return response.is_error() ? JsonValue {} : response.release_value();
 }
 
@@ -194,19 +248,18 @@ namespace Extensions {
 void report_browser_state()
 {
     static ByteString s_last_reported;
-    auto* m = manager();
-    if (!m)
+    if (!core_is_available())
         return;
     auto state = browser_state_json();
     if (state == s_last_reported)
         return;
     s_last_reported = state;
-    (void)m->host_event("browserState"sv, state);
+    (void)core_host_event("browserState"sv, state);
 }
 
 void start_reporting_browser_state()
 {
-    if (!manager())
+    if (!core_is_available())
         return;
     // Tabs change in many places (navigation, titles, loading, dragging); comparing a small snapshot a few times a second
     // catches all of them, and only a change reaches the extensions.
@@ -253,7 +306,7 @@ static QPixmap pixmap_from_core_icon(ByteString const& extension_id, JsonValue c
         if (!chosen.has_value())
             return {};
         auto path = chosen->get_string("path"sv).value_or({});
-        auto bytes = manager() ? manager()->read_file(extension_id, path) : Optional<ByteBuffer> {};
+        auto bytes = core_read_file(extension_id, path);
         QPixmap pixmap;
         if (bytes.has_value())
             pixmap.loadFromData(reinterpret_cast<uchar const*>(bytes->data()), bytes->size());
@@ -430,10 +483,14 @@ public:
         auto* layout = new QVBoxLayout(&card());
         layout->setContentsMargins(1, 1, 1, 1);
         layout->setSpacing(0);
-        m_view = new WebContentView(&card(), {}, WebContentViewInitialState { .is_private = window.is_private(), .maximum_frames_per_second = 60.0, .display_id = {}, .owner_view = nullptr });
+        m_view = new WebContentView(&card(), {}, WebContentViewInitialState { .is_private = window.is_private(), .maximum_frames_per_second = 60.0, .display_id = {}, .owner_view_id = {} });
         m_view->setAccessibleName("Extension popup");
         layout->addWidget(m_view);
         s_popups.set(m_view->view_id(), this);
+#    if defined(LADYBIRD_HUB_IN_OWN_PROCESS)
+        if (auto* hub = HubConnection::the_if_connected())
+            hub->async_extension_set_popup_view(m_view->view_id(), true);
+#    endif
         set_content_size(POPUP_MIN * 8, POPUP_MIN * 4);
         on_visibility_change = [this](bool visible) {
             if (!visible) {
@@ -447,8 +504,13 @@ public:
 
     virtual ~ExtensionPopup() override
     {
-        if (m_view)
+        if (m_view) {
             s_popups.remove(m_view->view_id());
+#    if defined(LADYBIRD_HUB_IN_OWN_PROCESS)
+            if (auto* hub = HubConnection::the_if_connected())
+                hub->async_extension_set_popup_view(m_view->view_id(), false);
+#    endif
+        }
     }
 
     ByteString const& extension_id() const { return m_extension_id; }
@@ -810,7 +872,7 @@ private:
         menu->addSeparator();
         QObject::connect(menu->addAction("Remove from Ladybird…"), &QAction::triggered, [this, id] {
             close();
-            WebView::Application::the().remove_extension(id);
+            core_remove_extension(id);
         });
         more->setMenu(menu);
         layout->addWidget(more, 0, Qt::AlignVCenter);
@@ -850,9 +912,9 @@ ExtensionsToolbarArea::ExtensionsToolbarArea(QWidget* parent)
     QObject::connect(m_puzzle_button, &QToolButton::clicked, this, [this] { show_panel(); });
     layout->addWidget(m_puzzle_button);
 
-    setVisible(manager() != nullptr);
+    setVisible(core_is_available());
     static bool s_reporting = false;
-    if (!s_reporting && manager()) {
+    if (!s_reporting && core_is_available()) {
         s_reporting = true;
         // Not from here: the window that holds this toolbar is still being built and has no tabs yet.
         QTimer::singleShot(0, qApp, [] { Extensions::start_reporting_browser_state(); });
@@ -907,7 +969,7 @@ void ExtensionsToolbarArea::show_panel()
 
 void ExtensionsToolbarArea::refresh()
 {
-    if (!manager())
+    if (!core_is_available())
         return;
     JsonObject args;
     if (m_tab && m_tab->is_loaded())
@@ -1003,7 +1065,7 @@ void ExtensionsToolbarArea::refresh()
                 args.set("pinned"sv, false);
                 (void)ask_core("setActionPinned"sv, args);
             });
-            QObject::connect(menu->addAction("Remove from Ladybird…"), &QAction::triggered, [id] { WebView::Application::the().remove_extension(id); });
+            QObject::connect(menu->addAction("Remove from Ladybird…"), &QAction::triggered, [id] { core_remove_extension(id); });
             menu->popup(button->mapToGlobal(position));
         });
         m_buttons_layout->addWidget(button);
@@ -1117,7 +1179,7 @@ static Optional<URL::URL> url_argument(JsonObject const& args, StringView key)
     return URL::Parser::basic_parse(*text);
 }
 
-void host_call(ByteString const&, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
+void host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
 {
     report_browser_state();
     auto ok = [&] {
@@ -1135,7 +1197,7 @@ void host_call(ByteString const&, StringView function, JsonObject const& args, F
     auto& application = Application::the();
 
     if (function == "host.tabs.create"sv) {
-        auto url = url_argument(args, "url"sv).value_or(WebView::Application::settings().new_tab_page_url());
+        auto url = url_argument(args, "url"sv).value_or(Application::settings().new_tab_page_url());
         auto* window = window_with_id(args.get_integer<i64>("windowId"sv));
         auto active = args.get_bool("active"sv).value_or(true);
         if (!window) {
@@ -1237,6 +1299,20 @@ void host_call(ByteString const&, StringView function, JsonObject const& args, F
         return ok();
     }
 
+    if (function == "host.fontSettings.getFontList"sv) {
+        JsonArray fonts;
+        for (auto const& family : QFontDatabase::families()) {
+            if (QFontDatabase::isPrivateFamily(family))
+                continue;
+            auto name = ak_string_from_qstring(family);
+            JsonObject font;
+            font.set("fontId"sv, name);
+            font.set("displayName"sv, name);
+            fonts.must_append(move(font));
+        }
+        return reply(fonts.serialized().to_byte_string());
+    }
+
     if (function == "host.tabs.setZoom"sv) {
         auto place = tab_arg();
         if (!place.has_value())
@@ -1290,7 +1366,7 @@ void host_call(ByteString const&, StringView function, JsonObject const& args, F
             window = &moved->window->detach_tab_to_new_window(moved->window->tab_index(moved->tab), moved->window->geometry().center());
         } else {
             if (urls.is_empty())
-                urls.append(WebView::Application::settings().new_tab_page_url());
+                urls.append(Application::settings().new_tab_page_url());
             auto popup = args.get_string("type"sv).value_or({}) == "popup"sv ? BrowserWindow::IsPopupWindow::Yes : BrowserWindow::IsPopupWindow::No;
             window = &application.new_window(urls, configuration, popup, is_private);
         }
@@ -1352,13 +1428,177 @@ void host_call(ByteString const&, StringView function, JsonObject const& args, F
         if (!window || !url.has_value())
             return fail("Could not find an active browser window."sv);
         auto* area = toolbar_area_of(*window);
-        auto extension_id = WebView::Application::extension_manager()->extension_for_url(url->serialize().bytes_as_string_view()).value_or({});
+        auto extension_id = core_extension_for_url(url->serialize().bytes_as_string_view()).value_or({});
         show_popup(*window, extension_id, *url, area ? &area->anchor_for(extension_id) : nullptr);
         return ok();
     }
 
-    auto message = ByteString::formatted("{} is not implemented yet in Ladybird", function.substring_view(min<size_t>(5, function.length())));
-    reply(Error::from_string_view(message.view()));
+    if (function == "host.history.search"sv) {
+        auto text = args.get_string("text"sv).value_or({});
+        auto max_results = static_cast<size_t>(args.get_integer<u64>("maxResults"sv).value_or(100));
+        auto entries = Application::history_store().list_entries(text, 0, max_results);
+        JsonArray out;
+        for (auto const& entry : entries) {
+            JsonObject item;
+            item.set("id"sv, entry.url);
+            item.set("url"sv, entry.url);
+            item.set("title"sv, entry.title.value_or({}));
+            item.set("lastVisitTime"sv, static_cast<double>(entry.last_visited_time.milliseconds_since_epoch()));
+            item.set("visitCount"sv, entry.visit_count);
+            item.set("typedCount"sv, entry.direct_visit_count);
+            out.must_append(move(item));
+        }
+        return reply(out.serialized().to_byte_string());
+    }
+
+    if (function == "host.history.getVisits"sv) {
+        auto url = url_argument(args, "url"sv);
+        if (!url.has_value())
+            return fail("Invalid URL"sv);
+        JsonArray out;
+        if (auto entry = Application::history_store().entry_for_url(*url); entry.has_value()) {
+            // The store keeps only the latest visit of each URL, so that is the one visit reported.
+            auto last_visit_ms = entry->last_visited_time.milliseconds_since_epoch();
+            JsonObject visit;
+            visit.set("id"sv, entry->url);
+            visit.set("visitId"sv, String::number(last_visit_ms));
+            visit.set("visitTime"sv, static_cast<double>(last_visit_ms));
+            visit.set("referringVisitId"sv, "0"sv);
+            visit.set("transition"sv, entry->last_direct_visit_time == entry->last_visited_time ? "typed"sv : "link"sv);
+            out.must_append(move(visit));
+        }
+        return reply(out.serialized().to_byte_string());
+    }
+
+    if (function == "host.history.addUrl"sv) {
+        auto url = url_argument(args, "url"sv);
+        if (!url.has_value())
+            return fail("Invalid URL"sv);
+        Application::history_store().record_visit(*url, args.get_string("title"sv).copy());
+        return ok();
+    }
+
+    if (function == "host.history.deleteUrl"sv) {
+        auto url = url_argument(args, "url"sv);
+        if (!url.has_value())
+            return fail("Invalid URL"sv);
+        Application::history_store().remove_entry_for_url(*url);
+        return ok();
+    }
+
+    if (function == "host.history.deleteRange"sv) {
+        auto start = UnixDateTime::from_milliseconds_since_epoch(static_cast<i64>(args.get_double_with_precision_loss("startTime"sv).value_or(0.0)));
+        auto end = UnixDateTime::from_milliseconds_since_epoch(static_cast<i64>(args.get_double_with_precision_loss("endTime"sv).value_or(0.0)));
+        auto& history = Application::history_store();
+
+        // The store keeps one entry per URL rather than every visit, so an entry is in the range when its last visit is.
+        // Collect first: removing while paging would shift the offsets.
+        static constexpr size_t page_size = 500;
+        Vector<URL::URL> urls_to_remove;
+        for (size_t offset = 0;; offset += page_size) {
+            auto entries = history.list_entries({}, offset, page_size);
+            for (auto const& entry : entries) {
+                if (entry.last_visited_time < start || entry.last_visited_time > end)
+                    continue;
+                if (auto url = URL::Parser::basic_parse(entry.url); url.has_value())
+                    urls_to_remove.append(url.release_value());
+            }
+            if (entries.size() < page_size)
+                break;
+        }
+        for (auto const& url : urls_to_remove)
+            history.remove_entry_for_url(url);
+        return ok();
+    }
+
+    if (function == "host.history.deleteAll"sv) {
+        Application::history_store().remove_entries_accessed_since(UnixDateTime::earliest());
+        return ok();
+    }
+
+    if (function == "host.topSites.get"sv) {
+        auto limit = static_cast<size_t>(args.get_integer<u64>("limit"sv).value_or(12));
+        auto entries = Application::history_store().list_entries({}, 0, limit);
+        JsonArray out;
+        for (auto const& entry : entries) {
+            JsonObject item;
+            item.set("url"sv, entry.url);
+            item.set("title"sv, entry.title.value_or({}));
+            out.must_append(move(item));
+        }
+        return reply(out.serialized().to_byte_string());
+    }
+
+    if (function == "host.bookmarks.create"sv) {
+        auto title = args.get_string("title"sv).copy();
+        if (auto url = url_argument(args, "url"sv); url.has_value())
+            Application::bookmark_store().add_bookmark(*url, title, {});
+        else
+            (void)Application::bookmark_store().add_folder(title);
+        return ok();
+    }
+
+    if (function == "host.bookmarks.update"sv) {
+        auto id = args.get_string("id"sv).value_or({});
+        auto title = args.get_string("title"sv).copy();
+        if (auto url = url_argument(args, "url"sv); url.has_value())
+            Application::bookmark_store().edit_bookmark(id, *url, title);
+        else
+            Application::bookmark_store().edit_folder(id, title);
+        return ok();
+    }
+
+    if (function == "host.bookmarks.move"sv) {
+        auto id = args.get_string("id"sv).value_or({});
+        auto index = static_cast<size_t>(args.get_integer<u64>("index"sv).value_or(0));
+        Application::bookmark_store().move_item(id, {}, index);
+        return ok();
+    }
+
+    if (function == "host.bookmarks.remove"sv) {
+        Application::bookmark_store().remove_item(args.get_string("id"sv).value_or({}));
+        return ok();
+    }
+
+    if (function == "host.search.query"sv) {
+        auto text = args.get_string("text"sv).value_or({});
+        Optional<WebView::SearchEngine> engine;
+        if (auto requested = args.get_string("engine"sv); requested.has_value())
+            engine = Application::settings().find_search_engine_by_name(*requested);
+        if (!engine.has_value())
+            engine = Application::settings().search_engine_settings().engine;
+        if (!engine.has_value() && !WebView::builtin_search_engines().is_empty())
+            engine = WebView::builtin_search_engines().first();
+        if (!engine.has_value())
+            return fail("No search engine configured"sv);
+        auto search_url = URL::Parser::basic_parse(engine->format_search_query_for_navigation(text));
+        if (!search_url.has_value())
+            return fail("Invalid search URL"sv);
+        auto disposition = args.get_string("disposition"sv).value_or({});
+        if (disposition == "NEW_WINDOW"sv) {
+            application.new_window(Vector<URL::URL> { *search_url });
+        } else if (disposition == "CURRENT_TAB"sv) {
+            if (auto* window = application.active_window_if_any(); window && window->current_tab())
+                window->current_tab()->view().load(*search_url);
+            else
+                application.new_window(Vector<URL::URL> { *search_url });
+        } else {
+            if (auto* window = application.active_window_if_any())
+                window->new_tab_from_url(*search_url, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_current_tab());
+            else
+                application.new_window(Vector<URL::URL> { *search_url });
+        }
+        return ok();
+    }
+
+#    if defined(LADYBIRD_HUB_IN_OWN_PROCESS)
+    // The Hub answers the primitives that need no windows itself (see extension_host_call_works_without_ui).
+    (void)extension_id, (void)args;
+    reply(Error::from_string_literal("This primitive needs a browser window, and Ladybird does not handle it yet"));
+#    else
+    // Fall back to headless/core Application primitives (cookies, browsingData, search.engines, management.uninstall).
+    WebView::Application::the().WebView::Application::extension_host_call(extension_id, function, args, move(reply));
+#    endif
 }
 
 }

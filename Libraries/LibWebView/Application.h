@@ -213,6 +213,8 @@ public:
     // The browser UI's part of extensions. The defaults suit a browser without windows (headless).
     // A host.* primitive of the extension core that needs windows and tabs (host.tabs.create, host.windows.update, ...).
     virtual void extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply);
+    // Whether the default extension_host_call above answers this primitive itself, without windows (cookies, ...).
+    static bool extension_host_call_works_without_ui(StringView function);
     // An extension's toolbar button, menu items or shortcuts changed ("action", "commands").
     virtual void extension_ui_changed(StringView extension_id, StringView what) { (void)extension_id, (void)what; }
     // Whether the view shows an extension's popup (which is not a tab).

@@ -640,4 +640,96 @@ Vector<u64> Application::platform_presentation_drm_format_modifiers() const
     return WebView::Application::platform_presentation_drm_format_modifiers();
 }
 
+#if defined(ENABLE_WEBEXT)
+void Application::display_extension_prompt(WebView::Application::ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
+{
+    if (m_host) {
+        m_host->display_extension_prompt(prompt, move(on_answer));
+        return;
+    }
+    auto* ui = ConnectionFromUI::the();
+    if (ui && !browser_options().headless_mode.has_value() && !browser_options().auto_accept_extension_prompts) {
+        auto request_id = m_next_extension_request_id++;
+        m_pending_extension_prompts.set(request_id, move(on_answer));
+        ui->async_extension_prompt(request_id, prompt.title, prompt.message, prompt.details, prompt.accept_label);
+        return;
+    }
+    WebView::Application::display_extension_prompt(prompt, move(on_answer));
+}
+
+void Application::extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
+{
+    if (m_host) {
+        m_host->extension_host_call(extension_id, function, args, move(reply));
+        return;
+    }
+    auto* ui = ConnectionFromUI::the();
+    if (!ui || extension_host_call_works_without_ui(function)) {
+        WebView::Application::extension_host_call(extension_id, function, args, move(reply));
+        return;
+    }
+    auto request_id = m_next_extension_request_id++;
+    m_pending_extension_host_calls.set(request_id, move(reply));
+    ui->async_extension_host_call(request_id, extension_id, function, args.serialized().to_byte_string());
+}
+
+void Application::extension_ui_changed(StringView extension_id, StringView what)
+{
+    if (m_host) {
+        m_host->extension_ui_changed(extension_id, what);
+        return;
+    }
+    if (auto* ui = ConnectionFromUI::the()) {
+        ui->async_extension_ui_changed(extension_id, what);
+        return;
+    }
+    WebView::Application::extension_ui_changed(extension_id, what);
+}
+
+bool Application::is_extension_popup_view(u64 view_id) const
+{
+    if (m_host)
+        return m_host->is_extension_popup_view(view_id);
+    return m_extension_popup_views.contains(view_id);
+}
+
+void Application::extension_popup_request(u64 view_id, StringView name, StringView args_json)
+{
+    if (m_host) {
+        m_host->extension_popup_request(view_id, name, args_json);
+        return;
+    }
+    if (auto* ui = ConnectionFromUI::the()) {
+        ui->async_extension_popup_request(view_id, name, args_json);
+        return;
+    }
+    WebView::Application::extension_popup_request(view_id, name, args_json);
+}
+
+void Application::extension_host_call_finished(u64 request_id, bool succeeded, ByteString const& payload)
+{
+    auto reply = m_pending_extension_host_calls.take(request_id);
+    if (!reply.has_value())
+        return;
+    if (succeeded)
+        (*reply)(payload);
+    else
+        (*reply)(Error::from_string_view(payload.view()));
+}
+
+void Application::extension_prompt_answered(u64 request_id, bool accepted)
+{
+    if (auto on_answer = m_pending_extension_prompts.take(request_id); on_answer.has_value())
+        (*on_answer)(accepted);
+}
+
+void Application::set_extension_popup_view(u64 view_id, bool is_popup)
+{
+    if (is_popup)
+        m_extension_popup_views.set(view_id);
+    else
+        m_extension_popup_views.remove(view_id);
+}
+#endif
+
 }

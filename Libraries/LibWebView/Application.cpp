@@ -389,7 +389,7 @@ void Application::start_extension_background_page(ByteString const& id, Extensio
         if (reason == ExtensionStartReason::Startup || (reason == ExtensionStartReason::Install && m_loaded_extension_ids.contains_slow(id)))
             m_extension_manager->notify_startup(id);
     };
-    view->load(*url);
+    view->load_from_browser_ui(*url);
     dbgln("Extensions: started background page {}", *url_string);
     m_extension_background_views.set(id, move(view));
 }
@@ -399,8 +399,194 @@ void Application::stop_extension_background_page(ByteString const& id)
     m_extension_background_views.remove(id);
 }
 
-void Application::extension_host_call(ByteString const&, StringView function, JsonObject const&, Function<void(ErrorOr<ByteString>)> reply)
+static JsonObject serialize_extension_cookie(HTTP::Cookie::Cookie const& cookie, StringView store_id = "0"sv)
 {
+    JsonObject obj;
+    obj.set("name"sv, cookie.name);
+    obj.set("value"sv, cookie.value);
+    obj.set("domain"sv, cookie.domain);
+    obj.set("hostOnly"sv, cookie.host_only);
+    obj.set("path"sv, cookie.path);
+    obj.set("secure"sv, cookie.secure);
+    obj.set("httpOnly"sv, cookie.http_only);
+    obj.set("session"sv, !cookie.persistent);
+    if (cookie.persistent)
+        obj.set("expirationDate"sv, static_cast<double>(cookie.expiry_time.milliseconds_since_epoch()) / 1000.0);
+    StringView same_site = "unspecified"sv;
+    switch (cookie.same_site) {
+    case HTTP::Cookie::SameSite::None:
+        same_site = "no_restriction"sv;
+        break;
+    case HTTP::Cookie::SameSite::Lax:
+        same_site = "lax"sv;
+        break;
+    case HTTP::Cookie::SameSite::Strict:
+        same_site = "strict"sv;
+        break;
+    case HTTP::Cookie::SameSite::Default:
+        same_site = "unspecified"sv;
+        break;
+    }
+    obj.set("sameSite"sv, same_site);
+    obj.set("storeId"sv, store_id);
+    return obj;
+}
+
+bool Application::extension_host_call_works_without_ui(StringView function)
+{
+    // Keep in sync with extension_host_call below.
+    return function.is_one_of("host.cookies.get"sv, "host.cookies.getAll"sv, "host.cookies.set"sv, "host.cookies.remove"sv,
+        "host.browsingData.remove"sv, "host.search.engines"sv, "host.management.uninstall"sv);
+}
+
+void Application::extension_host_call(ByteString const&, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
+{
+    if (function == "host.cookies.get"sv && m_default_session && m_default_session->cookie_jar) {
+        auto url = URL::Parser::basic_parse(args.get_string("url"sv).value_or({}));
+        auto name = args.get_string("name"sv).value_or({});
+        if (!url.has_value())
+            return reply(Error::from_string_literal("Invalid cookie URL"));
+        auto cookie = m_default_session->cookie_jar->get_named_cookie(*url, name);
+        if (!cookie.has_value())
+            return reply(ByteString { "null"sv });
+        auto store_id = args.get_string("storeId"sv).value_or("0"_string);
+        return reply(serialize_extension_cookie(*cookie, store_id).serialized().to_byte_string());
+    }
+
+    if (function == "host.cookies.getAll"sv && m_default_session && m_default_session->cookie_jar) {
+        auto store_id = args.get_string("storeId"sv).value_or("0"_string);
+        auto filter_name = args.get_string("name"sv);
+        auto filter_domain = args.get_string("domain"sv);
+        auto filter_path = args.get_string("path"sv);
+        auto filter_secure = args.get_bool("secure"sv);
+        auto filter_session = args.get_bool("session"sv);
+        Optional<URL::URL> filter_url;
+        if (auto u = args.get_string("url"sv); u.has_value())
+            filter_url = URL::Parser::basic_parse(*u);
+
+        JsonArray out;
+        auto cookies = filter_url.has_value()
+            ? m_default_session->cookie_jar->get_all_cookies_webdriver(*filter_url)
+            : m_default_session->cookie_jar->get_all_cookies();
+        for (auto const& c : cookies) {
+            if (filter_name.has_value() && c.name != *filter_name)
+                continue;
+            if (filter_domain.has_value() && !HTTP::Cookie::domain_matches(c.domain, *filter_domain))
+                continue;
+            if (filter_path.has_value() && c.path != *filter_path)
+                continue;
+            if (filter_secure.has_value() && c.secure != *filter_secure)
+                continue;
+            if (filter_session.has_value() && (!c.persistent) != *filter_session)
+                continue;
+            out.must_append(serialize_extension_cookie(c, store_id));
+        }
+        return reply(out.serialized().to_byte_string());
+    }
+
+    if (function == "host.cookies.set"sv && m_default_session && m_default_session->cookie_jar) {
+        auto url = URL::Parser::basic_parse(args.get_string("url"sv).value_or({}));
+        if (!url.has_value())
+            return reply(Error::from_string_literal("Invalid cookie URL"));
+        auto canonical_domain = HTTP::Cookie::canonicalize_domain(*url);
+        HTTP::Cookie::Cookie cookie;
+        cookie.name = args.get_string("name"sv).value_or({});
+        cookie.value = args.get_string("value"sv).value_or({});
+        auto explicit_domain = args.get_string("domain"sv);
+        cookie.host_only = !explicit_domain.has_value();
+        cookie.domain = explicit_domain.value_or(canonical_domain.value_or({}));
+        cookie.path = args.get_string("path"sv).value_or(HTTP::Cookie::default_path(*url));
+        cookie.secure = args.get_bool("secure"sv).value_or(false);
+        cookie.http_only = args.get_bool("httpOnly"sv).value_or(false);
+        auto now = UnixDateTime::now();
+        cookie.creation_time = now;
+        cookie.last_access_time = now;
+        if (auto exp = args.get_double_with_precision_loss("expirationDate"sv); exp.has_value()) {
+            cookie.persistent = true;
+            cookie.expiry_time = UnixDateTime::from_milliseconds_since_epoch(static_cast<i64>(*exp * 1000.0));
+        } else {
+            cookie.persistent = false;
+            cookie.expiry_time = UnixDateTime::from_seconds_since_epoch(now.seconds_since_epoch() + 86400 * 365);
+        }
+        auto ss = args.get_string("sameSite"sv).value_or({});
+        if (ss == "no_restriction"sv)
+            cookie.same_site = HTTP::Cookie::SameSite::None;
+        else if (ss == "lax"sv)
+            cookie.same_site = HTTP::Cookie::SameSite::Lax;
+        else if (ss == "strict"sv)
+            cookie.same_site = HTTP::Cookie::SameSite::Strict;
+        else
+            cookie.same_site = HTTP::Cookie::SameSite::Default;
+        m_default_session->cookie_jar->update_cookie(cookie);
+        auto store_id = args.get_string("storeId"sv).value_or("0"_string);
+        return reply(serialize_extension_cookie(cookie, store_id).serialized().to_byte_string());
+    }
+
+    if (function == "host.cookies.remove"sv && m_default_session && m_default_session->cookie_jar) {
+        auto url = URL::Parser::basic_parse(args.get_string("url"sv).value_or({}));
+        auto name = args.get_string("name"sv).value_or({});
+        if (!url.has_value())
+            return reply(Error::from_string_literal("Invalid cookie URL"));
+        auto existing = m_default_session->cookie_jar->get_named_cookie(*url, name);
+        if (!existing.has_value())
+            return reply(ByteString { "null"sv });
+        CookieStorageKey key {
+            .name = existing->name,
+            .domain = existing->domain,
+            .host_only = existing->host_only,
+            .path = existing->path,
+            .partition_key = existing->partition_key,
+        };
+        m_default_session->cookie_jar->delete_cookie(key);
+        JsonObject removed;
+        removed.set("url"sv, args.get_string("url"sv).value_or({}));
+        removed.set("name"sv, name);
+        removed.set("storeId"sv, args.get_string("storeId"sv).value_or("0"_string));
+        return reply(removed.serialized().to_byte_string());
+    }
+
+    if (function == "host.browsingData.remove"sv) {
+        ClearBrowsingDataOptions options;
+        if (auto opt_obj = args.get_object("options"sv); opt_obj.has_value()) {
+            if (auto since = opt_obj->get_double_with_precision_loss("since"sv); since.has_value())
+                options.since = UnixDateTime::from_milliseconds_since_epoch(static_cast<i64>(*since));
+        }
+        if (auto types = args.get_object("dataToRemove"sv); types.has_value()) {
+            if (types->get_bool("cache"sv).value_or(false))
+                options.delete_cached_files = ClearBrowsingDataOptions::Delete::Yes;
+            if (types->get_bool("history"sv).value_or(false))
+                options.delete_history = ClearBrowsingDataOptions::Delete::Yes;
+            if (types->get_bool("downloads"sv).value_or(false))
+                options.delete_download_history = ClearBrowsingDataOptions::Delete::Yes;
+            if (types->get_bool("cookies"sv).value_or(false) || types->get_bool("localStorage"sv).value_or(false) || types->get_bool("indexedDB"sv).value_or(false))
+                options.delete_site_data = ClearBrowsingDataOptions::Delete::Yes;
+        }
+        auto promise = clear_browsing_data(options);
+        promise->when_resolved([reply = move(reply)](Empty) mutable {
+            reply(ByteString { "null"sv });
+        });
+        return;
+    }
+
+    if (function == "host.search.engines"sv) {
+        auto const& configured = settings().search_engine_settings();
+        JsonArray engines;
+        for (auto const& eng : builtin_search_engines()) {
+            JsonObject o;
+            o.set("name"sv, eng.name);
+            o.set("isDefault"sv, configured.engine.has_value() && configured.engine->name == eng.name);
+            engines.must_append(move(o));
+        }
+        return reply(engines.serialized().to_byte_string());
+    }
+
+    if (function == "host.management.uninstall"sv) {
+        auto id = args.get_string("id"sv).value_or({}).to_byte_string();
+        reply(ByteString { "null"sv });
+        Core::deferred_invoke([this, id = move(id)] { remove_extension(id); });
+        return;
+    }
+
     auto message = ByteString::formatted("{} needs a browser window, and this Ladybird has none", function.substring_view(min<size_t>(5, function.length())));
     reply(Error::from_string_view(message.view()));
 }

@@ -29,7 +29,7 @@
     },
     {
         "sites": [
-            "https://addons.mozilla.org"
+            "https://mozilla.org"
         ],
         "user_agent": [
             "as_Firefox"

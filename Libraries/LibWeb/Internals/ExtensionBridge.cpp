@@ -10,6 +10,7 @@
 #include <LibGC/Heap.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Error.h>
+#include <LibJS/Runtime/Object.h>
 #include <LibJS/Runtime/PrimitiveString.h>
 #include <LibURL/Origin.h>
 #include <LibWeb/Bindings/PlatformObject.h>
@@ -26,6 +27,7 @@
 #include <LibWeb/Internals/ExtensionWorld.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
+#include <LibWeb/WebIDL/DOMException.h>
 
 namespace Web::Internals {
 
@@ -331,6 +333,63 @@ Utf16String ExtensionBridge::call_sync(Utf16String const& name, Utf16String cons
 {
     auto result = page().client().page_did_call_extension_api_sync(document_id(), m_extension_id, name.to_utf8(), args_json.to_utf8());
     return Utf16String::from_utf8(result.value_or(String {}));
+}
+
+WebIDL::ExceptionOr<void> ExtensionBridge::import_script(Utf16String const& url)
+{
+    // Only an extension's own page has a worker to stand in for; content scripts and store pages have no importScripts.
+    if (m_kind != Kind::Page)
+        return WebIDL::NotSupportedError::create(bridge_realm(), "importScripts is only available to an extension's own pages"_utf16);
+
+    // Like a worker's importScripts, which the extension's CSP allows for its own files ('self'): the script must be one of
+    // the extension's files, and its text comes from the extension's package in the browser process, never from the page.
+    auto& document = window().associated_document();
+    auto resolved = document.encoding_parse_url(url);
+    if (!resolved.has_value() || !resolved->origin().is_same_origin(document.origin()))
+        return WebIDL::NetworkError::create(Utf16String::formatted("importScripts: '{}' is not one of the extension's files", url));
+
+    JsonArray args;
+    args.must_append(resolved->serialize_path());
+    auto result = page().client().page_did_call_extension_api_sync(document_id(), m_extension_id, "__runtime.readScript"_string, args.serialized());
+    auto source = result.has_value() ? JsonValue::from_string(*result) : ErrorOr<JsonValue> { Error::from_string_literal("no answer") };
+    if (source.is_error() || !source.value().is_string())
+        return WebIDL::NetworkError::create(Utf16String::formatted("importScripts: could not load '{}'", url));
+
+    auto& settings = document.relevant_settings_object();
+    auto script = HTML::ClassicScript::create(resolved->serialize().to_byte_string(), Utf16String::from_utf8(source.value().as_string()), settings, *resolved);
+    auto completion = script->run(HTML::ClassicScript::RethrowErrors::Yes);
+    if (completion.is_error())
+        return completion;
+    return {};
+}
+
+bool ExtensionBridge::may_fetch_without_cors(URL::URL const& url)
+{
+    if (m_kind != Kind::Page)
+        return false;
+    auto origin = url.origin().serialize();
+    if (m_origins_fetched_without_cors.contains(origin))
+        return true;
+    JsonArray args;
+    args.must_append(url.serialize());
+    auto result = page().client().page_did_call_extension_api_sync(document_id(), m_extension_id, "__permissions.allowsFetch"_string, args.serialized());
+    if (!result.has_value() || *result != "true"sv)
+        return false;
+    m_origins_fetched_without_cors.set(move(origin));
+    return true;
+}
+
+GC::Ptr<ExtensionBridge> ExtensionBridge::for_extension_page_client(HTML::EnvironmentSettingsObject& settings)
+{
+    if (!is_extension_origin(settings.origin()))
+        return {};
+    auto* window = HTML::window_from_global_object(settings.global_object());
+    if (!window)
+        return {};
+    auto bridge = window->associated_document().extension_bridge(String {});
+    if (!bridge || bridge->m_kind != Kind::Page)
+        return {};
+    return bridge;
 }
 
 void ExtensionBridge::set_message_handler(WebIDL::CallbackType& handler)

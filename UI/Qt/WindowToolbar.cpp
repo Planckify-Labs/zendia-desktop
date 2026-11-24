@@ -1441,7 +1441,9 @@ void WindowToolbar::lay_out_as_row()
     toolbar_layout->addWidget(&field_slot(), 1);
     toolbar_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
 #if defined(ENABLE_WEBEXT)
-    m_extensions_area = new ExtensionsToolbarArea(m_toolbar);
+    // The toolbar is laid out again when its layout changes; keep the one area rather than leaving an old one behind.
+    if (!m_extensions_area)
+        m_extensions_area = new ExtensionsToolbarArea(m_toolbar);
     toolbar_layout->addWidget(m_extensions_area, 0, Qt::AlignVCenter);
 #endif
     if (m_feedback_button)

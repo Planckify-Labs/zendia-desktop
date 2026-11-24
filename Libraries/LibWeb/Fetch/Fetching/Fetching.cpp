@@ -23,6 +23,7 @@
 #include <LibRequests/RequestTimingInfo.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <LibWeb/Internals/ExtensionBridge.h>
 #include <LibWeb/Loader/ExtensionNetwork.h>
 #include <LibURL/Parser.h>
 #include <LibTextCodec/Encoder.h>
@@ -791,6 +792,20 @@ GC::Ptr<PendingResponse> main_fetch(JS::Realm& realm, Infrastructure::FetchParam
         if (request->current_url().scheme().is_one_of("chrome-extension"sv, "moz-extension"sv)) {
             request->set_response_tainting(Infrastructure::Request::ResponseTainting::Basic);
             return scheme_fetch(realm, *fetch_params);
+        }
+
+        // AD-HOC (cgx-webext): An extension's own pages (background, popup, options) fetch from the hosts their extension has
+        //                      permission for without CORS, as in Chrome and Firefox. The browser process decides.
+        if (request->mode() == Infrastructure::Request::Mode::CORS && origin && Infrastructure::is_http_or_https_scheme(request->current_url().scheme())
+            && Internals::ExtensionBridge::is_extension_origin(*origin)) {
+            if (auto const* address = request->client().has_value() ? request->client()->get_pointer<HTML::EnvironmentSettingsObjectAddress>() : nullptr) {
+                if (auto settings = HTML::environment_settings_object_at(*address)) {
+                    if (auto bridge = Internals::ExtensionBridge::for_extension_page_client(*settings); bridge && bridge->may_fetch_without_cors(request->current_url())) {
+                        request->set_response_tainting(Infrastructure::Request::ResponseTainting::Basic);
+                        return scheme_fetch(realm, *fetch_params);
+                    }
+                }
+            }
         }
 
         // -> request’s current URL’s scheme is not an HTTP(S) scheme
@@ -2492,6 +2507,13 @@ static NonnullRefPtr<Infrastructure::Response> extension_redirect_response(Infra
     return response;
 }
 
+static void extension_notify_error(Page& page, Infrastructure::Request const& request, Optional<HTML::CrossProcessId> navigable_id, StringView error)
+{
+    auto details = extension_request_details(request);
+    details.set("error"sv, error);
+    ExtensionNetwork::notify(page, ExtensionNetwork::Stage::ErrorOccurred, navigable_id, details);
+}
+
 static GC::Ref<PendingResponse> http_network_fetch_with_extensions(JS::Realm& realm, Infrastructure::FetchParams const& fetch_params, HTTP::Cookie::IncludeCredentials include_credentials, IsNewConnectionFetch is_new_connection_fetch, RefPtr<HTTP::MemoryCache> http_cache)
 {
     using ExtensionNetwork::Stage;
@@ -2506,17 +2528,11 @@ static GC::Ref<PendingResponse> http_network_fetch_with_extensions(JS::Realm& re
     auto navigable_id = extension_request_navigable(*request);
     auto returned_pending_response = PendingResponse::create(fetch_params);
 
-    auto fail = [](Page& page, Infrastructure::Request const& request, Optional<HTML::CrossProcessId> navigable_id, StringView error) {
-        auto details = extension_request_details(request);
-        details.set("error"sv, error);
-        ExtensionNetwork::notify(page, Stage::ErrorOccurred, navigable_id, details);
-    };
-
-    ExtensionNetwork::ask(page, Stage::BeforeRequest, navigable_id, extension_request_details(*request), [&realm, page = GC::Root { page }, fetch_params = NonnullRefPtr { fetch_params }, request, returned = GC::Root { returned_pending_response }, navigable_id, include_credentials, is_new_connection_fetch, http_cache = move(http_cache), fail](JsonObject answer) mutable {
+    ExtensionNetwork::ask(page, Stage::BeforeRequest, navigable_id, extension_request_details(*request), [&realm, page = GC::Root { page }, fetch_params = NonnullRefPtr { fetch_params }, request, returned = GC::Root { returned_pending_response }, navigable_id, include_credentials, is_new_connection_fetch, http_cache = move(http_cache)](JsonObject answer) mutable {
         HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
         if (answer.get_bool("cancel"sv).value_or(false)) {
-            fail(*page, *request, navigable_id, "net::ERR_BLOCKED_BY_CLIENT"sv);
+            extension_notify_error(*page, *request, navigable_id, "net::ERR_BLOCKED_BY_CLIENT"sv);
             returned->resolve(Infrastructure::Response::network_error("Request was blocked by an extension"_string));
             return;
         }
@@ -2529,20 +2545,20 @@ static GC::Ref<PendingResponse> http_network_fetch_with_extensions(JS::Realm& re
                 // Redirects may only go to HTTP(S) URLs, but extensions also send requests to their own files and to
                 // data: URLs. Those are answered in place.
                 request->url_list().append(target.release_value());
-                scheme_fetch(realm, *fetch_params)->when_loaded([returned = GC::Ref { *returned }](NonnullRefPtr<Infrastructure::Response> response) {
+                scheme_fetch(realm, *fetch_params)->when_loaded(GC::create_function(GC::Heap::the(), GC::captures(GC::Ref { *returned }), [](GC::Ref<PendingResponse>& returned, NonnullRefPtr<Infrastructure::Response> response) {
                     returned->resolve(move(response));
-                });
+                }));
                 return;
             }
         }
 
         auto details = extension_request_details(*request);
         details.set("requestHeaders"sv, extension_headers_json(*request->header_list()));
-        ExtensionNetwork::ask(*page, Stage::BeforeSendHeaders, navigable_id, details, [&realm, page, fetch_params, request, returned, navigable_id, include_credentials, is_new_connection_fetch, http_cache = move(http_cache), fail](JsonObject answer) mutable {
+        ExtensionNetwork::ask(*page, Stage::BeforeSendHeaders, navigable_id, details, [&realm, page, fetch_params, request, returned, navigable_id, include_credentials, is_new_connection_fetch, http_cache = move(http_cache)](JsonObject answer) mutable {
             HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
             if (answer.get_bool("cancel"sv).value_or(false)) {
-                fail(*page, *request, navigable_id, "net::ERR_BLOCKED_BY_CLIENT"sv);
+                extension_notify_error(*page, *request, navigable_id, "net::ERR_BLOCKED_BY_CLIENT"sv);
                 returned->resolve(Infrastructure::Response::network_error("Request was blocked by an extension"_string));
                 return;
             }
@@ -2555,26 +2571,26 @@ static GC::Ref<PendingResponse> http_network_fetch_with_extensions(JS::Realm& re
             }
 
             auto pending_response = nonstandard_resource_loader_file_or_http_network_fetch(realm, *fetch_params, include_credentials, is_new_connection_fetch, move(http_cache));
-            pending_response->when_loaded([&realm, page = GC::Ref { *page }, fetch_params, request, returned = GC::Ref { *returned }, navigable_id, fail](NonnullRefPtr<Infrastructure::Response> response) {
+            pending_response->when_loaded(GC::create_function<void(NonnullRefPtr<Infrastructure::Response>)>(GC::Heap::the(), GC::captures(realm, GC::Ref { *page }, fetch_params, request, GC::Ref { *returned }, navigable_id), [](auto& realm, GC::Ref<Page>& page, NonnullRefPtr<Infrastructure::FetchParams const>& fetch_params, NonnullRefPtr<Infrastructure::Request>& request, GC::Ref<PendingResponse>& returned, auto& navigable_id, NonnullRefPtr<Infrastructure::Response> response) {
                 if (response->is_network_error()) {
-                    fail(*page, *request, navigable_id, "net::ERR_FAILED"sv);
+                    extension_notify_error(*page, *request, navigable_id, "net::ERR_FAILED"sv);
                     returned->resolve(move(response));
                     return;
                 }
                 auto details = extension_request_details(*request);
                 extension_add_response_details(details, *response);
-                ExtensionNetwork::ask(*page, Stage::HeadersReceived, navigable_id, details, [&realm, page = GC::Root { page }, fetch_params, request, returned = GC::Root { returned }, navigable_id, response, fail](JsonObject answer) {
+                ExtensionNetwork::ask(*page, Stage::HeadersReceived, navigable_id, details, [&realm, page = GC::Root { page }, fetch_params, request, returned = GC::Root { returned }, navigable_id, response](JsonObject answer) {
                     HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
                     if (answer.get_bool("cancel"sv).value_or(false)) {
-                        stop_discarded_response_body(*fetch_params->controller(), *response);
-                        fail(*page, *request, navigable_id, "net::ERR_BLOCKED_BY_CLIENT"sv);
+                        fetch_params->discard_response_body(*response);
+                        extension_notify_error(*page, *request, navigable_id, "net::ERR_BLOCKED_BY_CLIENT"sv);
                         returned->resolve(Infrastructure::Response::network_error("Response was blocked by an extension"_string));
                         return;
                     }
                     if (auto redirect = answer.get_string("redirectUrl"sv); redirect.has_value()) {
                         if (auto target = URL::Parser::basic_parse(redirect->bytes_as_string_view()); target.has_value() && Infrastructure::is_http_or_https_scheme(target->scheme())) {
-                            stop_discarded_response_body(*fetch_params->controller(), *response);
+                            fetch_params->discard_response_body(*response);
                             returned->resolve(extension_redirect_response(*request, *target));
                             return;
                         }
@@ -2605,7 +2621,7 @@ static GC::Ref<PendingResponse> http_network_fetch_with_extensions(JS::Realm& re
                     }
                     returned->resolve(response);
                 });
-            });
+            }));
         });
     });
 

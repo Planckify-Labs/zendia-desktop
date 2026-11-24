@@ -126,7 +126,7 @@ GC::Ref<ExtensionWorld> ExtensionWorld::create(HTML::Window& window, String exte
             return browsing_context->window_proxy_for(*wrapper_world, realm)->object();
         });
 
-    auto& realm = *execution_context->realm;
+    auto& realm = *execution_context->realm();
     auto intrinsics = realm.create<Bindings::Intrinsics>(realm);
     auto host_defined = realm.heap().allocate<ExtensionHostDefined>(intrinsics, *wrapper_world, window_realm);
     realm.set_host_defined(host_defined);
@@ -232,12 +232,15 @@ JS::ThrowCompletionOr<GC::Ref<JS::Object>> export_function(JS::VM& vm, JS::Realm
     auto length = TRY(function.get(vm.names.length));
     auto exported = JS::NativeFunction::create(
         target_realm,
-        [function = GC::Ref { function }](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
-            GC::RootVector<JS::Value> arguments;
-            for (size_t i = 0; i < vm.argument_count(); ++i)
-                arguments.append(vm.argument(i));
-            return JS::call(vm, *function, vm.this_value(), arguments.span());
-        },
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            target_realm.heap(),
+            GC::captures(GC::Ref { function }),
+            [](GC::Ref<JS::FunctionObject>& function, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                GC::RootVector<JS::Value> arguments;
+                for (size_t i = 0; i < vm.argument_count(); ++i)
+                    arguments.append(vm.argument(i));
+                return JS::call(vm, *function, vm.this_value(), arguments.span());
+            }),
         length.is_number() ? static_cast<i32>(length.as_double()) : 0, name,
         // The function belongs to the realm it is exported into: its prototype is that realm's Function.prototype.
         &target_realm);
@@ -331,52 +334,64 @@ void ExtensionWorld::install_firefox_helpers()
     auto const hidden = JS::Attribute::Configurable | JS::Attribute::Writable;
 
     global.define_native_function(
-        realm, "cloneInto"_utf16_fly_string, [world](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
-            auto scope = TRY(resolve_target_scope(vm, *world, vm.argument(1)));
-            auto clone_functions = TRY(option_flag(vm.argument(2), "cloneFunctions"sv));
-            HashMap<JS::Object*, JS::Object*> seen;
-            return clone_into(vm, *world, realm_of_scope(*scope), vm.argument(0), clone_functions, seen);
-        },
+        realm, "cloneInto"_utf16_fly_string,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(world),
+            [](GC::Ref<ExtensionWorld>& world, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                auto scope = TRY(resolve_target_scope(vm, *world, vm.argument(1)));
+                auto clone_functions = TRY(option_flag(vm.argument(2), "cloneFunctions"sv));
+                HashMap<JS::Object*, JS::Object*> seen;
+                return clone_into(vm, *world, realm_of_scope(*scope), vm.argument(0), clone_functions, seen);
+            }),
         3, hidden);
 
     global.define_native_function(
-        realm, "exportFunction"_utf16_fly_string, [world](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
-            auto function = vm.argument(0);
-            if (!function.is_function())
-                return vm.throw_completion<JS::TypeError>("Expected a function to export"_utf16);
-            auto scope = TRY(resolve_target_scope(vm, *world, vm.argument(1)));
-            auto options = vm.argument(2);
-            Utf16FlyString name;
-            if (options.is_object()) {
-                auto define_as = TRY(options.as_object().get("defineAs"_utf16_fly_string));
-                if (!define_as.is_undefined())
-                    name = Utf16FlyString { TRY(define_as.to_utf16_string(vm)) };
-            }
-            if (name.is_empty()) {
-                auto function_name = TRY(function.as_object().get(vm.names.name));
-                if (function_name.is_string())
-                    name = Utf16FlyString { function_name.as_string().utf16_string() };
-            }
-            auto exported = TRY(export_function(vm, realm_of_scope(*scope), function.as_function(), name));
-            if (!name.is_empty() && options.is_object() && !TRY(options.as_object().get("defineAs"_utf16_fly_string)).is_undefined())
-                TRY(scope->create_data_property_or_throw(name, JS::Value { exported }));
-            return JS::Value { exported };
-        },
+        realm, "exportFunction"_utf16_fly_string,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(world),
+            [](GC::Ref<ExtensionWorld>& world, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                auto function = vm.argument(0);
+                if (!function.is_function())
+                    return vm.throw_completion<JS::TypeError>("Expected a function to export"_utf16);
+                auto scope = TRY(resolve_target_scope(vm, *world, vm.argument(1)));
+                auto options = vm.argument(2);
+                Utf16FlyString name;
+                if (options.is_object()) {
+                    auto define_as = TRY(options.as_object().get("defineAs"_utf16_fly_string));
+                    if (!define_as.is_undefined())
+                        name = Utf16FlyString { TRY(define_as.to_utf16_string(vm)) };
+                }
+                if (name.is_empty()) {
+                    auto function_name = TRY(function.as_object().get(vm.names.name));
+                    if (function_name.is_string())
+                        name = Utf16FlyString { function_name.as_string().utf16_string() };
+                }
+                auto exported = TRY(export_function(vm, realm_of_scope(*scope), function.as_function(), name));
+                if (!name.is_empty() && options.is_object() && !TRY(options.as_object().get("defineAs"_utf16_fly_string)).is_undefined())
+                    TRY(scope->create_data_property_or_throw(name, JS::Value { exported }));
+                return JS::Value { exported };
+            }),
         3, hidden);
 
     global.define_native_function(
-        realm, "createObjectIn"_utf16_fly_string, [world](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
-            auto scope = TRY(resolve_target_scope(vm, *world, vm.argument(0)));
-            auto& target = realm_of_scope(*scope);
-            auto result = JS::Object::create(target, target.intrinsics().object_prototype());
-            auto options = vm.argument(1);
-            if (options.is_object()) {
-                auto define_as = TRY(options.as_object().get("defineAs"_utf16_fly_string));
-                if (!define_as.is_undefined())
-                    TRY(scope->create_data_property_or_throw(Utf16FlyString { TRY(define_as.to_utf16_string(vm)) }, JS::Value { result }));
-            }
-            return JS::Value { result };
-        },
+        realm, "createObjectIn"_utf16_fly_string,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(world),
+            [](GC::Ref<ExtensionWorld>& world, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                auto scope = TRY(resolve_target_scope(vm, *world, vm.argument(0)));
+                auto& target = realm_of_scope(*scope);
+                auto result = JS::Object::create(target, target.intrinsics().object_prototype());
+                auto options = vm.argument(1);
+                if (options.is_object()) {
+                    auto define_as = TRY(options.as_object().get("defineAs"_utf16_fly_string));
+                    if (!define_as.is_undefined())
+                        TRY(scope->create_data_property_or_throw(Utf16FlyString { TRY(define_as.to_utf16_string(vm)) }, JS::Value { result }));
+                }
+                return JS::Value { result };
+            }),
         2, hidden);
 
     // `x.wrappedJSObject` for the objects that have a counterpart in the page: windows, documents, elements, anything
@@ -388,7 +403,12 @@ void ExtensionWorld::install_firefox_helpers()
     if (prototype.is_error() || !prototype.value().is_object())
         return;
     prototype.release_value().as_object().define_native_accessor(
-        realm, "wrappedJSObject"_utf16_fly_string, [world](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> { return to_page(*world, vm.this_value()); }, Function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)> {}, JS::Attribute::Configurable);
+        realm, "wrappedJSObject"_utf16_fly_string,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(world),
+            [](GC::Ref<ExtensionWorld>& world, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> { return to_page(*world, vm.this_value()); }),
+        nullptr, JS::Attribute::Configurable);
 }
 
 }

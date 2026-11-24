@@ -411,4 +411,11 @@ endpoint HubClient
     view_crash_report_saved(u64 view_id) =|
     view_performance_stats(u64 view_id, WebView::TabPerformanceStats stats) =|
     view_compositor_layers_change(u64 view_id, Compositing::CompositorLayersDescription layers) =|
+
+    // Extensions (cgx-webext): what the extension core needs from the browser's windows, where the Hub runs in a process
+    // of its own. Each extension_host_call and extension_prompt is answered with the matching HubServer message.
+    extension_host_call(u64 request_id, ByteString extension_id, ByteString function, ByteString args_json) =|
+    extension_prompt(u64 request_id, String title, String message, Vector<String> details, String accept_label) =|
+    extension_ui_changed(ByteString extension_id, ByteString what) =|
+    extension_popup_request(u64 view_id, ByteString name, ByteString args_json) =|
 }

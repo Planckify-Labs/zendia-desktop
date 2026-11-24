@@ -756,6 +756,48 @@ void HubConnection::platform_features_description(u64 request_id, ByteString des
         (*callback)(move(description));
 }
 
+void HubConnection::extension_host_call([[maybe_unused]] u64 request_id, [[maybe_unused]] ByteString extension_id, [[maybe_unused]] ByteString function, [[maybe_unused]] ByteString args_json)
+{
+#if defined(ENABLE_WEBEXT)
+    auto args = JsonValue::from_string(args_json);
+    auto const& args_object = !args.is_error() && args.value().is_object() ? args.value().as_object() : JsonObject {};
+    Application::the().extension_host_call(extension_id, function, args_object, [request_id](ErrorOr<ByteString> result) {
+        auto* hub = HubConnection::the_if_connected();
+        if (!hub)
+            return;
+        if (result.is_error())
+            hub->async_extension_host_call_finished(request_id, false, result.error().string_literal());
+        else
+            hub->async_extension_host_call_finished(request_id, true, result.release_value());
+    });
+#endif
+}
+
+void HubConnection::extension_prompt([[maybe_unused]] u64 request_id, [[maybe_unused]] String title, [[maybe_unused]] String message, [[maybe_unused]] Vector<String> details, [[maybe_unused]] String accept_label)
+{
+#if defined(ENABLE_WEBEXT)
+    WebView::Application::ExtensionPrompt prompt { .title = move(title), .message = move(message), .details = move(details), .accept_label = move(accept_label) };
+    Application::the().display_extension_prompt(prompt, [request_id](bool accepted) {
+        if (auto* hub = HubConnection::the_if_connected())
+            hub->async_extension_prompt_answered(request_id, accepted);
+    });
+#endif
+}
+
+void HubConnection::extension_ui_changed([[maybe_unused]] ByteString extension_id, [[maybe_unused]] ByteString what)
+{
+#if defined(ENABLE_WEBEXT)
+    Application::the().extension_ui_changed(extension_id, what);
+#endif
+}
+
+void HubConnection::extension_popup_request([[maybe_unused]] u64 view_id, [[maybe_unused]] ByteString name, [[maybe_unused]] ByteString args_json)
+{
+#if defined(ENABLE_WEBEXT)
+    Application::the().extension_popup_request(view_id, name, args_json);
+#endif
+}
+
 void HubConnection::app_open_new_tab(Vector<URL::URL> urls)
 {
     if (auto& application = Application::the(); application.on_new_tab)

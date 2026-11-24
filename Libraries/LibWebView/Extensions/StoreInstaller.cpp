@@ -208,7 +208,7 @@ void StoreInstaller::download(URL::URL url, DownloadCallback callback, u32 redir
 
     auto headers = HTTP::HeaderList::create();
     headers->set({ "User-Agent"sv, Web::default_user_agent });
-    auto request = client.value()->start_request("GET"sv, url, *headers, {}, HTTP::CacheMode::NoStore, HTTP::Cookie::IncludeCredentials::No);
+    auto request = client.value()->start_request("GET"sv, url, HTTP::Cookie::SameSiteContext::same_site(), *headers, {}, HTTP::CacheMode::NoStore, HTTP::Cookie::IncludeCredentials::No);
     if (!request) {
         callback(Error::from_string_literal("Cannot start the download"));
         return;

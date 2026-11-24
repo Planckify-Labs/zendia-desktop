@@ -287,6 +287,7 @@ endpoint HubServer
     view_zoom_in(u64 view_id) =|
     view_zoom_out(u64 view_id) =|
     view_reset_zoom(u64 view_id) =|
+    view_set_zoom(u64 view_id, double zoom_level) =|
     view_set_display_metadata(u64 view_id, Optional<u64> display_id, double maximum_frames_per_second, bool screen_shows_high_dynamic_range) =|
     view_set_scales_frames_to_fit(u64 view_id, bool scales_frames_to_fit) =|
     view_enable_picture_in_picture_controls(u64 view_id) =|
@@ -317,4 +318,15 @@ endpoint HubServer
     view_deny_fullscreen_window(u64 view_id) =|
     view_set_is_fullscreen(u64 view_id, Web::ViewportIsFullscreen is_fullscreen) =|
     view_reset_site_permissions(u64 view_id, URL::Origin origin) =|
+
+    // Extensions (cgx-webext), where the Hub runs in a process of its own. Without ENABLE_WEBEXT the Hub has no extension
+    // core: it answers that none is available and ignores the rest.
+    extension_core_available() => (bool available)
+    extension_host_event(ByteString name, ByteString args_json) => (ByteString response_json)
+    extension_read_file(ByteString extension_id, ByteString path) => (Optional<ByteBuffer> bytes)
+    extension_for_url(ByteString url) => (Optional<ByteString> extension_id)
+    extension_remove(ByteString extension_id) =|
+    extension_host_call_finished(u64 request_id, bool succeeded, ByteString payload) =|
+    extension_prompt_answered(u64 request_id, bool accepted) =|
+    extension_set_popup_view(u64 view_id, bool is_popup) =|
 }

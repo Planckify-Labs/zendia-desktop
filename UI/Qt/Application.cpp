@@ -2544,7 +2544,7 @@ void Application::extension_popup_request(u64 view_id, StringView name, StringVi
 void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
 {
     if (browser_options().headless_mode.has_value() || browser_options().auto_accept_extension_prompts) {
-        WebView::Application::display_extension_prompt(prompt, move(on_answer));
+        WebView::Application::the().WebView::Application::display_extension_prompt(prompt, move(on_answer));
         return;
     }
 

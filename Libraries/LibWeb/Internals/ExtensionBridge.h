@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/HashMap.h>
+#include <AK/HashTable.h>
 #include <AK/String.h>
 #include <AK/Utf16String.h>
 #include <LibGC/Ptr.h>
@@ -15,6 +16,7 @@
 #include <LibWebCommon/HTML/CrossProcessId.h>
 #include <LibWeb/Internals/InternalsBase.h>
 #include <LibWeb/WebIDL/CallbackType.h>
+#include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/WebIDL/Promise.h>
 
 namespace Web::Internals {
@@ -73,6 +75,15 @@ public:
     Utf16String context_init();
     GC::Ref<WebIDL::Promise> call(Utf16String const& name, Utf16String const& args_json);
     Utf16String call_sync(Utf16String const& name, Utf16String const& args_json);
+    // A worker's importScripts, for an extension's background service worker, which runs as a page here: fetches one of
+    // the extension's own files from the browser process and runs it synchronously, as a classic script of this page.
+    WebIDL::ExceptionOr<void> import_script(Utf16String const& url);
+
+    // Whether this extension page may fetch `url` without CORS, as in Chrome and Firefox: its extension has host
+    // permission for it. The browser process decides; allowed origins are remembered for the page's lifetime.
+    bool may_fetch_without_cors(URL::URL const&);
+    // The bridge of the extension page whose environment made a request, if any.
+    static GC::Ptr<ExtensionBridge> for_extension_page_client(HTML::EnvironmentSettingsObject&);
     void set_message_handler(WebIDL::CallbackType& handler);
 
     // From the browser process.
@@ -103,6 +114,7 @@ private:
 
     String m_extension_id;
     Kind m_kind { Kind::Page };
+    HashTable<String> m_origins_fetched_without_cors;
     GC::Ptr<ExtensionWorld> m_world;
     GC::Ptr<WebIDL::CallbackType> m_message_handler;
     // For MainScripts: what the program returned, which runs the scripts of a stage.

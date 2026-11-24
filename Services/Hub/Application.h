@@ -43,6 +43,16 @@ public:
     virtual Vector<String> platform_preferred_languages() const = 0;
     virtual Optional<Gfx::GpuDeviceIdentity> platform_presentation_gpu_device() const = 0;
     virtual Vector<u64> platform_presentation_drm_format_modifiers() const = 0;
+#if defined(ENABLE_WEBEXT)
+    virtual void display_extension_prompt(WebView::Application::ExtensionPrompt const&, Function<void(bool)> on_answer) const { on_answer(false); }
+    virtual void extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
+    {
+        WebView::Application::the().WebView::Application::extension_host_call(extension_id, function, args, move(reply));
+    }
+    virtual void extension_ui_changed(StringView, StringView) { }
+    virtual bool is_extension_popup_view(u64) const { return false; }
+    virtual void extension_popup_request(u64, StringView, StringView) { }
+#endif
 };
 
 // The browser itself: its state, and the helper processes that do its work.
@@ -58,6 +68,13 @@ public:
     void destroy_all_views() { m_views.clear(); }
 
     void set_active_view(Optional<u64> view_id);
+
+#if defined(ENABLE_WEBEXT)
+    // The UI process's answers to extension requests the Hub forwarded to it (see ConnectionFromUI).
+    void extension_host_call_finished(u64 request_id, bool succeeded, ByteString const& payload);
+    void extension_prompt_answered(u64 request_id, bool accepted);
+    void set_extension_popup_view(u64 view_id, bool is_popup);
+#endif
 
     // The UI has made its first windows and asked for what they start out showing.
     void ui_did_start();
@@ -132,8 +149,22 @@ private:
     virtual Vector<String> platform_preferred_languages() const override;
     virtual Optional<Gfx::GpuDeviceIdentity> platform_presentation_gpu_device() const override;
     virtual Vector<u64> platform_presentation_drm_format_modifiers() const override;
+#if defined(ENABLE_WEBEXT)
+    virtual void display_extension_prompt(WebView::Application::ExtensionPrompt const&, Function<void(bool)> on_answer) const override;
+    virtual void extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply) override;
+    virtual void extension_ui_changed(StringView extension_id, StringView what) override;
+    virtual bool is_extension_popup_view(u64 view_id) const override;
+    virtual void extension_popup_request(u64 view_id, StringView name, StringView args_json) override;
+#endif
 
     ApplicationHost* m_host { nullptr };
+#if defined(ENABLE_WEBEXT)
+    // Extension requests waiting for the UI process, where the Hub runs in a process of its own.
+    mutable u64 m_next_extension_request_id { 1 };
+    HashMap<u64, Function<void(ErrorOr<ByteString>)>> m_pending_extension_host_calls;
+    mutable HashMap<u64, Function<void(bool)>> m_pending_extension_prompts;
+    HashTable<u64> m_extension_popup_views;
+#endif
     StringView m_encoded_ui_info;
     StringView m_ui_mach_server_name;
     StringView m_ui_pid;
