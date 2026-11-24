@@ -1484,6 +1484,12 @@ void WindowToolbar::lay_out_in_sidebar()
 
     auto* footer_layout = static_cast<QBoxLayout*>(m_sidebar_footer->layout());
     footer_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
+#if defined(ENABLE_WEBEXT)
+    // The extensions' buttons and the extensions menu, as in the toolbar of the other layouts.
+    if (!m_extensions_area)
+        m_extensions_area = new ExtensionsToolbarArea(m_toolbar);
+    footer_layout->addWidget(m_extensions_area, 0, Qt::AlignVCenter);
+#endif
     if (m_feedback_button)
         footer_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
     footer_layout->setContentsMargins(m_sidebar_footer_leading_room, 0, m_sidebar_inset, 0);

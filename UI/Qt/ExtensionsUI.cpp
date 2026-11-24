@@ -114,6 +114,19 @@ static void core_remove_extension(ByteString const& extension_id)
 #    endif
 }
 
+// Extension popups and the extensions panel hang below their button in a toolbar at the top of the window, and open
+// above it when the button sits low in the window (the footer of the "everything in the sidebar" layout), like the
+// sidebar's own popovers.
+static void place_popover(Popover& popover, QWidget& anchor)
+{
+    auto* window = anchor.window();
+    auto anchor_center = anchor.mapTo(window, anchor.rect().center());
+    if (window && anchor_center.y() > window->height() / 2)
+        move_popover_above(popover, anchor, PopoverAlignment::Leading);
+    else
+        move_popover_below(popover, anchor, PopoverAlignment::Trailing);
+}
+
 static JsonValue ask_core(StringView name, JsonObject const& args)
 {
     if (!core_is_available())
@@ -525,7 +538,7 @@ public:
         card().adjustSize();
         adjustSize();
         if (m_anchor)
-            move_popover_below(*this, *m_anchor, PopoverAlignment::Trailing);
+            place_popover(*this, *m_anchor);
     }
 
     // Shown once the page has loaded and sized itself, as in Chrome, so that it does not flash empty; at the latest after
@@ -542,7 +555,7 @@ public:
         m_revealed = true;
         show();
         if (m_anchor)
-            move_popover_below(*this, *m_anchor, PopoverAlignment::Trailing);
+            place_popover(*this, *m_anchor);
         raise();
         m_view->setFocus(Qt::PopupFocusReason);
     }
@@ -795,7 +808,7 @@ public:
         card().adjustSize();
         adjustSize();
         if (m_anchor)
-            move_popover_below(*this, *m_anchor, PopoverAlignment::Trailing);
+            place_popover(*this, *m_anchor);
     }
 
 private:
@@ -963,7 +976,7 @@ void ExtensionsToolbarArea::show_panel()
     };
     open_panel() = panel;
     panel->show();
-    move_popover_below(*panel, *m_puzzle_button, PopoverAlignment::Trailing);
+    place_popover(*panel, *m_puzzle_button);
     panel->raise();
 }
 
