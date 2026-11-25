@@ -2196,6 +2196,163 @@ impl BrowserCore for StubBackend {
                 self.request_view(ViewRequest::LibraryClose);
                 Ok(())
             }
+            Command::LibraryFocusSet { focused } => {
+                let (vim_enabled, current_mode) = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    (state.model.vim_mode_enabled, state.model.input_mode)
+                };
+                if vim_enabled {
+                    if focused && current_mode != InputMode::Library {
+                        self.set_input_mode(InputMode::Library);
+                    } else if !focused && current_mode == InputMode::Library {
+                        self.set_input_mode(InputMode::Normal);
+                    }
+                }
+                Ok(())
+            }
+            Command::HistoryOpen {
+                entry_id,
+                url,
+                new_tab,
+                in_background,
+            } => {
+                let resolved_url = url.or_else(|| {
+                    let id = entry_id?;
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state
+                        .model
+                        .history
+                        .iter()
+                        .find(|entry| entry.id == id)
+                        .map(|entry| entry.url.clone())
+                });
+                let Some(target_url) = resolved_url else {
+                    return Err(CommandError::TargetNotFound {
+                        command: name,
+                        target: "history entry".to_string(),
+                    });
+                };
+                if new_tab {
+                    let activate = !in_background;
+                    let result = self.invoke(Command::TabNew {
+                        url: Some(target_url),
+                        after: None,
+                        activate,
+                    });
+                    if result.is_ok() {
+                        if in_background {
+                            self.show_toast("Opened tab in a new tab".to_string(), None, None);
+                        } else {
+                            self.request_view(ViewRequest::LibraryClose);
+                        }
+                    }
+                    result
+                } else {
+                    let has_active = {
+                        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                        state.model.active_tab.is_some()
+                    };
+                    let result = if has_active {
+                        self.invoke(Command::NavigationLoadUrl {
+                            tab_id: None,
+                            input: target_url,
+                        })
+                    } else {
+                        self.invoke(Command::TabNew {
+                            url: Some(target_url),
+                            after: None,
+                            activate: true,
+                        })
+                    };
+                    if result.is_ok() {
+                        self.request_view(ViewRequest::LibraryClose);
+                    }
+                    result
+                }
+            }
+            Command::HistoryDelete { entry_id } => {
+                let history = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let before = state.model.history.len();
+                    state.model.history.retain(|entry| entry.id != entry_id);
+                    if state.model.history.len() == before {
+                        return Err(CommandError::TargetNotFound {
+                            command: name,
+                            target: format!("history entry {}", entry_id.0),
+                        });
+                    }
+                    state.model.history.clone()
+                };
+                self.bus.publish(Event::HistoryChanged { history });
+                Ok(())
+            }
+            Command::HistoryForgetSite { host } => {
+                let target = host.trim().to_ascii_lowercase();
+                let history = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state
+                        .model
+                        .history
+                        .retain(|entry| crate::history::extract_host(&entry.url).is_none_or(|h| h != target));
+                    state.model.history.clone()
+                };
+                eprintln!("zendia: stub history.forget_site `{target}` — persistent history store not connected yet");
+                self.bus.publish(Event::HistoryChanged { history });
+                Ok(())
+            }
+            Command::HistoryClear { range } => {
+                let now = crate::history::current_unix_secs();
+                let cutoff = crate::history::cutoff_for_clear_range(range, now);
+                let history = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    match cutoff {
+                        None => state.model.history.clear(),
+                        Some(min_ts) => state.model.history.retain(|entry| entry.visited_at_unix < min_ts),
+                    }
+                    state.model.history.clone()
+                };
+                eprintln!(
+                    "zendia: stub history.clear range={} — persistent history store not connected yet",
+                    range.as_str()
+                );
+                self.bus.publish(Event::HistoryChanged { history });
+                Ok(())
+            }
+            Command::HistoryClearDay { day_index } => {
+                let history = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state
+                        .model
+                        .history
+                        .retain(|entry| crate::history::day_index(entry.visited_at_unix) != day_index);
+                    state.model.history.clone()
+                };
+                eprintln!(
+                    "zendia: stub history.clear_day day={day_index} — persistent history store not connected yet"
+                );
+                self.bus.publish(Event::HistoryChanged { history });
+                Ok(())
+            }
+            Command::HistoryCopyUrl { entry_id } => {
+                let url = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state
+                        .model
+                        .history
+                        .iter()
+                        .find(|entry| entry.id == entry_id)
+                        .map(|entry| entry.url.clone())
+                };
+                let Some(url) = url else {
+                    return Err(CommandError::TargetNotFound {
+                        command: name,
+                        target: format!("history entry {}", entry_id.0),
+                    });
+                };
+                self.bus.publish(Event::ClipboardCopyRequested { text: url });
+                self.show_toast(crate::toasts::messages::YANK_COPIED.to_string(), None, None);
+                Ok(())
+            }
             Command::SitePermissionSet {
                 origin,
                 permission,

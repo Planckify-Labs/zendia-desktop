@@ -18,6 +18,7 @@ pub mod agent;
 pub mod commands;
 pub mod events;
 pub mod focus;
+pub mod history;
 pub mod input_state;
 pub mod library;
 pub mod markdown;

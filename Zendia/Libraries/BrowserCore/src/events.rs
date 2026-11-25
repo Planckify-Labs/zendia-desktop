@@ -14,8 +14,8 @@ use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::library::LibrarySection;
 use crate::model::{
     AgentId, Bookmark, ChatSite, ChatSiteId, Conversation, ConversationId, Download, Essential, Folder, FolderId,
-    InputMode, LayoutSettings, MediaSession, NotificationId, PinnedTab, ServiceState, SidebarNotification, Space,
-    SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings, WhichKeyState, WindowId,
+    HistoryEntry, InputMode, LayoutSettings, MediaSession, NotificationId, PinnedTab, ServiceState,
+    SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings, WhichKeyState, WindowId,
 };
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
@@ -138,6 +138,9 @@ pub enum Event {
     },
     BookmarksChanged {
         bookmarks: Vec<Bookmark>,
+    },
+    HistoryChanged {
+        history: Vec<HistoryEntry>,
     },
     SiteInfoUpdated {
         info: SiteInfo,

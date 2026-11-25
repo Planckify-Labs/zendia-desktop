@@ -91,6 +91,9 @@ impl App for GalleryApp {
                 CoreEvent::ViewRequested { request, .. } => match request {
                     ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
                         library_state.handle_view_request(request);
+                        let _ = gallery_core.invoke(Command::LibraryFocusSet {
+                            focused: *library_state.open.peek(),
+                        });
                     }
                     ViewRequest::LocationFocus => {
                         menu_state.close_all();
@@ -227,6 +230,13 @@ impl App for GalleryApp {
                 }
                 if !address_bar_state.is_open()
                     && !sidebar_state.is_renaming()
+                    && !menu_state.has_open_overlay()
+                    && crate::ui::library::nav::handle_library_key_down(&e, &core, &library_state)
+                {
+                    return;
+                }
+                if !address_bar_state.is_open()
+                    && !sidebar_state.is_renaming()
                     && !dock_state.captures_text_input()
                     && crate::ui::vim::handle_focus_key_down(&e, &core)
                 {
@@ -322,6 +332,10 @@ impl App for GalleryApp {
                                         dock_state.focused_panel.set(None);
                                         dock_state.model_card_open.set(false);
                                         dock_state.instructions_open.set(false);
+                                    }
+                                    if !section_id.starts_with("library") {
+                                        library_state.close();
+                                        library_state.clear_gallery_overrides();
                                     }
                                     active_section_id.set(section_id.to_string());
                                     active_state_id.set(default_state.to_string());

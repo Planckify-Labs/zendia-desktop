@@ -874,13 +874,6 @@ args = { section = "media" }
 
 [[bindings]]
 mode = "n"
-keys = "<leader>ob"
-command = "library.open"
-description = "Boosts"
-args = { section = "boosts" }
-
-[[bindings]]
-mode = "n"
 keys = "<leader>or"
 command = "library.open"
 description = "Space Routing"
@@ -1773,12 +1766,6 @@ mode = "l"
 keys = "gm"
 command = "library.goto_media"
 description = "Media"
-
-[[bindings]]
-mode = "l"
-keys = "gb"
-command = "library.goto_boosts"
-description = "Boosts"
 
 [[bindings]]
 mode = "l"

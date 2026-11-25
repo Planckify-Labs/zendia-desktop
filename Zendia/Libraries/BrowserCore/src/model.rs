@@ -1387,6 +1387,10 @@ impl BrowserModel {
                 self.bookmarks = bookmarks.clone();
                 true
             }
+            Event::HistoryChanged { history } => {
+                self.history = history.clone();
+                true
+            }
             Event::SiteInfoUpdated { info } => {
                 self.site_info.insert(info.origin.clone(), info.clone());
                 true

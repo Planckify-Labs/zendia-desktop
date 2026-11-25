@@ -9,13 +9,14 @@
 use crate::agent::{InstructionAttachment, InstructionId};
 use crate::contributions::{SidePanelId, SidePanelLayout, SidePanelSide};
 use crate::focus::{FocusDirection, PaneDirection};
+use crate::history::HistoryClearRange;
 use crate::input_state::StatuslineShow;
 use crate::library::LibrarySection;
 use crate::media::MediaControl;
 use crate::model::{
-    AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, MediaSessionId, ModelEffort, ModelId, NotificationId,
-    SidebarSide, SpaceId, SplitDirection, SplitGroupId, StepId, TabId, TabMoveTarget, ThemeOverrides, ThemeScheme,
-    ToolbarLayout,
+    AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, HistoryEntryId, MediaSessionId, ModelEffort, ModelId,
+    NotificationId, SidebarSide, SpaceId, SplitDirection, SplitGroupId, StepId, TabId, TabMoveTarget, ThemeOverrides,
+    ThemeScheme, ToolbarLayout,
 };
 use crate::picker::PickerRequestId;
 use crate::region::RegionRect;
@@ -579,6 +580,37 @@ pub enum Command {
     },
     /// Closes the library.
     LibraryClose,
+    /// Reports whether the library panel holds keyboard focus, switching Vim mode between LIBRARY and NORMAL.
+    LibraryFocusSet {
+        focused: bool,
+    },
+    /// Opens a history visit in the current tab or a new (foreground or background) tab.
+    HistoryOpen {
+        entry_id: Option<HistoryEntryId>,
+        url: Option<String>,
+        new_tab: bool,
+        in_background: bool,
+    },
+    /// Removes a single entry from browsing history.
+    HistoryDelete {
+        entry_id: HistoryEntryId,
+    },
+    /// Forgets all history entries and site data for a host.
+    HistoryForgetSite {
+        host: String,
+    },
+    /// Clears browsing history entries within `range` (defaults to all history).
+    HistoryClear {
+        range: HistoryClearRange,
+    },
+    /// Clears browsing history entries recorded on a single UTC day index.
+    HistoryClearDay {
+        day_index: i64,
+    },
+    /// Copies a history entry's URL to the clipboard.
+    HistoryCopyUrl {
+        entry_id: HistoryEntryId,
+    },
     /// Starts the page region picker overlay on the active or specified tab.
     RegionPick {
         tab_id: Option<TabId>,
@@ -849,6 +881,13 @@ impl Command {
             Self::LibraryToggle { .. } => "library.toggle",
             Self::LibraryOpen { .. } => "library.open",
             Self::LibraryClose => "library.close",
+            Self::LibraryFocusSet { .. } => "library.focus",
+            Self::HistoryOpen { .. } => "history.open",
+            Self::HistoryDelete { .. } => "history.delete",
+            Self::HistoryForgetSite { .. } => "history.forget_site",
+            Self::HistoryClear { .. } => "history.clear",
+            Self::HistoryClearDay { .. } => "history.clear_day",
+            Self::HistoryCopyUrl { .. } => "history.copy_url",
             Self::RegionPick { .. } => "region.pick",
             Self::RegionCapture { .. } => "region.capture",
             Self::RegionCancel => "region.cancel",
@@ -1610,10 +1649,56 @@ impl Command {
             "library.toggle" => Ok(Self::LibraryToggle {
                 section: parse_optional_library_section_arg(name, args)?,
             }),
-            "library.open" => Ok(Self::LibraryOpen {
-                section: parse_optional_library_section_arg(name, args)?,
-            }),
+            "library.open" => {
+                if find_arg(args, "section") == Some("bookmarks") {
+                    Ok(Self::TabNew {
+                        url: Some("about:bookmarks".to_string()),
+                        after: None,
+                        activate: true,
+                    })
+                } else {
+                    Ok(Self::LibraryOpen {
+                        section: parse_optional_library_section_arg(name, args)?,
+                    })
+                }
+            }
             "library.close" => Ok(Self::LibraryClose),
+            "library.focus" => Ok(Self::LibraryFocusSet {
+                focused: parse_bool_arg(name, args, "focused", true)?,
+            }),
+            "history.open" => Ok(Self::HistoryOpen {
+                entry_id: parse_optional_u64_arg(name, args, "entry_id")?.map(HistoryEntryId),
+                url: find_arg(args, "url").map(str::to_string),
+                new_tab: parse_bool_arg(name, args, "new_tab", false)?,
+                in_background: parse_bool_arg(name, args, "in_background", false)?,
+            }),
+            "history.delete" => Ok(Self::HistoryDelete {
+                entry_id: HistoryEntryId(parse_required_u64_arg(name, args, "entry_id")?),
+            }),
+            "history.forget_site" => Ok(Self::HistoryForgetSite {
+                host: parse_required_string_arg(name, args, "host")?,
+            }),
+            "history.clear" => {
+                let range = match find_arg(args, "range") {
+                    None => HistoryClearRange::All,
+                    Some(raw) => HistoryClearRange::parse(raw).ok_or_else(|| CommandError::InvalidArgument {
+                        command: name.to_string(),
+                        message: format!("unknown history clear range `{raw}`"),
+                    })?,
+                };
+                Ok(Self::HistoryClear { range })
+            }
+            "history.clear_day" => {
+                let raw = parse_required_string_arg(name, args, "day_index")?;
+                let day_index = raw.parse::<i64>().map_err(|_| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("argument `day_index` expected integer, got `{raw}`"),
+                })?;
+                Ok(Self::HistoryClearDay { day_index })
+            }
+            "history.copy_url" => Ok(Self::HistoryCopyUrl {
+                entry_id: HistoryEntryId(parse_required_u64_arg(name, args, "entry_id")?),
+            }),
             "region.pick" => Ok(Self::RegionPick {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
             }),
@@ -2961,6 +3046,88 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             title: "Close Library".to_string(),
             description: "Close the library".to_string(),
             arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "library.focus".to_string(),
+            title: "Set Library Keyboard Focus".to_string(),
+            description: "Enter or leave LIBRARY input mode as library keyboard focus changes".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "focused",
+                ArgumentType::Bool,
+                false,
+                "Whether the library holds keyboard focus",
+            )],
+        },
+        CommandDescriptor {
+            name: "history.open".to_string(),
+            title: "Open History Entry".to_string(),
+            description: "Open a history visit in the current tab or a new tab".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("entry_id", ArgumentType::Integer, false, "History entry id"),
+                ArgumentSchema::new("url", ArgumentType::String, false, "Direct URL to open"),
+                ArgumentSchema::new("new_tab", ArgumentType::Bool, false, "Open in a new tab"),
+                ArgumentSchema::new(
+                    "in_background",
+                    ArgumentType::Bool,
+                    false,
+                    "Keep the new tab in the background and leave the library open",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "history.delete".to_string(),
+            title: "Forget History Entry".to_string(),
+            description: "Remove a single visit from browsing history".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "entry_id",
+                ArgumentType::Integer,
+                true,
+                "History entry id",
+            )],
+        },
+        CommandDescriptor {
+            name: "history.forget_site".to_string(),
+            title: "Forget About This Site".to_string(),
+            description: "Remove history entries and site data for a host".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "host",
+                ArgumentType::String,
+                true,
+                "Hostname to forget",
+            )],
+        },
+        CommandDescriptor {
+            name: "history.clear".to_string(),
+            title: "Clear History".to_string(),
+            description: "Clear browsing history for a time range or everything".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "range",
+                ArgumentType::String,
+                false,
+                "Time range (last_hour, last_12_hours, today, last_week, last_month, all)",
+            )],
+        },
+        CommandDescriptor {
+            name: "history.clear_day".to_string(),
+            title: "Clear History Day".to_string(),
+            description: "Clear browsing history entries for a single day".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "day_index",
+                ArgumentType::Integer,
+                true,
+                "UTC day index since epoch",
+            )],
+        },
+        CommandDescriptor {
+            name: "history.copy_url".to_string(),
+            title: "Copy History URL".to_string(),
+            description: "Copy a history entry's URL to the clipboard".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "entry_id",
+                ArgumentType::Integer,
+                true,
+                "History entry id",
+            )],
         },
         CommandDescriptor {
             name: "picker.open".to_string(),

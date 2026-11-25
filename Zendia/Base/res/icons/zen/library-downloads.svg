@@ -1,0 +1,4 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" width="28" height="28" viewBox="0 0 128 128"><g class="zen-downloads-circle-translate"><circle cx="64" cy="64" r="47.5" fill="context-fill" class="zen-downloads-bg"/><circle cx="64" cy="64" r="47.5" fill="context-fill" class="zen-downloads-gradient" style="mix-blend-mode:overlay;opacity:.1"/><circle cx="64" cy="64" r="47.5" stroke="context-stroke" stroke-width="7.1" class="zen-downloads-border"/></g><path stroke="context-stroke" stroke-linecap="round" stroke-linejoin="round" stroke-width="7.1" d="M64 45v38M50 69l14 14 14-14" class="zen-downloads-arrow"/></svg>

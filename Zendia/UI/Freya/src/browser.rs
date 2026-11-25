@@ -360,6 +360,9 @@ pub fn app() -> impl IntoElement {
             CoreEvent::ViewRequested { request, .. } => match request {
                 ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
                     library_state.handle_view_request(request);
+                    let _ = stub_core.invoke(zendia_browser_core::commands::Command::LibraryFocusSet {
+                        focused: *library_state.open.peek(),
+                    });
                 }
                 ViewRequest::LocationFocus => {
                     menu_state.close_all();
@@ -534,6 +537,13 @@ pub fn app() -> impl IntoElement {
                 && !e
                     .modifiers
                     .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
+            {
+                return;
+            }
+            if !address_bar_state.is_open()
+                && !sidebar_state.is_renaming()
+                && !menu_state.has_open_overlay()
+                && crate::ui::library::nav::handle_library_key_down(&e, &core, &library_state)
             {
                 return;
             }

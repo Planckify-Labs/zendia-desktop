@@ -847,6 +847,50 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "library",
+        title: "Library",
+        phase: 9,
+        icon: "library",
+        summary: "Library shell, section rail, search and filter bar, History section, keyboard layer, and open slide motion.",
+        states: &[
+            GalleryStateSpec {
+                id: "history",
+                label: "History",
+                description: "Library open on History with Today's visits, search box, Filter button, and section rail.",
+            },
+            GalleryStateSpec {
+                id: "history-search",
+                label: "Search Filtered",
+                description: "History section filtered by the search query \"Design\".",
+            },
+            GalleryStateSpec {
+                id: "history-filters",
+                label: "Filter Panel",
+                description: "Slide-down filter panel open with time range, sort order, and source chips.",
+            },
+            GalleryStateSpec {
+                id: "history-empty",
+                label: "Empty",
+                description: "History section empty state when no visits are recorded.",
+            },
+            GalleryStateSpec {
+                id: "vim-focus",
+                label: "Vim Focus",
+                description: "LIBRARY input mode with teal cursor ring, focused search box, teal mascot, and frame tint.",
+            },
+            GalleryStateSpec {
+                id: "right-side",
+                label: "Right Side",
+                description: "Library anchored to the right sidebar edge with mirrored rail and page card pushed left.",
+            },
+            GalleryStateSpec {
+                id: "mid-open",
+                label: "Mid-Open Slide",
+                description: "Library frozen partway (55%) through its open slide animation with the page card moving aside.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.

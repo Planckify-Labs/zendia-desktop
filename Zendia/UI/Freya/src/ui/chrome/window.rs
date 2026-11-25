@@ -13,14 +13,14 @@
 
 use crate::ui::agent::{AgentPanel, AgentsPanel};
 use crate::ui::chrome::layout::{
-    BackdropEndpoints, ChromePalette, ELEMENT_SEPARATION, PAGE_CARD_RADIUS, SPACE_GRADIENT_CROSSFADE,
-    TOP_TOOLBAR_HEIGHT, ToolbarSlots, page_card_margins, window_backdrop_endpoints,
+    BackdropEndpoints, ChromePalette, ELEMENT_SEPARATION, PAGE_CARD_RADIUS, RESIZE_HANDLE_WIDTH,
+    SPACE_GRADIENT_CROSSFADE, TOP_TOOLBAR_HEIGHT, ToolbarSlots, page_card_margins, window_backdrop_endpoints,
 };
 use crate::ui::chrome::sidebar::{SidebarFrame, SidebarResizeHandle, try_use_sidebar_state};
 use crate::ui::chrome::toasts::ToastHost;
 use crate::ui::chrome::toolbar::TopToolbar;
 use crate::ui::core_view::use_core;
-use crate::ui::library::{Library, try_use_library_state};
+use crate::ui::library::{LIBRARY_SLIDE_DURATION, Library, try_use_library_state};
 use crate::ui::panels::{
     DockClosedPill, DockFrame, DockSlideHandle, SPLIT_GAP, active_agent_accent, resolve_active_dock_panel,
     try_use_dock_state,
@@ -34,6 +34,7 @@ use freya::animation::*;
 use freya::prelude::*;
 use std::time::Duration;
 use zendia_browser_core::agent::{AGENT_PANEL_ID, AGENTS_PANEL_ID};
+use zendia_browser_core::commands::Command;
 use zendia_browser_core::contributions::{SidePanelLayout, SidePanelSide};
 use zendia_browser_core::model::{InputMode, SidebarSide, SpaceId};
 use zendia_browser_core::webchat::WEBCHAT_PANEL_ID;
@@ -89,7 +90,21 @@ impl Component for WindowShell {
         let is_resizing = use_state(|| false);
         let sidebar_state = try_use_sidebar_state();
         let dock_state = try_use_dock_state();
-        let library_open = try_use_library_state().is_some_and(|state| state.is_open());
+        let library_state = try_use_library_state();
+        let library_open = library_state.is_some_and(|state| state.is_open());
+        let library_pinned_progress = library_state.and_then(|state| *state.pinned_progress.read());
+        let library_slide = use_animation_with_dependencies(&library_open, move |conf, open| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *open { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(LIBRARY_SLIDE_DURATION)
+                .ease(Ease::Out)
+                .function(motion::spring_fn())
+        });
+        let library_progress = library_pinned_progress
+            .unwrap_or_else(|| library_slide.get().value().clamp(0.0, 1.02))
+            .clamp(0.0, 1.02);
         let statusline_state = try_use_vim_statusline_state();
         let mut shell_area = use_state(|| (0.0f32, 0.0f32, 0.0f32, 0.0f32));
         let mut stage_width = use_state(|| 1120.0f32);
@@ -282,10 +297,19 @@ impl Component for WindowShell {
                     .fill(palette.page_card_border),
             )
             .shadow(card_shadow)
-            .on_pointer_down(move |_| {
-                if let Some(mut ds) = dock_state {
-                    ds.set_focus(None);
-                    ds.model_card_open.set_if_modified(false);
+            .on_pointer_down({
+                let page_click_core = core.clone();
+                move |_| {
+                    if let Some(mut ds) = dock_state {
+                        ds.set_focus(None);
+                        ds.model_card_open.set_if_modified(false);
+                    }
+                    if let Some(lib) = library_state
+                        && *lib.open.peek()
+                    {
+                        lib.suspend_keyboard_focus();
+                        page_click_core.invoke_or_log(Command::LibraryFocusSet { focused: false });
+                    }
                 }
             })
             .child(self.page.clone());
@@ -389,23 +413,55 @@ impl Component for WindowShell {
                 align_left: sidebar_side == SidebarSide::Right,
             });
 
-        let body = if compact_sidebar {
-            rect()
-                .width(Size::fill())
-                .height(Size::flex(1.0))
-                .direction(Direction::Horizontal)
-                .content(Content::Flex)
-                .child(page_card)
-        } else if library_open {
-            // The library takes the sidebar's place and the resize handle's.
-            let library = Library.into_element();
+        let library_visible = library_state.is_some() && (library_open || library_progress > 0.001);
+        let body = if library_visible {
+            let total_lib_w = library_state.map(|state| state.total_width()).unwrap_or(420.0);
+            let base_w = if compact_sidebar {
+                0.0
+            } else {
+                sidebar_width + RESIZE_HANDLE_WIDTH
+            };
+            let clamped_progress = library_progress.clamp(0.0, 1.0);
+            let slot_w = (base_w + (total_lib_w - base_w) * library_progress).max(0.0);
+            // Keep the library's inner edge flush against the moving page card as it slides in.
+            let slide_offset = (slot_w - total_lib_w).min(0.0);
+            let lib_pos = match layout.sidebar_side {
+                SidebarSide::Left => Position::new_absolute().top(0.0).left(slide_offset),
+                SidebarSide::Right => Position::new_absolute().top(0.0).right(slide_offset),
+            };
+            let toolbox_opacity = (1.0 - clamped_progress * 4.0).clamp(0.0, 1.0);
+            let lib_opacity = ((clamped_progress - 0.15) * 3.0).clamp(0.0, 1.0);
+            let fading_sidebar = (!compact_sidebar && toolbox_opacity > 0.01).then(|| {
+                let sb_pos = match layout.sidebar_side {
+                    SidebarSide::Left => Position::new_absolute().top(0.0).left(0.0),
+                    SidebarSide::Right => Position::new_absolute().top(0.0).right(0.0),
+                };
+                rect()
+                    .position(sb_pos)
+                    .height(Size::percent(100.0))
+                    .opacity(toolbox_opacity)
+                    .child(sidebar.clone())
+            });
+            let library_slot = rect()
+                .width(Size::px(slot_w))
+                .height(Size::fill())
+                .overflow(Overflow::Clip)
+                .maybe_child(fading_sidebar)
+                .child(
+                    rect()
+                        .position(lib_pos)
+                        .width(Size::px(total_lib_w))
+                        .height(Size::percent(100.0))
+                        .opacity(lib_opacity)
+                        .child(Library),
+                );
             match layout.sidebar_side {
                 SidebarSide::Left => rect()
                     .width(Size::fill())
                     .height(Size::flex(1.0))
                     .direction(Direction::Horizontal)
                     .content(Content::Flex)
-                    .child(library)
+                    .child(library_slot)
                     .child(page_card),
                 SidebarSide::Right => rect()
                     .width(Size::fill())
@@ -413,8 +469,15 @@ impl Component for WindowShell {
                     .direction(Direction::Horizontal)
                     .content(Content::Flex)
                     .child(page_card)
-                    .child(library),
+                    .child(library_slot),
             }
+        } else if compact_sidebar {
+            rect()
+                .width(Size::fill())
+                .height(Size::flex(1.0))
+                .direction(Direction::Horizontal)
+                .content(Content::Flex)
+                .child(page_card)
         } else {
             match layout.sidebar_side {
                 SidebarSide::Left => rect()
