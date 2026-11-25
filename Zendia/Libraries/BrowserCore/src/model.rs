@@ -13,6 +13,8 @@ use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, ToolbarArea, ToolbarPlacementRules};
 use crate::events::Event;
 use crate::site_info::{SiteExtension, SiteInfo, origin_for_url};
+use crate::split::Glance;
+use crate::toasts::Toast;
 use std::collections::BTreeMap;
 
 /// Stable identifier for a browser window.
@@ -236,8 +238,11 @@ pub struct Folder {
 /// How panes in a split group are arranged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitDirection {
+    /// Panes side by side (Zen's `vsep`).
     Horizontal,
+    /// Panes stacked (Zen's `hsep`).
     Vertical,
+    /// Two columns, as in Zen's grid.
     Grid,
 }
 
@@ -304,6 +309,11 @@ pub struct MediaSession {
     pub is_muted: bool,
     pub position_secs: f32,
     pub duration_secs: Option<f32>,
+    pub has_previous: bool,
+    pub has_next: bool,
+    pub supports_pip: bool,
+    /// Set when the user closes the controls; cleared when the media plays again.
+    pub dismissed: bool,
 }
 
 /// An available AI agent that can run sessions in Zendia.
@@ -517,6 +527,35 @@ pub enum SidebarSide {
     Right,
 }
 
+/// What compact mode hides (`zen.view.compact.hide-tabbar` and `zen.view.compact.hide-toolbar`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CompactHide {
+    /// The sidebar and the top toolbar.
+    #[default]
+    Both,
+    Sidebar,
+    Toolbar,
+}
+
+impl CompactHide {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Sidebar => "sidebar",
+            Self::Toolbar => "toolbar",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "both" => Some(Self::Both),
+            "sidebar" | "tabbar" => Some(Self::Sidebar),
+            "toolbar" => Some(Self::Toolbar),
+            _ => None,
+        }
+    }
+}
+
 /// Profile layout settings owned by the browser core and read by views.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutSettings {
@@ -524,8 +563,11 @@ pub struct LayoutSettings {
     pub sidebar_side: SidebarSide,
     pub sidebar_expanded: bool,
     pub sidebar_width: f32,
-    /// Compact mode profile setting (auto-hiding chrome is implemented in phase 4).
+    /// Compact mode: the page card fills the window and the chrome slides out when the pointer reaches its edge.
     pub compact_mode: bool,
+    pub compact_hide: CompactHide,
+    /// Whether switching tabs slides the page in (`ZendiaTabMotion`).
+    pub tab_switch_motion: bool,
 }
 
 impl Default for LayoutSettings {
@@ -536,6 +578,8 @@ impl Default for LayoutSettings {
             sidebar_expanded: true,
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
             compact_mode: false,
+            compact_hide: CompactHide::Both,
+            tab_switch_motion: true,
         }
     }
 }
@@ -548,6 +592,16 @@ impl LayoutSettings {
         } else {
             SIDEBAR_DEFAULT_WIDTH
         }
+    }
+
+    /// Whether compact mode hides the sidebar now.
+    pub fn compact_hides_sidebar(&self) -> bool {
+        self.compact_mode && matches!(self.compact_hide, CompactHide::Both | CompactHide::Sidebar)
+    }
+
+    /// Whether compact mode hides the top toolbar now (only layouts with a top toolbar have one to hide).
+    pub fn compact_hides_toolbar(&self) -> bool {
+        self.compact_mode && matches!(self.compact_hide, CompactHide::Both | CompactHide::Toolbar)
     }
 
     /// Logical width the sidebar occupies in its current expanded/collapsed state.
@@ -595,6 +649,8 @@ pub struct BrowserModel {
     pub media_sessions: Vec<MediaSession>,
     pub sidebar_notifications: Vec<SidebarNotification>,
     pub show_essentials_promo: bool,
+    pub glance: Option<Glance>,
+    pub toasts: Vec<Toast>,
     pub contributions: Contributions,
     pub agents: Vec<Agent>,
     pub conversations: Vec<Conversation>,
@@ -731,7 +787,27 @@ impl BrowserModel {
         self.tabs
             .iter()
             .filter(|tab| tab.kind == TabKind::Normal && tab.space_id == Some(space_id) && tab.folder_id.is_none())
+            .filter(|tab| !self.is_glance_tab(tab.id))
             .collect()
+    }
+
+    /// Whether `tab_id` is the page shown in Glance, which the sidebar leaves out of its lists.
+    pub fn is_glance_tab(&self, tab_id: TabId) -> bool {
+        self.glance.as_ref().is_some_and(|glance| glance.tab_id == tab_id)
+    }
+
+    pub fn split_group(&self, group_id: SplitGroupId) -> Option<&SplitGroup> {
+        self.split_groups.iter().find(|group| group.id == group_id)
+    }
+
+    /// The split group `tab_id` belongs to, if any.
+    pub fn split_group_for_tab(&self, tab_id: TabId) -> Option<&SplitGroup> {
+        self.split_groups.iter().find(|group| group.tab_ids.contains(&tab_id))
+    }
+
+    /// The split group on screen: the one holding the active tab.
+    pub fn active_split_group(&self) -> Option<&SplitGroup> {
+        self.active_tab.and_then(|tab_id| self.split_group_for_tab(tab_id))
     }
 
     /// Ordered list of tabs reachable in the active space (essentials, pinned, folders, then normal tabs).
@@ -833,9 +909,16 @@ impl BrowserModel {
                     }
                 }
                 for group in &mut self.split_groups {
-                    group.tab_ids.retain(|id| id != tab_id);
+                    if let Some(position) = group.tab_ids.iter().position(|id| id == tab_id) {
+                        group.tab_ids.remove(position);
+                        group.ratios = crate::split::default_ratios(group.direction, group.tab_ids.len());
+                    }
                 }
                 self.split_groups.retain(|group| group.tab_ids.len() > 1);
+                if self.glance.as_ref().is_some_and(|glance| glance.tab_id == *tab_id) {
+                    self.glance = None;
+                }
+                self.media_sessions.retain(|session| session.tab_id != *tab_id);
                 for window in &mut self.windows {
                     if window.active_tab == Some(*tab_id) {
                         window.active_tab = None;
@@ -929,11 +1012,57 @@ impl BrowserModel {
                 true
             }
             Event::SplitGroupUpdated { group } => {
+                for other in &mut self.split_groups {
+                    if other.id != group.id {
+                        other.tab_ids.retain(|id| !group.tab_ids.contains(id));
+                    }
+                }
+                self.split_groups
+                    .retain(|item| item.id == group.id || item.tab_ids.len() > 1);
                 if let Some(existing) = self.split_groups.iter_mut().find(|item| item.id == group.id) {
                     *existing = group.clone();
                 } else {
                     self.split_groups.push(group.clone());
                 }
+                for tab in &mut self.tabs {
+                    if group.tab_ids.contains(&tab.id) {
+                        tab.split_group_id = Some(group.id);
+                    } else if tab.split_group_id == Some(group.id) {
+                        tab.split_group_id = None;
+                    }
+                }
+                true
+            }
+            Event::SplitGroupRemoved { group_id } => {
+                let before = self.split_groups.len();
+                self.split_groups.retain(|group| group.id != *group_id);
+                for tab in &mut self.tabs {
+                    if tab.split_group_id == Some(*group_id) {
+                        tab.split_group_id = None;
+                    }
+                }
+                self.split_groups.len() != before
+            }
+            Event::GlanceChanged { glance } => {
+                self.glance = glance.clone();
+                true
+            }
+            Event::ToastShown { toast } => {
+                crate::toasts::push_toast(&mut self.toasts, toast.clone());
+                true
+            }
+            Event::ToastDismissed { toast_id } => {
+                let before = self.toasts.len();
+                self.toasts.retain(|toast| toast.id != *toast_id);
+                self.toasts.len() != before
+            }
+            Event::MediaSessionsChanged { sessions } => {
+                self.media_sessions = sessions.clone();
+                true
+            }
+            Event::DownloadStarted { download } => {
+                self.downloads.retain(|item| item.id != download.id);
+                self.downloads.push(download.clone());
                 true
             }
             Event::ModeChanged { mode } => {
@@ -1015,6 +1144,7 @@ impl BrowserModel {
             | Event::ClipboardCopyRequested { .. }
             | Event::TabRenameRequested { .. }
             | Event::FolderRenameRequested { .. }
+            | Event::CompactSidebarRevealRequested
             | Event::ModelReplaced => false,
         }
     }

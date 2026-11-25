@@ -16,11 +16,14 @@
 pub mod address_bar;
 pub mod commands;
 pub mod events;
+pub mod media;
 pub mod menus;
 pub mod model;
 pub mod site_info;
+pub mod split;
 pub mod stub;
 pub mod tab_source;
+pub mod toasts;
 
 pub use zendia_module_api::contributions;
 pub use zendia_module_api::ui;

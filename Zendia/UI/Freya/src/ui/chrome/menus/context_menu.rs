@@ -11,6 +11,7 @@ use crate::ui::chrome::menus::state::{
 };
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
+use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedTheme, ThemeRole, use_theme};
 use freya::prelude::*;
 use zendia_browser_core::contributions::MenuEntryKind;
@@ -96,7 +97,7 @@ impl Component for ContextMenuOverlay {
         let origin = clamp_popup_origin(open.position, est_size, window_size, 6.0);
 
         rect()
-            .layer(Layer::Overlay)
+            .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
             .position(Position::new_global().left(0.0).top(0.0))
             .width(Size::window_percent(100.0))
             .height(Size::window_percent(100.0))

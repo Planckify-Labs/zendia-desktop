@@ -12,6 +12,7 @@ use crate::ui::chrome::menus::context_menu::{
 use crate::ui::chrome::menus::state::{clamp_popup_origin, use_menu_state};
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
+use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
 use zendia_browser_core::commands::Command;
@@ -139,7 +140,7 @@ impl Component for SelectDropdownOverlay {
         let choose_tab = open.tab_id;
 
         rect()
-            .layer(Layer::Overlay)
+            .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
             .position(Position::new_global().left(0.0).top(0.0))
             .width(Size::window_percent(100.0))
             .height(Size::window_percent(100.0))

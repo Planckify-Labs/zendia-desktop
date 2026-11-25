@@ -20,6 +20,7 @@ use crate::ui::chrome::menus::{MenuLayer, use_provide_menu_state};
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::{use_core, use_provide_core_with_observer};
 use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
+use crate::ui::page::download_arc::use_provide_download_arc;
 use crate::ui::page::use_provide_keymap;
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_provide_theme, use_theme};
 use freya::prelude::*;
@@ -57,6 +58,7 @@ impl App for GalleryApp {
         let menu_state = use_provide_menu_state();
         let sidebar_state = use_provide_sidebar_state();
         let address_bar_state = use_provide_address_bar_state();
+        let download_arc = use_provide_download_arc();
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
@@ -94,6 +96,14 @@ impl App for GalleryApp {
                     if let Some(tab) = gallery_core.model().tab(*tab_id) {
                         sidebar_state.start_tab_rename(*tab_id, tab.display_title());
                     }
+                }
+                CoreEvent::DownloadStarted { .. } => download_arc.launch((980.0, 520.0), (60.0, 900.0)),
+                CoreEvent::CompactSidebarRevealRequested => {
+                    let mut pinned = sidebar_state.compact_pinned;
+                    let next = !*pinned.peek();
+                    pinned.set(next);
+                    let mut revealed = sidebar_state.compact_revealed;
+                    revealed.set(next);
                 }
                 CoreEvent::FolderRenameRequested { folder_id } => {
                     if let Some(folder) = gallery_core.model().folder(*folder_id) {

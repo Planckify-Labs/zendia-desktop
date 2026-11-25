@@ -14,6 +14,7 @@ use crate::ui::chrome::layout::{
 use crate::ui::chrome::menus::{AnchorRect, try_use_menu_state};
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
+use crate::ui::page::download_arc::try_use_download_arc;
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_theme};
 use freya::prelude::*;
 use zendia_browser_core::address_bar::display_url_for_sidebar;
@@ -75,12 +76,16 @@ impl ToolbarItemView {
     }
 }
 
+/// The library button, where downloads land.
+const LIBRARY_ITEM_ID: &str = "builtin.library";
+
 impl Component for ToolbarItemView {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();
         let palette = ChromePalette::for_scheme(theme.scheme);
         let menu_state = try_use_menu_state();
+        let download_arc = try_use_download_arc();
         let mut hovered = use_state(|| false);
 
         if self.item.kind == ToolbarItemKind::UrlBar {
@@ -319,6 +324,17 @@ impl Component for ToolbarItemView {
                         let mut anchor = state.app_menu_anchor;
                         anchor.set_if_modified(AnchorRect::from_area(e.area));
                     }
+                })
+                .into_element()
+        } else if self.item.id.as_str() == LIBRARY_ITEM_ID
+            && let Some(arc) = download_arc
+        {
+            // Downloads fly into the library button, so it records where it sits.
+            button
+                .on_sized(move |e: Event<SizedEventData>| {
+                    let mut anchor = arc.anchor;
+                    let center = (e.area.center().x, e.area.center().y);
+                    anchor.set_if_modified(Some(center));
                 })
                 .into_element()
         } else {

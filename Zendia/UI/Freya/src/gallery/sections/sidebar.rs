@@ -150,6 +150,7 @@ fn configure_sidebar_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar
                         space_id: Some(SpaceId(1)),
                         index: 0,
                     }),
+                    page_drop: None,
                     is_preview: true,
                 }));
             }

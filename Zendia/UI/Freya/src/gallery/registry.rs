@@ -420,6 +420,119 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "split-glance",
+        title: "Split view & Glance",
+        phase: 4,
+        icon: "split",
+        summary: "Split view side by side, stacked and as a grid, resize handles, drop zones for a dragged tab, the sidebar's split group row, and Glance.",
+        states: &[
+            GalleryStateSpec {
+                id: "two-pane",
+                label: "Two Panes",
+                description: "Two tabs side by side with the accent ring on the active pane and the group row in the sidebar.",
+            },
+            GalleryStateSpec {
+                id: "stacked",
+                label: "Stacked",
+                description: "Two tabs stacked top and bottom.",
+            },
+            GalleryStateSpec {
+                id: "grid",
+                label: "Grid",
+                description: "Three panes: two stacked on the left, one at full height on the right.",
+            },
+            GalleryStateSpec {
+                id: "resize",
+                label: "Resizing",
+                description: "A resize handle held mid-drag with the panes at 62% and 38%.",
+            },
+            GalleryStateSpec {
+                id: "drop-zones",
+                label: "Drop Zones",
+                description: "A sidebar tab dragged over the page, highlighting the right half where it would split.",
+            },
+            GalleryStateSpec {
+                id: "group-inactive",
+                label: "Group Row",
+                description: "A split group drawn as one row in the sidebar while another tab is on screen.",
+            },
+            GalleryStateSpec {
+                id: "glance-open",
+                label: "Glance Open",
+                description: "A link previewed in Glance over the shrunken page, with close, expand and split buttons.",
+            },
+            GalleryStateSpec {
+                id: "glance-opening",
+                label: "Glance Opening",
+                description: "Glance part-way through its open animation, growing from the link.",
+            },
+        ],
+    },
+    GallerySectionSpec {
+        id: "layouts",
+        title: "Compact, media & toasts",
+        phase: 4,
+        icon: "layout-float",
+        summary: "Compact mode with the sidebar hidden and revealed, media controls, the download animation and toasts.",
+        states: &[
+            GalleryStateSpec {
+                id: "compact-hidden",
+                label: "Compact Hidden",
+                description: "Compact mode: the page card fills the window and the sidebar is hidden.",
+            },
+            GalleryStateSpec {
+                id: "compact-revealed",
+                label: "Compact Revealed",
+                description: "Compact mode with the sidebar slid out over the page.",
+            },
+            GalleryStateSpec {
+                id: "compact-toolbar",
+                label: "Compact Toolbar",
+                description: "Multiple toolbars with only the top toolbar hidden by compact mode.",
+            },
+            GalleryStateSpec {
+                id: "media-playing",
+                label: "Media Playing",
+                description: "Media controls at the foot of the sidebar for a background tab.",
+            },
+            GalleryStateSpec {
+                id: "media-expanded",
+                label: "Media Hovered",
+                description: "Hovered media controls showing title, artist, picture-in-picture and progress.",
+            },
+            GalleryStateSpec {
+                id: "media-paused-muted",
+                label: "Media Paused",
+                description: "Paused and muted media with the controls expanded.",
+            },
+            GalleryStateSpec {
+                id: "media-with-notification",
+                label: "Media + Notice",
+                description: "Media controls together with the sidebar notification card.",
+            },
+            GalleryStateSpec {
+                id: "download-arc",
+                label: "Download Arc",
+                description: "A download icon mid-flight on its arc into the library button.",
+            },
+            GalleryStateSpec {
+                id: "toast",
+                label: "Toast",
+                description: "Zendia's \"Copied to the clipboard.\" toast at the top corner of the page.",
+            },
+            GalleryStateSpec {
+                id: "toast-action",
+                label: "Toast + Action",
+                description: "A toast with an Undo button.",
+            },
+            GalleryStateSpec {
+                id: "toasts-stacked",
+                label: "Stacked Toasts",
+                description: "Two toasts stacked.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.

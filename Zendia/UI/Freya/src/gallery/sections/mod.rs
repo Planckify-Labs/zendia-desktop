@@ -11,9 +11,11 @@ pub mod declared;
 pub mod icons;
 pub mod keymap;
 pub mod kit;
+pub mod layouts;
 pub mod menus;
 pub mod page;
 pub mod sidebar;
+pub mod split_glance;
 pub mod theme;
 pub mod window_shell;
 
@@ -69,6 +71,16 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
         }
         .into_element(),
         "address-bar" => address_bar::AddressBarSection {
+            state_id: state_id.to_string(),
+            gallery_core: Arc::clone(gallery_core),
+        }
+        .into_element(),
+        "split-glance" => split_glance::SplitGlanceSection {
+            state_id: state_id.to_string(),
+            gallery_core: Arc::clone(gallery_core),
+        }
+        .into_element(),
+        "layouts" => layouts::LayoutsSection {
             state_id: state_id.to_string(),
             gallery_core: Arc::clone(gallery_core),
         }

@@ -12,6 +12,14 @@
 use crate::ui::theme::{ResolvedScheme, ResolvedTheme, Rgba};
 use freya::prelude::*;
 use zendia_browser_core::model::{FolderId, TabId, TabMoveTarget};
+use zendia_browser_core::split::DropZone;
+
+/// Where a dragged tab lands when it is released over the page: beside `target_tab`'s pane, on side `zone`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PageDrop {
+    pub target_tab: TabId,
+    pub zone: DropZone,
+}
 
 /// Active tab drag-and-drop reorder state kept strictly in the Freya view.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,6 +30,8 @@ pub struct SidebarDragState {
     pub pointer_x: f32,
     pub pointer_y: f32,
     pub target: Option<TabMoveTarget>,
+    /// Set by the page area while the pointer is over the page; releasing then splits instead of reordering.
+    pub page_drop: Option<PageDrop>,
     /// When true, renders a deterministic static drag preview (used by the UI gallery).
     pub is_preview: bool,
 }
@@ -35,6 +45,12 @@ pub struct SidebarViewState {
     pub drag_state: State<Option<SidebarDragState>>,
     pub preview_hovered_tab: State<Option<TabId>>,
     pub preview_hovered_separator: State<bool>,
+    /// Gallery preview: draw the media controls as if hovered (title, artist and progress shown).
+    pub preview_media_expanded: State<bool>,
+    /// Compact mode: the hidden sidebar is slid out over the page.
+    pub compact_revealed: State<bool>,
+    /// Compact mode: the user pinned the sidebar out with `layout.compact_reveal_sidebar`.
+    pub compact_pinned: State<bool>,
 }
 
 impl SidebarViewState {
@@ -75,6 +91,12 @@ impl SidebarViewState {
         hovered.set_if_modified(None);
         let mut sep = self.preview_hovered_separator;
         sep.set_if_modified(false);
+        let mut media = self.preview_media_expanded;
+        media.set_if_modified(false);
+        let mut revealed = self.compact_revealed;
+        revealed.set_if_modified(false);
+        let mut pinned = self.compact_pinned;
+        pinned.set_if_modified(false);
     }
 
     /// Updates the drag drop target while a live drag is in progress.
@@ -98,6 +120,9 @@ pub fn use_provide_sidebar_state() -> SidebarViewState {
     let drag_state = use_state(|| None::<SidebarDragState>);
     let preview_hovered_tab = use_state(|| None::<TabId>);
     let preview_hovered_separator = use_state(|| false);
+    let preview_media_expanded = use_state(|| false);
+    let compact_revealed = use_state(|| false);
+    let compact_pinned = use_state(|| false);
 
     use_provide_context(|| SidebarViewState {
         renaming_tab,
@@ -106,6 +131,9 @@ pub fn use_provide_sidebar_state() -> SidebarViewState {
         drag_state,
         preview_hovered_tab,
         preview_hovered_separator,
+        preview_media_expanded,
+        compact_revealed,
+        compact_pinned,
     })
 }
 

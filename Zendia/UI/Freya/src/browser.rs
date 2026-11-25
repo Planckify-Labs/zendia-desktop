@@ -17,8 +17,9 @@ use crate::ui::chrome::menus::{
 };
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::use_provide_core_with_observer;
+use crate::ui::page::download_arc::{DownloadArcLayer, use_provide_download_arc};
 use crate::ui::page::{
-    DebugInputOverlay, PageStage, PageSurface, PageSurfaceContext, use_provide_keymap, use_provide_page_surfaces,
+    DebugInputOverlay, PageArea, PageStage, PageSurfaceContext, PaneMode, use_provide_keymap, use_provide_page_surfaces,
 };
 use crate::ui::theme::{ThemeRole, use_provide_theme, use_theme};
 use freya::prelude::*;
@@ -292,27 +293,6 @@ fn handle_message(
     }
 }
 
-fn debug_split_enabled() -> bool {
-    std::env::var_os("ZENDIA_DEBUG_SPLIT").is_some_and(|value| !value.is_empty() && value != "0")
-}
-
-/// Chooses the pair of tabs to show side by side in debug split mode.
-///
-/// Defaults to the last two tabs (so launching with two URLs under `--temporary-profile` splits those two pages rather
-/// than the first-run welcome tab), while keeping an earlier active tab visible if the user explicitly activates it.
-fn debug_split_tabs(tab_ids: &[TabId], active_tab: Option<TabId>) -> Option<(TabId, TabId)> {
-    let len = tab_ids.len();
-    if len < 2 {
-        return None;
-    }
-    let left = tab_ids[len - 2];
-    let right = tab_ids[len - 1];
-    match active_tab {
-        Some(active) if active != left && active != right => Some((active, right)),
-        _ => Some((left, right)),
-    }
-}
-
 pub fn app() -> impl IntoElement {
     let (stub_core, hub_adapter) = use_hook(|| {
         let device_pixel_ratio = *Platform::get().current_window().scale_factor.peek();
@@ -322,7 +302,6 @@ pub fn app() -> impl IntoElement {
         (stub, adapter)
     });
 
-    let debug_split = use_hook(debug_split_enabled);
     let mut viewport_known = use_state(|| false);
     let mut location = use_state(String::new);
     let location_a11y_id = use_hook(AccessibilityId::new_unique);
@@ -332,6 +311,7 @@ pub fn app() -> impl IntoElement {
     let menu_state = use_provide_menu_state();
     let sidebar_state = use_provide_sidebar_state();
     let address_bar_state = use_provide_address_bar_state();
+    let download_arc = use_provide_download_arc();
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -383,6 +363,18 @@ pub fn app() -> impl IntoElement {
                     sidebar_state.start_tab_rename(*tab_id, tab.display_title());
                 }
             }
+            CoreEvent::DownloadStarted { .. } => {
+                // The icon leaves from the middle of the window and lands on the library button.
+                let size = *Platform::get().current_window().root_size.peek();
+                download_arc.launch((size.width / 2.0, size.height / 2.0), (24.0, size.height - 24.0));
+            }
+            CoreEvent::CompactSidebarRevealRequested => {
+                let mut pinned = sidebar_state.compact_pinned;
+                let next = !*pinned.peek();
+                pinned.set(next);
+                let mut revealed = sidebar_state.compact_revealed;
+                revealed.set(next);
+            }
             CoreEvent::FolderRenameRequested { folder_id } => {
                 if let Some(folder) = stub_core.model().folder(*folder_id) {
                     sidebar_state.start_folder_rename(*folder_id, folder.name.clone());
@@ -426,14 +418,10 @@ pub fn app() -> impl IntoElement {
     }
 
     // The location bar shows the address of the current tab, other than while the user edits it.
-    let (active_url, active_tab_id, tab_ids) = {
+    let (active_url, active_tab_id) = {
         let model = core.model().read();
         let active = model.active_tab();
-        (
-            active.map(|tab| tab.url.clone()).unwrap_or_default(),
-            model.active_tab,
-            model.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
-        )
+        (active.map(|tab| tab.url.clone()).unwrap_or_default(), model.active_tab)
     };
     let shown_url = use_state(String::new);
     if *shown_url.peek() != active_url && !location_a11y_id.is_focused() {
@@ -485,55 +473,23 @@ pub fn app() -> impl IntoElement {
         }
     };
 
-    let page_content: Element =
-        if debug_split && let Some((left_tab, right_tab)) = debug_split_tabs(&tab_ids, active_tab_id) {
-            rect()
-                .width(Size::fill())
-                .height(Size::fill())
-                .direction(Direction::Horizontal)
-                .content(Content::Flex)
-                .child(
-                    PageSurface::for_tab(left_tab)
-                        .key(left_tab.0)
-                        .width(Size::flex(1.))
-                        .height(Size::fill())
-                        .show_focus_ring(true),
-                )
-                .child(
-                    rect()
-                        .width(Size::px(2.))
-                        .height(Size::fill())
-                        .background(theme.color(ThemeRole::Border)),
-                )
-                .child(
-                    PageSurface::for_tab(right_tab)
-                        .key(right_tab.0)
-                        .width(Size::flex(1.))
-                        .height(Size::fill())
-                        .show_focus_ring(true),
-                )
-                .into_element()
-        } else if let Some(tab_id) = active_tab_id {
-            PageSurface::for_tab(tab_id)
-                .key(tab_id.0)
-                .width(Size::fill())
-                .height(Size::fill())
-                .into_element()
-        } else {
-            rect()
-                .width(Size::fill())
-                .height(Size::fill())
-                .background(theme.color(ThemeRole::Surface))
-                .main_align(Alignment::center())
-                .cross_align(Alignment::center())
-                .child(
-                    label()
-                        .text("No tabs open in this space")
-                        .font_size(theme.font_sizes.md)
-                        .color(theme.color(ThemeRole::TextMuted)),
-                )
-                .into_element()
-        };
+    let page_content: Element = if active_tab_id.is_some() {
+        PageArea::new(PaneMode::Live).into_element()
+    } else {
+        rect()
+            .width(Size::fill())
+            .height(Size::fill())
+            .background(theme.color(ThemeRole::Surface))
+            .main_align(Alignment::center())
+            .cross_align(Alignment::center())
+            .child(
+                label()
+                    .text("No tabs open in this space")
+                    .font_size(theme.font_sizes.md)
+                    .color(theme.color(ThemeRole::TextMuted)),
+            )
+            .into_element()
+    };
 
     let page_stage = PageStage::new()
         .on_sized(on_stage_sized)
@@ -548,4 +504,5 @@ pub fn app() -> impl IntoElement {
         .child(WindowShell::new(location, location_a11y_id, page_stage))
         .child(MenuLayer)
         .child(AddressBarLayer)
+        .child(DownloadArcLayer { pinned_progress: None })
 }

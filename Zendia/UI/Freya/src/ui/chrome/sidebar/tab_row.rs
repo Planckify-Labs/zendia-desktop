@@ -12,6 +12,7 @@ use crate::ui::chrome::sidebar::state::{SidebarDragState, favicon_badge_colors, 
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
 use crate::ui::kit::icons::prepared_icon_bytes;
+use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, use_theme};
 use freya::prelude::*;
 use std::time::{Duration, Instant};
@@ -161,6 +162,7 @@ impl Component for VerticalTabRow {
                         pointer_x: px,
                         pointer_y: py,
                         target: Some(drop_target),
+                        page_drop: None,
                         is_preview: false,
                     }));
                 }
@@ -186,10 +188,16 @@ impl Component for VerticalTabRow {
                         None
                     }
                 };
-                if let Some(drag) = finished
-                    && let Some(target) = drag.target
-                {
-                    drop_core.invoke_or_log(Command::TabMove { tab_id, target });
+                if let Some(drag) = finished {
+                    if let Some(page_drop) = drag.page_drop {
+                        drop_core.invoke_or_log(Command::SplitDrop {
+                            tab_id,
+                            target_tab_id: page_drop.target_tab,
+                            zone: page_drop.zone,
+                        });
+                    } else if let Some(target) = drag.target {
+                        drop_core.invoke_or_log(Command::TabMove { tab_id, target });
+                    }
                 }
             }
         };
@@ -674,7 +682,7 @@ impl Component for DragGhostOverlay {
                         .left(self.drag.pointer_x)
                         .top(self.drag.pointer_y),
                 )
-                .layer(Layer::Overlay)
+                .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
                 .interactive(false)
                 .child(pill)
         } else {
@@ -684,7 +692,7 @@ impl Component for DragGhostOverlay {
                         .left((self.drag.pointer_x - 24.0).max(4.0))
                         .top((self.drag.pointer_y - TAB_ROW_HEIGHT * 0.5).max(4.0)),
                 )
-                .layer(Layer::Overlay)
+                .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
                 .interactive(false)
                 .child(pill)
         }

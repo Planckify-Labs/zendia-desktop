@@ -11,6 +11,7 @@ pub mod address_bar;
 pub mod layout;
 pub mod menus;
 pub mod sidebar;
+pub mod toasts;
 pub mod toolbar;
 pub mod window;
 

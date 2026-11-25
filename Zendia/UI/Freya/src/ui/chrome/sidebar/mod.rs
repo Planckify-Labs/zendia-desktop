@@ -10,13 +10,15 @@
 
 pub mod essentials;
 pub mod folder;
+pub mod media_controls;
 pub mod notification;
 pub mod pinned_separator;
 pub mod spaces;
+pub mod split_group;
 pub mod state;
 pub mod tab_row;
 
-pub use state::{SidebarDragState, SidebarViewState, try_use_sidebar_state, use_provide_sidebar_state};
+pub use state::{PageDrop, SidebarDragState, SidebarViewState, try_use_sidebar_state, use_provide_sidebar_state};
 
 use crate::ui::chrome::layout::{
     ChromePalette, RESIZE_HANDLE_WIDTH, SIDEBAR_EXPAND_DURATION, SIDEBAR_PADDING_COLLAPSED, SIDEBAR_PADDING_EXPANDED,
@@ -24,9 +26,11 @@ use crate::ui::chrome::layout::{
 };
 use crate::ui::chrome::sidebar::essentials::EssentialsGrid;
 use crate::ui::chrome::sidebar::folder::FolderGroup;
+use crate::ui::chrome::sidebar::media_controls::SidebarMediaControls;
 use crate::ui::chrome::sidebar::notification::SidebarNotificationCard;
 use crate::ui::chrome::sidebar::pinned_separator::PinnedSeparator;
 use crate::ui::chrome::sidebar::spaces::{SpaceHeader, SpaceSwitcher};
+use crate::ui::chrome::sidebar::split_group::SplitGroupRow;
 use crate::ui::chrome::sidebar::tab_row::{DragGhostOverlay, NewTabRow, VerticalTabRow};
 use crate::ui::chrome::toolbar::{ToolbarItemView, WindowControls};
 use crate::ui::core_view::use_core;
@@ -65,6 +69,7 @@ impl Component for SidebarFrame {
             active_tab_id,
             notifications,
             show_essentials_promo,
+            split_groups,
         ) = {
             let model = core.model().read();
             let active_space_id = model.active_space;
@@ -99,6 +104,7 @@ impl Component for SidebarFrame {
                 model.active_tab,
                 model.sidebar_notifications.clone(),
                 model.show_essentials_promo,
+                model.split_groups.clone(),
             )
         };
 
@@ -235,19 +241,45 @@ impl Component for SidebarFrame {
             collapsed: is_collapsed_visual,
         };
 
-        let normal_rows = normal_tabs.into_iter().enumerate().map(|(idx, tab)| {
-            VerticalTabRow::new(
-                tab.clone(),
-                active_tab_id == Some(tab.id),
-                is_collapsed_visual,
-                0.0,
-                TabMoveTarget::Normal {
-                    space_id: active_space_id,
-                    index: idx,
-                },
-            )
-            .into_element()
-        });
+        // A split group draws as one row where its first tab sits; its other tabs are left out of the list.
+        let mut drawn_groups = Vec::new();
+        let mut normal_rows = Vec::new();
+        for (idx, tab) in normal_tabs.iter().enumerate() {
+            if let Some(group) = split_groups.iter().find(|group| group.tab_ids.contains(&tab.id)) {
+                if drawn_groups.contains(&group.id) {
+                    continue;
+                }
+                drawn_groups.push(group.id);
+                let tabs = group
+                    .tab_ids
+                    .iter()
+                    .filter_map(|id| normal_tabs.iter().find(|tab| tab.id == *id).cloned())
+                    .collect();
+                normal_rows.push(
+                    SplitGroupRow {
+                        group: group.clone(),
+                        tabs,
+                        active_tab: active_tab_id,
+                        collapsed: is_collapsed_visual,
+                    }
+                    .into_element(),
+                );
+                continue;
+            }
+            normal_rows.push(
+                VerticalTabRow::new(
+                    tab.clone(),
+                    active_tab_id == Some(tab.id),
+                    is_collapsed_visual,
+                    0.0,
+                    TabMoveTarget::Normal {
+                        space_id: active_space_id,
+                        index: idx,
+                    },
+                )
+                .into_element(),
+            );
+        }
 
         let notification_stack = (!is_collapsed_visual && !notifications.is_empty()).then(|| {
             rect()
@@ -330,7 +362,11 @@ impl Component for SidebarFrame {
         } else {
             SIDEBAR_PADDING_EXPANDED
         };
-        let top_pad = if layout.has_top_toolbar() { 0.0 } else { 4.0 };
+        let top_pad = if layout.has_top_toolbar() && !layout.compact_hides_toolbar() {
+            0.0
+        } else {
+            4.0
+        };
 
         rect()
             .width(Size::px(displayed_width))
@@ -360,6 +396,9 @@ impl Component for SidebarFrame {
                         .children(normal_rows),
                 ),
             )
+            .child(SidebarMediaControls {
+                collapsed: is_collapsed_visual,
+            })
             .maybe_child(notification_stack)
             .child(bottom_bar)
             .maybe_child(active_drag.map(|drag| DragGhostOverlay {

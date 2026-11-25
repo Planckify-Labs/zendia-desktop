@@ -172,3 +172,33 @@ description = "Previous space"
 keys = ["<C-S-d>", "<D-S-d>"]
 command = "tab.toggle_pin"
 description = "Pin or unpin tab"
+
+# Split view, as Zen binds it.
+[[bindings]]
+keys = ["<C-A-g>", "<D-A-g>"]
+command = "split.set_layout"
+description = "Split view as a grid"
+args = { direction = "grid" }
+
+[[bindings]]
+keys = ["<C-A-v>", "<D-A-v>"]
+command = "split.set_layout"
+description = "Split view side by side"
+args = { direction = "horizontal" }
+
+[[bindings]]
+keys = ["<C-A-h>", "<D-A-h>"]
+command = "split.set_layout"
+description = "Split view stacked"
+args = { direction = "vertical" }
+
+[[bindings]]
+keys = ["<C-A-u>", "<D-A-u>"]
+command = "split.unsplit"
+description = "Unsplit tabs"
+
+# Compact mode.
+[[bindings]]
+keys = ["<C-A-s>", "<D-A-s>"]
+command = "layout.compact_reveal_sidebar"
+description = "Show the sidebar in compact mode"

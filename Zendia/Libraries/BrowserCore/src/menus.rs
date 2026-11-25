@@ -841,7 +841,7 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
             loc,
             "Add Split View...",
             None,
-            "tab.add_split_view",
+            "split.add",
             "organize",
             20,
         ),
@@ -1093,14 +1093,14 @@ pub fn builtin_page_context_entries(chat_site_name: &str) -> Vec<MenuEntry> {
             loc,
             "Open in Split View",
             None,
-            "page.open_in_split",
+            "split.open_url",
             "zendia",
             20,
         ),
         menu_entry(
             "zendia.page.glance",
             loc,
-            "Preview in Glance",
+            "Open Link in Glance",
             None,
             "glance.open",
             "zendia",
@@ -1224,8 +1224,19 @@ pub fn build_tab_context_menu(
     let essentials_count = model.essential_tabs().len();
     let tab_space = tab.and_then(|t| t.space_id).or(model.active_space);
 
+    let split_group = model.split_group_for_tab(tab_id);
     for item in &mut items {
         match item.id.as_str() {
+            "zendia.tab.add_split" => {
+                if let Some(group) = split_group {
+                    item.label = "Unsplit Tabs".to_string();
+                    item.command = "split.unsplit".to_string();
+                    item.command_args.push(("group_id".to_string(), group.id.0.to_string()));
+                } else {
+                    // Splitting adds this tab beside the one on screen, so it needs another tab to be on screen.
+                    item.enabled = model.active_tab.is_some_and(|active| active != tab_id);
+                }
+            }
             "zendia.tab.pin" => {
                 if let Some(tab) = tab {
                     match tab.kind {
@@ -1719,17 +1730,22 @@ fn add_contributed_page_entries(
     if contributed.is_empty() {
         return;
     }
-    // Contextualize Zendia's split/Glance contributions when right-clicking a link.
+    // Contextualize Zendia's split and Glance contributions: on a link they open the link; on the page itself, split
+    // view opens a new tab beside the page and Glance, which needs a link, is left out.
     let link_url = request.link_url.as_deref();
+    if link_url.is_none() {
+        contributed.retain(|item| item.command != "glance.open");
+    }
     for item in &mut contributed {
-        if (item.command == "page.open_in_split" || item.command == "glance.open")
-            && let Some(url) = link_url
-        {
-            item.command_args.push(("url".to_string(), url.to_string()));
-            if item.command == "page.open_in_split" {
-                item.label = "Open Link in Split View".to_string();
-            } else {
-                item.label = "Preview Link in Glance".to_string();
+        if item.command == "split.open_url" || item.command == "glance.open" {
+            match link_url {
+                Some(url) => {
+                    item.command_args.push(("url".to_string(), url.to_string()));
+                    if item.command == "split.open_url" {
+                        item.label = "Open Link in Split View".to_string();
+                    }
+                }
+                None => item.command = "split.new_empty".to_string(),
             }
         }
         if let Some(tab_id) = request.tab_id
@@ -2220,7 +2236,6 @@ mod tests {
                 "---",
                 "Ask ChatGPT",
                 "Open in Split View",
-                "Preview in Glance",
                 "---",
                 "Inspect Element",
             ]

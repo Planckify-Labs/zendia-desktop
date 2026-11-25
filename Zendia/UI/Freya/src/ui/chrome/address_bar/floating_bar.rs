@@ -14,6 +14,7 @@ use crate::ui::chrome::sidebar::state::favicon_badge_colors;
 use crate::ui::core_view::{CoreView, use_core};
 use crate::ui::kit::{Icon, PickerItem, PickerList};
 use crate::ui::page::PageSurfaceContext;
+use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedScheme, ResolvedTheme, Rgba, ThemeRole, motion, use_theme};
 use freya::animation::*;
 use freya::prelude::*;
@@ -191,7 +192,7 @@ impl Component for FloatingAddressBarOverlay {
         let _ = core;
 
         rect()
-            .layer(Layer::Overlay)
+            .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
             .position(Position::new_global().left(0.0).top(0.0))
             .width(Size::window_percent(100.0))
             .height(Size::window_percent(100.0))

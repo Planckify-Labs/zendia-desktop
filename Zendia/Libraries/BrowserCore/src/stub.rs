@@ -22,11 +22,11 @@ use crate::menus::{APP_MENU_VIM_MODE_ID, builtin_menu_entries};
 use crate::model::{
     Agent, AgentId, Bookmark, BookmarkId, BrowserModel, ChatSite, ChatSiteId, Conversation, ConversationId,
     ConversationStatus, ConversationStep, Download, DownloadId, DownloadStatus, Essential, Folder, FolderId,
-    HistoryEntry, HistoryEntryId, InputMode, LayoutSettings, MediaSession, MediaSessionId, ModelEffort, ModelId,
-    ModelInfo, NotificationId, PinnedTab, ServiceId, ServiceState, ServiceStatus, SidebarNotification,
-    SidebarNotificationLink, SidebarSide, Space, SpaceGradient, SpaceId, SplitDirection, SplitGroup, SplitGroupId,
-    StepId, StepKind, StepStatus, Tab, TabId, TabKind, TabMoveTarget, ThemeOverrides, ThemeScheme, ThemeSettings,
-    ToolbarLayout, WhichKeyEntry, WhichKeyState, Window, WindowId,
+    HistoryEntry, HistoryEntryId, InputMode, LayoutSettings, MediaSession, ModelEffort, ModelId, ModelInfo,
+    NotificationId, PinnedTab, ServiceId, ServiceState, ServiceStatus, SidebarNotification, SidebarNotificationLink,
+    SidebarSide, Space, SpaceGradient, SpaceId, SplitDirection, SplitGroup, SplitGroupId, StepId, StepKind, StepStatus,
+    Tab, TabId, TabKind, TabMoveTarget, ThemeOverrides, ThemeScheme, ThemeSettings, ToolbarLayout, WhichKeyEntry,
+    WhichKeyState, Window, WindowId,
 };
 use crate::site_info::{
     PermissionState, SiteDataSummary, SiteExtension, SiteInfo, SitePermission, SitePermissionKind, origin_for_url,
@@ -34,6 +34,8 @@ use crate::site_info::{
 use crate::tab_source::{TabSource, TabUpdate};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+
+mod page_layouts;
 
 const MAX_ESSENTIALS: usize = 12;
 
@@ -45,6 +47,9 @@ struct StubState {
     next_conversation_id: u64,
     next_step_id: u64,
     debug_input_step: usize,
+    /// The last tab opened, so a command that opens a tab through the engine can find it.
+    last_opened_tab: Option<TabId>,
+    last_toast_id: u64,
 }
 
 /// Stub [`BrowserCore`] backend used during the Freya UI port until the real command registry lands.
@@ -96,6 +101,8 @@ impl StubBackend {
                 next_conversation_id,
                 next_step_id,
                 debug_input_step: 0,
+                last_opened_tab: None,
+                last_toast_id: 0,
             }),
             tab_source: Mutex::new(None),
             bus: EventBus::new(),
@@ -195,6 +202,7 @@ impl StubBackend {
                 .map(|position| position + 1)
                 .unwrap_or(state.model.tabs.len());
             state.model.tabs.insert(index, tab.clone());
+            state.last_opened_tab = Some(tab.id);
             let should_activate = activate || state.model.active_tab.is_none();
             let activated = if should_activate {
                 state.model.active_tab = Some(tab.id);
@@ -295,9 +303,16 @@ impl StubBackend {
                 }
             }
             for group in &mut state.model.split_groups {
-                group.tab_ids.retain(|id| *id != tab_id);
+                if let Some(position) = group.tab_ids.iter().position(|id| *id == tab_id) {
+                    group.tab_ids.remove(position);
+                    group.ratios = crate::split::default_ratios(group.direction, group.tab_ids.len());
+                }
             }
             state.model.split_groups.retain(|group| group.tab_ids.len() > 1);
+            if state.model.is_glance_tab(tab_id) {
+                state.model.glance = None;
+            }
+            state.model.media_sessions.retain(|session| session.tab_id != tab_id);
             let was_active = state.model.active_tab == Some(tab_id);
             let next_tab = if was_active {
                 state.model.active_tab = None;
@@ -516,6 +531,7 @@ impl StubBackend {
                 .map(|position| position + 1)
                 .unwrap_or(state.model.tabs.len());
             state.model.tabs.insert(index, tab.clone());
+            state.last_opened_tab = Some(id);
             let activated = if activate || state.model.active_tab.is_none() {
                 state.model.active_tab = Some(id);
                 if let Some(window) = state.model.windows.first_mut() {
@@ -2056,6 +2072,7 @@ impl BrowserCore for StubBackend {
                 };
                 if !url.is_empty() {
                     self.bus.publish(Event::ClipboardCopyRequested { text: url });
+                    self.show_toast(crate::toasts::messages::COPIED_CURRENT_URL.to_string(), None, None);
                 }
                 Ok(())
             }
@@ -2420,6 +2437,26 @@ impl BrowserCore for StubBackend {
                     Ok(())
                 }
             }
+            command @ (Command::SplitTabs { .. }
+            | Command::SplitNewEmpty
+            | Command::SplitOpenUrl { .. }
+            | Command::SplitDrop { .. }
+            | Command::SplitRemoveTab { .. }
+            | Command::SplitUnsplit { .. }
+            | Command::SplitSetLayout { .. }
+            | Command::SplitResize { .. }
+            | Command::GlanceOpen { .. }
+            | Command::GlanceClose
+            | Command::GlanceExpand
+            | Command::GlanceSplit
+            | Command::ToastShow { .. }
+            | Command::ToastDismiss { .. }
+            | Command::MediaSessionControl { .. }
+            | Command::LayoutSetCompactHide { .. }
+            | Command::LayoutCompactRevealSidebar
+            | Command::LayoutSetTabSwitchMotion { .. }
+            | Command::DebugSampleDownload
+            | Command::DebugSampleMedia) => self.handle_page_layout_command(command, tab_source),
             Command::Custom { name, args } => {
                 eprintln!("zendia: stub backend does not handle command `{name}` (args: {args:?})");
                 Err(CommandError::UnknownCommand(name))
@@ -2774,7 +2811,6 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         let work_spec = TabId(14);
         let ui_spec_folder = FolderId(1);
         let engine_folder = FolderId(2);
-        let split_id = SplitGroupId(1);
 
         let tabs = vec![
             Tab {
@@ -2962,7 +2998,7 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
                 view_id: None,
                 space_id: Some(default_space),
                 folder_id: None,
-                split_group_id: Some(split_id),
+                split_group_id: None,
                 kind: TabKind::Normal,
                 title: "Architecture — Zendia".to_string(),
                 custom_title: None,
@@ -2980,7 +3016,7 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
                 view_id: None,
                 space_id: Some(default_space),
                 folder_id: None,
-                split_group_id: Some(split_id),
+                split_group_id: None,
                 kind: TabKind::Normal,
                 title: "Zendia Documentation".to_string(),
                 custom_title: None,
@@ -3075,23 +3111,10 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
                 tab_ids: vec![folder_engine_hub],
             },
         ];
-        let split_groups = vec![SplitGroup {
-            id: split_id,
-            space_id: default_space,
-            direction: SplitDirection::Horizontal,
-            tab_ids: vec![normal_arch, normal_docs],
-            ratios: vec![0.5, 0.5],
-        }];
-        let media_sessions = vec![MediaSession {
-            id: MediaSessionId(1),
-            tab_id: normal_releases,
-            title: "Focus Radio — Night Coding".to_string(),
-            artist: "Zendia Sample Stream".to_string(),
-            is_playing: true,
-            is_muted: false,
-            position_secs: 142.0,
-            duration_secs: Some(360.0),
-        }];
+        // Split groups and media start empty so every earlier gallery state keeps its look; the phase 4 gallery
+        // states add their own.
+        let split_groups: Vec<SplitGroup> = Vec::new();
+        let media_sessions: Vec<MediaSession> = Vec::new();
 
         (
             tabs,
@@ -3432,6 +3455,8 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         media_sessions,
         sidebar_notifications: Vec::new(),
         show_essentials_promo: false,
+        glance: None,
+        toasts: Vec::new(),
         contributions: sample_contributions(),
         agents,
         conversations,
@@ -3572,10 +3597,8 @@ mod tests {
         assert!(!model.essentials.is_empty());
         assert!(!model.pinned_tabs.is_empty());
         assert!(!model.folders.is_empty());
-        assert!(!model.split_groups.is_empty());
         assert!(!model.downloads.is_empty());
         assert!(!model.history.is_empty());
-        assert!(!model.media_sessions.is_empty());
         assert!(!model.agents.is_empty());
         assert!(!model.conversations.is_empty());
         assert!(!model.conversations[0].steps.is_empty());

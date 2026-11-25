@@ -9,10 +9,13 @@
 use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, SidePanelId};
 use crate::model::{
-    Bookmark, Conversation, Essential, Folder, FolderId, InputMode, LayoutSettings, NotificationId, PinnedTab,
-    ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, Tab, TabId, ThemeSettings, WhichKeyState,
+    Bookmark, Conversation, Download, Essential, Folder, FolderId, InputMode, LayoutSettings, MediaSession,
+    NotificationId, PinnedTab, ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId,
+    ThemeSettings, WhichKeyState,
 };
 use crate::site_info::SiteInfo;
+use crate::split::Glance;
+use crate::toasts::{Toast, ToastId};
 use std::fmt;
 use std::sync::Mutex;
 
@@ -77,6 +80,28 @@ pub enum Event {
     SplitGroupUpdated {
         group: SplitGroup,
     },
+    SplitGroupRemoved {
+        group_id: SplitGroupId,
+    },
+    /// Glance opened, changed or closed (`None`).
+    GlanceChanged {
+        glance: Option<Glance>,
+    },
+    ToastShown {
+        toast: Toast,
+    },
+    ToastDismissed {
+        toast_id: ToastId,
+    },
+    MediaSessionsChanged {
+        sessions: Vec<MediaSession>,
+    },
+    /// A download began; views play the download animation.
+    DownloadStarted {
+        download: Download,
+    },
+    /// View-level request to slide the compact mode sidebar out or back (Zen's `toggleSidebar`).
+    CompactSidebarRevealRequested,
     PanelToggled {
         panel_id: SidePanelId,
     },

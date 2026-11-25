@@ -11,6 +11,15 @@
 pub mod data;
 pub mod motion;
 
+/// Paint levels for UI drawn above the page.
+///
+/// Freya paints an element one layer above its parent, so deep page content would cover chrome floated from near the
+/// root, and `Layer::Overlay` only jumps relative to the parent. These fixed levels order them whatever their depth.
+/// Floating chrome (compact mode's sidebar and top bar, toasts) sits above the page.
+pub const CHROME_OVERLAY_LEVEL: u8 = 2;
+/// Menus, popovers, dialogs, the address bar and drag previews sit above floating chrome.
+pub const POPUP_OVERLAY_LEVEL: u8 = 3;
+
 pub use data::{
     ColorPair, FontSizes, GlassSpec, Palette, Radii, ResolvedScheme, ResolvedTheme, Rgba, SemanticColors, ShadowSpec,
     Shadows, Spacing, ThemeRole,

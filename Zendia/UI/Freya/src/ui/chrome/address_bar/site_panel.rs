@@ -14,6 +14,7 @@ use crate::ui::chrome::menus::state::clamp_popup_origin;
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
 use crate::ui::kit::icons::prepared_icon_bytes;
+use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, motion, use_theme};
 use freya::animation::*;
 use freya::prelude::*;
@@ -71,7 +72,7 @@ impl Component for SiteDataPanelOverlay {
         let (x, y) = compute_site_panel_origin(anchor, (SITE_PANEL_WIDTH, est_height), window_size);
 
         rect()
-            .layer(Layer::Overlay)
+            .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
             .position(Position::new_global().left(0.0).top(0.0))
             .width(Size::window_percent(100.0))
             .height(Size::window_percent(100.0))

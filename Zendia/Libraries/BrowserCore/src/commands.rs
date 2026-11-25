@@ -7,11 +7,14 @@
 //! Named, typed browser commands and their descriptors for keymaps and the command palette.
 
 use crate::contributions::SidePanelId;
+use crate::media::MediaControl;
 use crate::model::{
-    AgentId, ChatSiteId, ConversationId, FolderId, NotificationId, SidebarSide, SpaceId, SplitDirection, TabId,
-    TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
+    AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, MediaSessionId, NotificationId, SidebarSide, SpaceId,
+    SplitDirection, SplitGroupId, TabId, TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
 };
 use crate::site_info::{PermissionState, SitePermissionKind};
+use crate::split::{DropZone, parse_direction};
+use crate::toasts::ToastId;
 use std::fmt;
 
 /// Context-menu action applied to an HTML audio or video element.
@@ -312,6 +315,73 @@ pub enum Command {
         tab_id: Option<TabId>,
         item_id: Option<u32>,
     },
+    /// Shows the given tabs side by side in one split group, taking them out of any other group.
+    SplitTabs {
+        tab_ids: Vec<TabId>,
+        direction: SplitDirection,
+    },
+    /// Opens a new tab and splits it with the active tab.
+    SplitNewEmpty,
+    /// Opens `url` in a new tab split with `tab_id` (the active tab by default).
+    SplitOpenUrl {
+        tab_id: Option<TabId>,
+        url: String,
+    },
+    /// Drops `tab_id` on one side of the pane showing `target_tab_id`.
+    SplitDrop {
+        tab_id: TabId,
+        target_tab_id: TabId,
+        zone: DropZone,
+    },
+    SplitRemoveTab {
+        tab_id: TabId,
+    },
+    /// Dissolves a group (the active one by default); its tabs become separate tabs again.
+    SplitUnsplit {
+        group_id: Option<SplitGroupId>,
+    },
+    SplitSetLayout {
+        group_id: Option<SplitGroupId>,
+        direction: SplitDirection,
+    },
+    SplitResize {
+        group_id: SplitGroupId,
+        ratios: Vec<f32>,
+    },
+    GlanceOpen {
+        url: String,
+        parent_tab_id: Option<TabId>,
+        origin: Option<(f32, f32)>,
+    },
+    GlanceClose,
+    /// Turns the Glance page into a normal tab next to its parent and shows it.
+    GlanceExpand,
+    /// Splits the Glance page with its parent.
+    GlanceSplit,
+    ToastShow {
+        message: String,
+        timeout_ms: Option<u64>,
+        action_label: Option<String>,
+        action_command: Option<String>,
+    },
+    ToastDismiss {
+        toast_id: ToastId,
+    },
+    MediaSessionControl {
+        session_id: MediaSessionId,
+        control: MediaControl,
+    },
+    LayoutSetCompactHide {
+        hide: CompactHide,
+    },
+    LayoutCompactRevealSidebar,
+    LayoutSetTabSwitchMotion {
+        enabled: bool,
+    },
+    /// Starts a sample download so the download animation can be seen without the engine reporting downloads.
+    DebugSampleDownload,
+    /// Starts sample media in a background tab so the media controls can be seen without the engine reporting media.
+    DebugSampleMedia,
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -469,6 +539,26 @@ impl Command {
                 MediaAction::ToggleFullscreen => "media.toggle_fullscreen",
             },
             Self::PageSelectDropdownChoose { .. } => "page.select_dropdown_choose",
+            Self::SplitTabs { .. } => "split.tabs",
+            Self::SplitNewEmpty => "split.new_empty",
+            Self::SplitOpenUrl { .. } => "split.open_url",
+            Self::SplitDrop { .. } => "split.drop",
+            Self::SplitRemoveTab { .. } => "split.remove_tab",
+            Self::SplitUnsplit { .. } => "split.unsplit",
+            Self::SplitSetLayout { .. } => "split.set_layout",
+            Self::SplitResize { .. } => "split.resize",
+            Self::GlanceOpen { .. } => "glance.open",
+            Self::GlanceClose => "glance.close",
+            Self::GlanceExpand => "glance.expand",
+            Self::GlanceSplit => "glance.split",
+            Self::ToastShow { .. } => "toast.show",
+            Self::ToastDismiss { .. } => "toast.dismiss",
+            Self::MediaSessionControl { control, .. } => control.command_name(),
+            Self::LayoutSetCompactHide { .. } => "layout.set_compact_hide",
+            Self::LayoutCompactRevealSidebar => "layout.compact_reveal_sidebar",
+            Self::LayoutSetTabSwitchMotion { .. } => "layout.set_tab_switch_motion",
+            Self::DebugSampleDownload => "debug.sample_download",
+            Self::DebugSampleMedia => "debug.sample_media",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -867,12 +957,176 @@ impl Command {
                     item_id,
                 })
             }
+            "split.tabs" => Ok(Self::SplitTabs {
+                tab_ids: parse_u64_list_arg(name, args, "tab_ids")?
+                    .into_iter()
+                    .map(TabId)
+                    .collect(),
+                direction: parse_direction_arg(name, args, "direction", SplitDirection::Horizontal)?,
+            }),
+            "split.new_empty" => Ok(Self::SplitNewEmpty),
+            "split.open_url" => Ok(Self::SplitOpenUrl {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                url: parse_required_string_arg(name, args, "url")?,
+            }),
+            "split.drop" => {
+                let raw = parse_required_string_arg(name, args, "zone")?;
+                let zone = DropZone::parse(&raw).ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("unknown drop zone `{raw}`"),
+                })?;
+                Ok(Self::SplitDrop {
+                    tab_id: TabId(parse_required_u64_arg(name, args, "tab_id")?),
+                    target_tab_id: TabId(parse_required_u64_arg(name, args, "target_tab_id")?),
+                    zone,
+                })
+            }
+            "split.remove_tab" => Ok(Self::SplitRemoveTab {
+                tab_id: TabId(parse_required_u64_arg(name, args, "tab_id")?),
+            }),
+            "split.unsplit" => Ok(Self::SplitUnsplit {
+                group_id: parse_optional_u64_arg(name, args, "group_id")?.map(SplitGroupId),
+            }),
+            "split.set_layout" => Ok(Self::SplitSetLayout {
+                group_id: parse_optional_u64_arg(name, args, "group_id")?.map(SplitGroupId),
+                direction: parse_direction_arg(name, args, "direction", SplitDirection::Grid)?,
+            }),
+            "split.resize" => Ok(Self::SplitResize {
+                group_id: SplitGroupId(parse_required_u64_arg(name, args, "group_id")?),
+                ratios: parse_f32_list_arg(name, args, "ratios")?,
+            }),
+            "glance.open" => {
+                let x = parse_optional_f32_arg(name, args, "x")?;
+                let y = parse_optional_f32_arg(name, args, "y")?;
+                Ok(Self::GlanceOpen {
+                    url: parse_required_string_arg(name, args, "url")?,
+                    // Page menu entries pass the page's tab as `tab_id`.
+                    parent_tab_id: parse_optional_u64_arg(name, args, "parent_tab_id")?
+                        .or(parse_optional_u64_arg(name, args, "tab_id")?)
+                        .map(TabId),
+                    origin: x.zip(y),
+                })
+            }
+            "glance.close" => Ok(Self::GlanceClose),
+            "glance.expand" => Ok(Self::GlanceExpand),
+            "glance.split" => Ok(Self::GlanceSplit),
+            "toast.show" => Ok(Self::ToastShow {
+                message: parse_required_string_arg(name, args, "message")?,
+                timeout_ms: parse_optional_u64_arg(name, args, "timeout_ms")?,
+                action_label: find_arg(args, "action_label").map(str::to_string),
+                action_command: find_arg(args, "action_command").map(str::to_string),
+            }),
+            "toast.dismiss" => Ok(Self::ToastDismiss {
+                toast_id: ToastId(parse_required_u64_arg(name, args, "toast_id")?),
+            }),
+            "media.session.toggle_play"
+            | "media.session.toggle_mute"
+            | "media.session.previous"
+            | "media.session.next"
+            | "media.session.pip"
+            | "media.session.focus"
+            | "media.session.dismiss"
+            | "media.session.seek" => {
+                let control = match name {
+                    "media.session.toggle_play" => MediaControl::TogglePlay,
+                    "media.session.toggle_mute" => MediaControl::ToggleMute,
+                    "media.session.previous" => MediaControl::Previous,
+                    "media.session.next" => MediaControl::Next,
+                    "media.session.pip" => MediaControl::PictureInPicture,
+                    "media.session.focus" => MediaControl::Focus,
+                    "media.session.dismiss" => MediaControl::Dismiss,
+                    _ => MediaControl::Seek(parse_optional_f32_arg(name, args, "position")?.ok_or_else(|| {
+                        CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: "missing required argument `position`".to_string(),
+                        }
+                    })?),
+                };
+                Ok(Self::MediaSessionControl {
+                    session_id: MediaSessionId(parse_required_u64_arg(name, args, "session_id")?),
+                    control,
+                })
+            }
+            "layout.set_compact_hide" => {
+                let raw = parse_required_string_arg(name, args, "hide")?;
+                let hide = CompactHide::parse(&raw).ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("unknown compact mode target `{raw}`"),
+                })?;
+                Ok(Self::LayoutSetCompactHide { hide })
+            }
+            "layout.compact_reveal_sidebar" => Ok(Self::LayoutCompactRevealSidebar),
+            "layout.set_tab_switch_motion" => Ok(Self::LayoutSetTabSwitchMotion {
+                enabled: parse_bool_arg(name, args, "enabled", true)?,
+            }),
+            "debug.sample_download" => Ok(Self::DebugSampleDownload),
+            "debug.sample_media" => Ok(Self::DebugSampleMedia),
             _ => Ok(Self::Custom {
                 name: name.to_string(),
                 args: args.to_vec(),
             }),
         }
     }
+}
+
+fn parse_direction_arg(
+    command: &str,
+    args: &[(String, String)],
+    key: &str,
+    default: SplitDirection,
+) -> Result<SplitDirection, CommandError> {
+    match find_arg(args, key) {
+        None => Ok(default),
+        Some(raw) => parse_direction(raw).ok_or_else(|| CommandError::InvalidArgument {
+            command: command.to_string(),
+            message: format!("unknown split direction `{raw}`"),
+        }),
+    }
+}
+
+fn parse_optional_f32_arg(command: &str, args: &[(String, String)], key: &str) -> Result<Option<f32>, CommandError> {
+    match find_arg(args, key) {
+        None => Ok(None),
+        Some(raw) => raw
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| CommandError::InvalidArgument {
+                command: command.to_string(),
+                message: format!("argument `{key}` is not a number: `{raw}`"),
+            }),
+    }
+}
+
+/// Parses a comma-separated list such as `tab_ids=3,5,8`.
+fn parse_u64_list_arg(command: &str, args: &[(String, String)], key: &str) -> Result<Vec<u64>, CommandError> {
+    let raw = parse_required_string_arg(command, args, key)?;
+    raw.split(',')
+        .map(|part| {
+            part.trim().parse::<u64>().map_err(|_| CommandError::InvalidArgument {
+                command: command.to_string(),
+                message: format!("argument `{key}` has a bad entry: `{part}`"),
+            })
+        })
+        .collect()
+}
+
+fn parse_f32_list_arg(command: &str, args: &[(String, String)], key: &str) -> Result<Vec<f32>, CommandError> {
+    let raw = parse_required_string_arg(command, args, key)?;
+    raw.split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| CommandError::InvalidArgument {
+                    command: command.to_string(),
+                    message: format!("argument `{key}` has a bad entry: `{part}`"),
+                })
+        })
+        .collect()
 }
 
 /// Scalar or identifier type expected for a command argument.
@@ -1715,5 +1969,255 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             description: "Enter or exit fullscreen for the context-menu video".to_string(),
             arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
         },
+        CommandDescriptor {
+            name: "split.tabs".to_string(),
+            title: "Split Tabs".to_string(),
+            description: "Show tabs side by side in one split view".to_string(),
+            arguments: vec![
+                ArgumentSchema::new(
+                    "tab_ids",
+                    ArgumentType::String,
+                    true,
+                    "Comma-separated tab ids (2 to 4)",
+                ),
+                ArgumentSchema::new(
+                    "direction",
+                    ArgumentType::SplitDirection,
+                    false,
+                    "horizontal, vertical or grid",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "split.new_empty".to_string(),
+            title: "New Split View".to_string(),
+            description: "Open a new tab beside the current one".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "split.open_url".to_string(),
+            title: "Open Link in Split View".to_string(),
+            description: "Open a URL in a new tab split with the current tab".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("url", ArgumentType::String, true, "URL to open"),
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Tab to split with"),
+            ],
+        },
+        CommandDescriptor {
+            name: "split.drop".to_string(),
+            title: "Drop Tab Into Split View".to_string(),
+            description: "Split a dragged tab onto one side of a pane".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, true, "Dragged tab"),
+                ArgumentSchema::new(
+                    "target_tab_id",
+                    ArgumentType::TabId,
+                    true,
+                    "Tab of the pane it lands on",
+                ),
+                ArgumentSchema::new("zone", ArgumentType::String, true, "left, right, top or bottom"),
+            ],
+        },
+        CommandDescriptor {
+            name: "split.remove_tab".to_string(),
+            title: "Remove Tab From Split View".to_string(),
+            description: "Take a tab out of its split view".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "tab_id",
+                ArgumentType::TabId,
+                true,
+                "Tab to take out",
+            )],
+        },
+        CommandDescriptor {
+            name: "split.unsplit".to_string(),
+            title: "Unsplit Tabs".to_string(),
+            description: "Close the split view and keep its tabs".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "group_id",
+                ArgumentType::Integer,
+                false,
+                "Split group",
+            )],
+        },
+        CommandDescriptor {
+            name: "split.set_layout".to_string(),
+            title: "Change Split View Layout".to_string(),
+            description: "Arrange the split view side by side, stacked or as a grid".to_string(),
+            arguments: vec![
+                ArgumentSchema::new(
+                    "direction",
+                    ArgumentType::SplitDirection,
+                    true,
+                    "horizontal, vertical or grid",
+                ),
+                ArgumentSchema::new("group_id", ArgumentType::Integer, false, "Split group"),
+            ],
+        },
+        CommandDescriptor {
+            name: "split.resize".to_string(),
+            title: "Resize Split View".to_string(),
+            description: "Set the share of each pane".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("group_id", ArgumentType::Integer, true, "Split group"),
+                ArgumentSchema::new("ratios", ArgumentType::String, true, "Comma-separated fractions"),
+            ],
+        },
+        CommandDescriptor {
+            name: "glance.open".to_string(),
+            title: "Open Link in Glance".to_string(),
+            description: "Preview a page in a card over the current page".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("url", ArgumentType::String, true, "URL to preview"),
+                ArgumentSchema::new(
+                    "parent_tab_id",
+                    ArgumentType::TabId,
+                    false,
+                    "Tab the preview belongs to",
+                ),
+                ArgumentSchema::new(
+                    "x",
+                    ArgumentType::Float,
+                    false,
+                    "Animation origin, fraction of the page width",
+                ),
+                ArgumentSchema::new(
+                    "y",
+                    ArgumentType::Float,
+                    false,
+                    "Animation origin, fraction of the page height",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "glance.close".to_string(),
+            title: "Close Glance".to_string(),
+            description: "Close the page preview".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "glance.expand".to_string(),
+            title: "Expand Glance".to_string(),
+            description: "Open the previewed page as a tab".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "glance.split".to_string(),
+            title: "Split Glance".to_string(),
+            description: "Show the previewed page beside the current one".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "toast.show".to_string(),
+            title: "Show Toast".to_string(),
+            description: "Show a short message over the page".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("message", ArgumentType::String, true, "Text to show"),
+                ArgumentSchema::new("timeout_ms", ArgumentType::Integer, false, "How long it stays up"),
+                ArgumentSchema::new(
+                    "action_label",
+                    ArgumentType::String,
+                    false,
+                    "Label of the toast's button",
+                ),
+                ArgumentSchema::new("action_command", ArgumentType::String, false, "Command the button runs"),
+            ],
+        },
+        CommandDescriptor {
+            name: "toast.dismiss".to_string(),
+            title: "Dismiss Toast".to_string(),
+            description: "Hide a toast".to_string(),
+            arguments: vec![ArgumentSchema::new("toast_id", ArgumentType::Integer, true, "Toast")],
+        },
+        media_session_descriptor(
+            "media.session.toggle_play",
+            "Play / Pause",
+            "Play or pause background media",
+        ),
+        media_session_descriptor(
+            "media.session.toggle_mute",
+            "Mute / Unmute",
+            "Mute or unmute background media",
+        ),
+        media_session_descriptor("media.session.previous", "Previous Track", "Skip to the previous track"),
+        media_session_descriptor("media.session.next", "Next Track", "Skip to the next track"),
+        media_session_descriptor(
+            "media.session.pip",
+            "Picture in Picture",
+            "Show the media in picture-in-picture",
+        ),
+        media_session_descriptor(
+            "media.session.focus",
+            "Go to Media Tab",
+            "Switch to the tab playing the media",
+        ),
+        media_session_descriptor(
+            "media.session.dismiss",
+            "Hide Media Controls",
+            "Hide the controls for this media",
+        ),
+        CommandDescriptor {
+            name: "media.session.seek".to_string(),
+            title: "Seek Media".to_string(),
+            description: "Move background media to a position".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("session_id", ArgumentType::Integer, true, "Media session"),
+                ArgumentSchema::new("position", ArgumentType::Float, true, "Position in seconds"),
+            ],
+        },
+        CommandDescriptor {
+            name: "layout.set_compact_hide".to_string(),
+            title: "Set What Compact Mode Hides".to_string(),
+            description: "Hide the sidebar, the toolbar or both in compact mode".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "hide",
+                ArgumentType::String,
+                true,
+                "both, sidebar or toolbar",
+            )],
+        },
+        CommandDescriptor {
+            name: "layout.compact_reveal_sidebar".to_string(),
+            title: "Show Sidebar in Compact Mode".to_string(),
+            description: "Slide the hidden sidebar out, or back".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "layout.set_tab_switch_motion".to_string(),
+            title: "Animate Tab Switches".to_string(),
+            description: "Slide the page in when switching tabs".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "enabled",
+                ArgumentType::Bool,
+                true,
+                "Whether to animate",
+            )],
+        },
+        CommandDescriptor {
+            name: "debug.sample_download".to_string(),
+            title: "Start Sample Download (Debug)".to_string(),
+            description: "Start a sample download to show the download animation".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "debug.sample_media".to_string(),
+            title: "Play Sample Media (Debug)".to_string(),
+            description: "Play sample media in a background tab to show the media controls".to_string(),
+            arguments: Vec::new(),
+        },
     ]
+}
+
+fn media_session_descriptor(name: &str, title: &str, description: &str) -> CommandDescriptor {
+    CommandDescriptor {
+        name: name.to_string(),
+        title: title.to_string(),
+        description: description.to_string(),
+        arguments: vec![ArgumentSchema::new(
+            "session_id",
+            ArgumentType::Integer,
+            true,
+            "Media session",
+        )],
+    }
 }

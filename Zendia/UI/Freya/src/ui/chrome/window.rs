@@ -6,18 +6,33 @@
 
 //! Top-level window shell: space gradient backdrop, optional top toolbar, sidebar frame, resize handle, and rounded
 //! inset page card.
+//!
+//! In compact mode the page card fills the window and the sidebar and top toolbar hide. Moving the pointer to the
+//! window edge where they live slides them out over the page with Zen's 0.25 s spring; they slide back once the pointer
+//! leaves them, unless the user pinned the sidebar out with `layout.compact_reveal_sidebar`.
 
 use crate::ui::chrome::layout::{
-    BackdropEndpoints, ChromePalette, PAGE_CARD_RADIUS, SPACE_GRADIENT_CROSSFADE, ToolbarSlots, page_card_margins,
-    window_backdrop_endpoints,
+    BackdropEndpoints, ChromePalette, ELEMENT_SEPARATION, PAGE_CARD_RADIUS, SPACE_GRADIENT_CROSSFADE,
+    TOP_TOOLBAR_HEIGHT, ToolbarSlots, page_card_margins, window_backdrop_endpoints,
 };
-use crate::ui::chrome::sidebar::{SidebarFrame, SidebarResizeHandle};
+use crate::ui::chrome::sidebar::{SidebarFrame, SidebarResizeHandle, try_use_sidebar_state};
+use crate::ui::chrome::toasts::ToastHost;
 use crate::ui::chrome::toolbar::TopToolbar;
 use crate::ui::core_view::use_core;
+use crate::ui::theme::CHROME_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedScheme, motion, use_theme};
 use freya::animation::*;
 use freya::prelude::*;
+use std::time::Duration;
 use zendia_browser_core::model::{SidebarSide, SpaceId};
+
+/// How close to the window edge the pointer must come to slide hidden chrome out.
+const COMPACT_EDGE: f32 = 8.0;
+/// How far past the revealed chrome the pointer may stray before it slides back.
+const COMPACT_SLACK: f32 = 24.0;
+/// Zen's `--zen-compact-mode-time`.
+const COMPACT_SLIDE: Duration = Duration::from_millis(250);
+const COMPACT_RADIUS: f32 = 10.0;
 
 /// Composes Zendia's complete browser window shell around a caller-supplied page element (real [`PageStage`] in the
 /// live window, or a placeholder card in the UI gallery).
@@ -60,6 +75,9 @@ impl Component for WindowShell {
         let theme = use_theme();
         let palette = ChromePalette::for_scheme(theme.scheme);
         let is_resizing = use_state(|| false);
+        let sidebar_state = try_use_sidebar_state();
+        let mut shell_area = use_state(|| (0.0f32, 0.0f32, 0.0f32, 0.0f32));
+        let mut toolbar_revealed = use_state(|| false);
 
         let (layout, active_space, toolbar_items) = {
             let model = core.model().read();
@@ -93,16 +111,61 @@ impl Component for WindowShell {
                 .function(motion::ease_out_fn())
         });
 
+        let compact_sidebar = layout.compact_hides_sidebar();
+        let compact_toolbar = layout.compact_hides_toolbar() && layout.has_top_toolbar();
+        let sidebar_pinned = sidebar_state.is_some_and(|state| *state.compact_pinned.read());
+        let sidebar_out = compact_sidebar
+            && sidebar_state.is_some_and(|state| *state.compact_revealed.read() || *state.compact_pinned.read());
+        let toolbar_out = compact_toolbar && *toolbar_revealed.read();
+        let sidebar_slide = use_animation_with_dependencies(&sidebar_out, move |conf, out| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *out { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(COMPACT_SLIDE)
+                .ease(Ease::Out)
+                .function(motion::spring_fn())
+        });
+        let toolbar_slide = use_animation_with_dependencies(&toolbar_out, move |conf, out| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *out { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(COMPACT_SLIDE)
+                .ease(Ease::Out)
+                .function(motion::spring_fn())
+        });
+
         let t = crossfade.get().value().clamp(0.0, 1.0);
         let backdrop = BackdropEndpoints::lerp(&from_endpoints.read(), &to_endpoints.read(), t).to_gradient();
         let slots = ToolbarSlots::resolve(&toolbar_items, &layout);
-        let (card_top, card_right, card_bottom, card_left) = page_card_margins(&layout);
+        let (mut card_top, mut card_right, card_bottom, mut card_left) = page_card_margins(&layout);
+        if compact_sidebar {
+            card_left = ELEMENT_SEPARATION;
+            card_right = ELEMENT_SEPARATION;
+        }
+        if compact_toolbar || (compact_sidebar && !layout.has_top_toolbar()) {
+            card_top = ELEMENT_SEPARATION;
+        }
 
-        let top_bar = layout.has_top_toolbar().then(|| TopToolbar {
+        let make_top_bar = || TopToolbar {
             slots: slots.clone(),
             location: self.location,
             location_a11y_id: self.location_a11y_id,
             interactive_window_controls: self.interactive_window_controls,
+        };
+        let top_bar = (layout.has_top_toolbar() && !compact_toolbar).then(make_top_bar);
+        let floating_top_bar = (compact_toolbar && toolbar_slide.get().value() > 0.001).then(|| {
+            let shown = toolbar_slide.get().value();
+            rect()
+                .layer(Layer::OverlayLevel(CHROME_OVERLAY_LEVEL))
+                .position(Position::new_absolute().left(0.0).top(0.0))
+                .width(Size::percent(100.0))
+                .height(Size::px(TOP_TOOLBAR_HEIGHT))
+                .offset_y(-(TOP_TOOLBAR_HEIGHT + COMPACT_SLACK) * (1.0 - shown))
+                .background(BackdropEndpoints::lerp(&from_endpoints.read(), &to_endpoints.read(), 1.0).to_gradient())
+                .shadow(Shadow::new().y(2.0).blur(12.0).color(Color::from_argb(60, 0, 0, 0)))
+                .child(make_top_bar())
         });
 
         let sidebar = SidebarFrame {
@@ -153,23 +216,114 @@ impl Component for WindowShell {
                     .child(self.page.clone()),
             );
 
-        let body = match layout.sidebar_side {
-            SidebarSide::Left => rect()
-                .width(Size::fill())
-                .height(Size::flex(1.0))
-                .direction(Direction::Horizontal)
-                .content(Content::Flex)
-                .child(sidebar)
-                .child(resize_handle)
-                .child(page_card),
-            SidebarSide::Right => rect()
+        let sidebar_side = layout.sidebar_side;
+        let sidebar_width = layout.effective_sidebar_width();
+        let floating_sidebar = (compact_sidebar && sidebar_slide.get().value() > 0.001).then(|| {
+            let shown = sidebar_slide.get().value();
+            let hidden_offset = sidebar_width + 2.0 * ELEMENT_SEPARATION + COMPACT_SLACK;
+            let (position, offset) = match sidebar_side {
+                SidebarSide::Left => (
+                    Position::new_absolute().left(0.0).top(0.0),
+                    -hidden_offset * (1.0 - shown),
+                ),
+                SidebarSide::Right => (
+                    Position::new_absolute().right(0.0).top(0.0),
+                    hidden_offset * (1.0 - shown),
+                ),
+            };
+            rect()
+                .layer(Layer::OverlayLevel(CHROME_OVERLAY_LEVEL))
+                .position(position)
+                .height(Size::percent(100.0))
+                .padding(Gaps::new_all(ELEMENT_SEPARATION))
+                .offset_x(offset)
+                .child(
+                    rect()
+                        .height(Size::fill())
+                        .corner_radius(CornerRadius::new_all(COMPACT_RADIUS))
+                        .overflow(Overflow::Clip)
+                        .background(backdrop.clone())
+                        .border(
+                            Border::new()
+                                .width(1.0)
+                                .alignment(BorderAlignment::Inner)
+                                .fill(palette.page_card_border),
+                        )
+                        .shadow(Shadow::new().y(4.0).blur(18.0).color(Color::from_argb(90, 0, 0, 0)))
+                        .child(sidebar.clone()),
+                )
+        });
+
+        let toasts = rect()
+            .layer(Layer::OverlayLevel(CHROME_OVERLAY_LEVEL))
+            .position(match sidebar_side {
+                SidebarSide::Left => Position::new_absolute()
+                    .right(card_right + 12.0)
+                    .top(card_top + 12.0 + top_bar_offset(&top_bar)),
+                SidebarSide::Right => Position::new_absolute()
+                    .left(card_left + 12.0)
+                    .top(card_top + 12.0 + top_bar_offset(&top_bar)),
+            })
+            .child(ToastHost {
+                align_left: sidebar_side == SidebarSide::Right,
+            });
+
+        let body = if compact_sidebar {
+            rect()
                 .width(Size::fill())
                 .height(Size::flex(1.0))
                 .direction(Direction::Horizontal)
                 .content(Content::Flex)
                 .child(page_card)
-                .child(resize_handle)
-                .child(sidebar),
+        } else {
+            match layout.sidebar_side {
+                SidebarSide::Left => rect()
+                    .width(Size::fill())
+                    .height(Size::flex(1.0))
+                    .direction(Direction::Horizontal)
+                    .content(Content::Flex)
+                    .child(sidebar)
+                    .child(resize_handle)
+                    .child(page_card),
+                SidebarSide::Right => rect()
+                    .width(Size::fill())
+                    .height(Size::flex(1.0))
+                    .direction(Direction::Horizontal)
+                    .content(Content::Flex)
+                    .child(page_card)
+                    .child(resize_handle)
+                    .child(sidebar),
+            }
+        };
+
+        // Compact mode: the pointer reaching the sidebar's edge or the top edge slides that chrome out.
+        let on_global_pointer_move = move |e: Event<PointerEventData>| {
+            if !compact_sidebar && !compact_toolbar {
+                return;
+            }
+            let (x0, y0, width, _) = *shell_area.peek();
+            let x = e.global_location().x as f32 - x0;
+            let y = e.global_location().y as f32 - y0;
+            if compact_sidebar && let Some(state) = sidebar_state {
+                let reach = sidebar_width + 2.0 * ELEMENT_SEPARATION + COMPACT_SLACK;
+                let (at_edge, away) = match sidebar_side {
+                    SidebarSide::Left => (x <= COMPACT_EDGE, x > reach),
+                    SidebarSide::Right => (x >= width - COMPACT_EDGE, x < width - reach),
+                };
+                let mut revealed = state.compact_revealed;
+                if at_edge && x >= 0.0 && x <= width {
+                    revealed.set_if_modified(true);
+                } else if away && !sidebar_pinned {
+                    revealed.set_if_modified(false);
+                }
+            }
+            if compact_toolbar {
+                if (0.0..=COMPACT_EDGE).contains(&y) {
+                    toolbar_revealed.set_if_modified(true);
+                } else if y > TOP_TOOLBAR_HEIGHT + COMPACT_SLACK {
+                    toolbar_revealed.set_if_modified(false);
+                }
+            }
         };
 
         rect()
@@ -178,11 +332,26 @@ impl Component for WindowShell {
             .content(Content::Flex)
             .background(backdrop)
             .color(palette.text)
+            .on_sized(move |e: Event<SizedEventData>| {
+                let next = (e.area.min_x(), e.area.min_y(), e.area.width(), e.area.height());
+                if *shell_area.peek() != next {
+                    shell_area.set(next);
+                }
+            })
+            .on_global_pointer_move(on_global_pointer_move)
             .maybe_child(top_bar)
             .child(body)
+            .child(toasts)
+            .maybe_child(floating_sidebar)
+            .maybe_child(floating_top_bar)
     }
 
     fn render_key(&self) -> DiffKey {
         self.key.clone().or(self.default_key())
     }
+}
+
+/// Height the in-flow top toolbar takes above the page card, so toasts sit inside the card.
+fn top_bar_offset(top_bar: &Option<TopToolbar>) -> f32 {
+    if top_bar.is_some() { TOP_TOOLBAR_HEIGHT } else { 0.0 }
 }

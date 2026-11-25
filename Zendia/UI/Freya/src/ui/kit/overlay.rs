@@ -10,6 +10,7 @@
 use crate::ui::kit::controls::IconButton;
 use crate::ui::kit::icons::Icon;
 use crate::ui::kit::panel::GlassPanel;
+use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ThemeRole, motion, use_theme};
 use freya::animation::Ease;
 use freya::prelude::*;
@@ -229,7 +230,7 @@ impl Component for AnchoredPopover {
             .child(self.anchor.clone())
             .maybe_child(self.open.then(|| {
                 rect()
-                    .layer(Layer::Overlay)
+                    .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
                     .position(Position::new_global().top(0.0).left(0.0))
                     .width(Size::window_percent(100.0))
                     .height(Size::window_percent(100.0))
