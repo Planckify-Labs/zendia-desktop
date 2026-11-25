@@ -75,6 +75,13 @@ What to run after a change:
 - **Never set a new `CARGO_TARGET_DIR`** or build in a copy of the repo with its own `target`; that is another full Rust
   build of 9 GB or more. A git worktree must point `CARGO_TARGET_DIR` at `Zendia/target`.
 
+**Several checkouts sharing one target directory** (git worktrees for parallel work) can hand each other stale
+crates: a library built from one checkout has a newer timestamp, so cargo reuses it for another checkout whose source
+differs. The symptom is an error such as "no function named `x` found" for a function that is plainly in the source.
+After merging work from other checkouts, touch the sources of the crates that changed before building, for example
+`touch Zendia/Libraries/*/src/*.rs Zendia/Libraries/*/src/*/*.rs`, then build again. Do not clean the target
+directory.
+
 If a change does not show up, the build is not broken: check that you rebuilt the same profile you are running
 (release vs debug), that the build printed no error, and that you launched the binary from `Zendia/target/release/`.
 Cleaning caches is never the fix.
