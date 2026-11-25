@@ -143,6 +143,7 @@ pub fn parse_key_notation(notation: &str) -> Vec<KeyCap> {
 pub struct KeyLabel {
     notation: String,
     active: bool,
+    subtle: bool,
     key: DiffKey,
 }
 
@@ -157,6 +158,7 @@ impl KeyLabel {
         Self {
             notation: notation.into(),
             active: false,
+            subtle: false,
             key: DiffKey::None,
         }
     }
@@ -166,12 +168,65 @@ impl KeyLabel {
         self.active = active;
         self
     }
+
+    /// Renders the shortcut in Zen's subtle neutral pill style (used on command palette rows).
+    pub fn subtle(mut self, subtle: bool) -> Self {
+        self.subtle = subtle;
+        self
+    }
 }
 
 impl Component for KeyLabel {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let caps = parse_key_notation(&self.notation);
+
+        if self.subtle {
+            let joined = caps
+                .into_iter()
+                .map(|c| c.text.to_ascii_uppercase())
+                .collect::<Vec<_>>()
+                .join("+");
+            let (bg, border_color, fg) = if self.active {
+                (
+                    Color::from_argb(230, 255, 255, 255),
+                    Color::from_argb(120, 255, 255, 255),
+                    theme.color(ThemeRole::Accent),
+                )
+            } else if theme.scheme.is_dark() {
+                (
+                    Color::from_argb(18, 255, 255, 255),
+                    Color::from_argb(28, 255, 255, 255),
+                    Color::from_argb(190, 255, 255, 255),
+                )
+            } else {
+                (
+                    Color::from_argb(14, 0, 0, 0),
+                    Color::from_argb(28, 0, 0, 0),
+                    Color::from_argb(185, 20, 22, 32),
+                )
+            };
+            return rect()
+                .height(Size::px(22.0))
+                .padding(Gaps::new(0.0, 7.0, 0.0, 7.0))
+                .main_align(Alignment::center())
+                .cross_align(Alignment::center())
+                .corner_radius(CornerRadius::new_all(4.0))
+                .background(bg)
+                .border(
+                    Border::new()
+                        .width(1.0)
+                        .alignment(BorderAlignment::Inner)
+                        .fill(border_color),
+                )
+                .child(
+                    label()
+                        .text(joined)
+                        .font_size(10.0)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .color(fg),
+                );
+        }
 
         let hint_rgba = theme.rgba(ThemeRole::Hint);
         let text_rgba = theme.rgba(ThemeRole::Text);

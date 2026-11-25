@@ -12,9 +12,9 @@ leader = "<Space>"
 
 [[bindings]]
 keys = ["<C-t>", "<D-t>"]
-command = "tab.new"
-description = "New tab"
-args = { activate = true }
+command = "address_bar.open"
+description = "New tab (floating address bar)"
+args = { new_tab = true }
 
 [[bindings]]
 keys = ["<C-w>", "<D-w>"]
@@ -82,9 +82,34 @@ command = "window.new_blank"
 description = "New blank window"
 
 [[bindings]]
+keys = ["<C-k>", "<D-k>"]
+command = "palette.open"
+description = "Open command palette"
+
+[[bindings]]
 keys = ["<C-S-p>", "<D-S-p>"]
 command = "window.new_private"
 description = "New private window"
+
+[[bindings]]
+keys = ["<C-s>", "<D-s>"]
+command = "layout.toggle_compact_mode"
+description = "Toggle compact mode"
+
+[[bindings]]
+keys = ["<S-A-l>"]
+command = "library.toggle"
+description = "Open library"
+
+[[bindings]]
+keys = ["<C-S-*>", "<D-S-*>"]
+command = "split.new_empty"
+description = "New split view"
+
+[[bindings]]
+keys = ["<C-S-c>", "<D-S-c>"]
+command = "address_bar.copy_current_url"
+description = "Copy current URL"
 
 [[bindings]]
 keys = ["<C-S-y>", "<D-S-y>"]

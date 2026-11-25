@@ -15,6 +15,7 @@ pub use registry::{
 };
 
 use crate::gallery::sections::render_section;
+use crate::ui::chrome::address_bar::{AddressBarLayer, use_provide_address_bar_state};
 use crate::ui::chrome::menus::{MenuLayer, use_provide_menu_state};
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::{use_core, use_provide_core_with_observer};
@@ -55,10 +56,36 @@ impl App for GalleryApp {
         let gallery_core = use_hook(|| Arc::new(GalleryCore::new(initial_theme)));
         let menu_state = use_provide_menu_state();
         let sidebar_state = use_provide_sidebar_state();
+        let address_bar_state = use_provide_address_bar_state();
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
-                CoreEvent::AppMenuToggleRequested => menu_state.toggle_app_menu(None),
+                CoreEvent::LocationFocusRequested => {
+                    menu_state.close_all();
+                    let current_url = gallery_core
+                        .model()
+                        .active_tab()
+                        .map(|tab| tab.url.clone())
+                        .filter(|url| !url.is_empty() && url != "about:blank" && url != "about:newtab");
+                    address_bar_state.open_floating(false, current_url);
+                }
+                CoreEvent::AddressBarOpenRequested { new_tab, initial_query } => {
+                    menu_state.close_all();
+                    address_bar_state.open_floating(*new_tab, initial_query.clone());
+                }
+                CoreEvent::PaletteOpenRequested { initial_query } => {
+                    menu_state.close_all();
+                    address_bar_state.open_actions(initial_query.clone());
+                }
+                CoreEvent::SitePanelToggleRequested => {
+                    menu_state.close_all();
+                    address_bar_state.toggle_site_panel(None);
+                }
+                CoreEvent::AppMenuToggleRequested => {
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    menu_state.toggle_app_menu(None);
+                }
                 CoreEvent::AboutDialogRequested => menu_state.open_about(),
                 CoreEvent::ClipboardCopyRequested { text } if !text.is_empty() => {
                     let _ = freya::clipboard::Clipboard::set(text.clone());
@@ -109,6 +136,12 @@ impl App for GalleryApp {
             let core = core.clone();
             let keymap = keymap.clone();
             move |e: Event<KeyboardEventData>| {
+                if address_bar_state.is_open()
+                    && e.modifiers == Modifiers::CONTROL
+                    && matches!(e.code, Code::KeyN | Code::KeyP)
+                {
+                    return;
+                }
                 let _ = keymap.handle_global_key_down(&e, &core);
             }
         };
@@ -190,6 +223,8 @@ impl App for GalleryApp {
                                 .cursor(is_selected)
                                 .selected(is_selected)
                                 .on_press(move |_| {
+                                    address_bar_state.close();
+                                    address_bar_state.close_site_panel();
                                     active_section_id.set(section_id.to_string());
                                     active_state_id.set(default_state.to_string());
                                 })
@@ -284,6 +319,7 @@ impl App for GalleryApp {
                     .child(command_log_bar),
             )
             .child(MenuLayer)
+            .child(AddressBarLayer)
     }
 }
 

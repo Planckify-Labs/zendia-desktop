@@ -305,7 +305,8 @@ mod tests {
     fn loads_embedded_standard_profile() {
         let table = KeyTable::standard();
         assert!(!table.bindings().is_empty());
-        assert!(table.shortcut_for_command("tab.new").is_some());
+        assert!(table.shortcut_for_command("address_bar.open").is_some());
+        assert!(table.shortcut_for_command("palette.open").is_some());
         assert!(table.shortcut_for_command("tab.close").is_some());
         assert!(table.shortcut_for_command("tab.next").is_some());
         assert!(table.shortcut_for_command("tab.previous").is_some());

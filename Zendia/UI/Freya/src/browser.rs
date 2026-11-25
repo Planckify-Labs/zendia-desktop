@@ -11,6 +11,7 @@ use crate::hub::{self, startup};
 use crate::hub_adapter::HubTabAdapter;
 use crate::input;
 use crate::ui::chrome::WindowShell;
+use crate::ui::chrome::address_bar::{AddressBarLayer, use_provide_address_bar_state};
 use crate::ui::chrome::menus::{
     MenuLayer, MenuViewState, open_hub_context_menu, open_hub_select_dropdown, use_provide_menu_state,
 };
@@ -330,6 +331,7 @@ pub fn app() -> impl IntoElement {
     let keymap = use_provide_keymap();
     let menu_state = use_provide_menu_state();
     let sidebar_state = use_provide_sidebar_state();
+    let address_bar_state = use_provide_address_bar_state();
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -342,9 +344,29 @@ pub fn app() -> impl IntoElement {
                 }
             }
             CoreEvent::LocationFocusRequested => {
-                location_a11y_id.request_focus();
+                menu_state.close_all();
+                let current_url = stub_core
+                    .model()
+                    .active_tab()
+                    .map(|tab| tab.url.clone())
+                    .filter(|url| !url.is_empty() && url != "about:blank" && url != "about:newtab");
+                address_bar_state.open_floating(false, current_url);
+            }
+            CoreEvent::AddressBarOpenRequested { new_tab, initial_query } => {
+                menu_state.close_all();
+                address_bar_state.open_floating(*new_tab, initial_query.clone());
+            }
+            CoreEvent::PaletteOpenRequested { initial_query } => {
+                menu_state.close_all();
+                address_bar_state.open_actions(initial_query.clone());
+            }
+            CoreEvent::SitePanelToggleRequested => {
+                menu_state.close_all();
+                address_bar_state.toggle_site_panel(None);
             }
             CoreEvent::AppMenuToggleRequested => {
+                address_bar_state.close();
+                address_bar_state.close_site_panel();
                 menu_state.toggle_app_menu(None);
             }
             CoreEvent::AboutDialogRequested => {
@@ -439,6 +461,14 @@ pub fn app() -> impl IntoElement {
         let keymap = keymap.clone();
         move |e: Event<KeyboardEventData>| {
             track_modifiers(true, &e);
+            // While the floating address bar is open, let Ctrl+N / Ctrl+P navigate its list instead of triggering
+            // window.new / page.print.
+            if address_bar_state.is_open()
+                && e.modifiers == Modifiers::CONTROL
+                && matches!(e.code, Code::KeyN | Code::KeyP)
+            {
+                return;
+            }
             let _ = keymap.handle_global_key_down(&e, &core);
         }
     };
@@ -517,4 +547,5 @@ pub fn app() -> impl IntoElement {
         .on_global_key_up(on_global_key_up)
         .child(WindowShell::new(location, location_a11y_id, page_stage))
         .child(MenuLayer)
+        .child(AddressBarLayer)
 }

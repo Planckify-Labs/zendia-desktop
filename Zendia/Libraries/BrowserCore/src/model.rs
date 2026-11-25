@@ -9,8 +9,10 @@
 //! Views read this model to draw windows, tabs, spaces, panels, and service state. None of these types depend on any UI
 //! toolkit so headless runners and background services can share the crate.
 
+use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, ToolbarArea, ToolbarPlacementRules};
 use crate::events::Event;
+use crate::site_info::{SiteExtension, SiteInfo, origin_for_url};
 use std::collections::BTreeMap;
 
 /// Stable identifier for a browser window.
@@ -40,6 +42,10 @@ pub struct DownloadId(pub u64);
 /// Stable identifier for a browsing history entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HistoryEntryId(pub u64);
+
+/// Stable identifier for a saved bookmark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BookmarkId(pub u64);
 
 /// Stable identifier for an active media playback session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -274,6 +280,17 @@ pub struct HistoryEntry {
     pub title: String,
     pub visited_at_unix: u64,
     pub visit_count: u32,
+}
+
+/// A saved bookmark entry owned by the browser core.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bookmark {
+    pub id: BookmarkId,
+    pub url: String,
+    pub title: String,
+    pub favicon: Option<String>,
+    pub folder: Option<String>,
+    pub created_at_unix: u64,
 }
 
 /// Media currently playing in a tab, surfaced in the sidebar media controls.
@@ -571,6 +588,10 @@ pub struct BrowserModel {
     pub split_groups: Vec<SplitGroup>,
     pub downloads: Vec<Download>,
     pub history: Vec<HistoryEntry>,
+    pub bookmarks: Vec<Bookmark>,
+    pub search_engine: SearchEngine,
+    pub site_info: BTreeMap<String, SiteInfo>,
+    pub site_extensions: Vec<SiteExtension>,
     pub media_sessions: Vec<MediaSession>,
     pub sidebar_notifications: Vec<SidebarNotification>,
     pub show_essentials_promo: bool,
@@ -740,6 +761,37 @@ impl BrowserModel {
 
     pub fn service_state(&self, service: ServiceId) -> Option<&ServiceState> {
         self.services.iter().find(|state| state.service == service)
+    }
+
+    /// Returns whether `url` matches an existing bookmark in the core model.
+    pub fn is_url_bookmarked(&self, url: &str) -> bool {
+        let normalized = url.trim().trim_end_matches('/');
+        if normalized.is_empty() {
+            return false;
+        }
+        self.bookmarks
+            .iter()
+            .any(|b| b.url.trim().trim_end_matches('/').eq_ignore_ascii_case(normalized))
+    }
+
+    /// Returns the effective [`SiteInfo`] for `url`, combining per-origin overrides with bookmark status.
+    pub fn site_info_for_url(&self, url: &str) -> SiteInfo {
+        let origin = origin_for_url(url);
+        let mut info = self
+            .site_info
+            .get(&origin)
+            .cloned()
+            .unwrap_or_else(|| SiteInfo::for_url(url));
+        info.bookmarked = self.is_url_bookmarked(url);
+        info
+    }
+
+    /// Returns the effective [`SiteInfo`] for the active tab (or an internal `about:blank` fallback).
+    pub fn active_site_info(&self) -> SiteInfo {
+        match self.active_tab() {
+            Some(tab) => self.site_info_for_url(&tab.url),
+            None => SiteInfo::for_url("about:blank"),
+        }
     }
 
     /// Applies an event published by the core to keep a view's cached snapshot in sync.
@@ -932,8 +984,31 @@ impl BrowserModel {
                 self.zoom_level = *zoom_level;
                 true
             }
+            Event::SearchEngineChanged { engine } => {
+                self.search_engine = engine.clone();
+                true
+            }
+            Event::BookmarksChanged { bookmarks } => {
+                self.bookmarks = bookmarks.clone();
+                true
+            }
+            Event::SiteInfoUpdated { info } => {
+                self.site_info.insert(info.origin.clone(), info.clone());
+                true
+            }
+            Event::SiteDataCleared { origin } => {
+                if let Some(info) = self.site_info.get_mut(origin) {
+                    info.clear_data();
+                    true
+                } else {
+                    false
+                }
+            }
             Event::PanelToggled { .. }
             | Event::LocationFocusRequested
+            | Event::AddressBarOpenRequested { .. }
+            | Event::PaletteOpenRequested { .. }
+            | Event::SitePanelToggleRequested
             | Event::AppMenuToggleRequested
             | Event::AboutDialogRequested
             | Event::QuitRequested

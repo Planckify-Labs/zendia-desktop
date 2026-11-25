@@ -7,12 +7,15 @@
 //! Window shell chrome: window layout, toolbar layouts, vertical sidebar frame, menus and the about dialog.
 
 pub mod about;
+pub mod address_bar;
 pub mod layout;
 pub mod menus;
 pub mod sidebar;
 pub mod toolbar;
 pub mod window;
 
+#[allow(unused_imports)]
+pub use address_bar::{AddressBarLayer, AddressBarMode, AddressBarViewState, use_provide_address_bar_state};
 #[allow(unused_imports)]
 pub use layout::{ChromePalette, ToolbarSlots};
 #[allow(unused_imports)]

@@ -11,6 +11,7 @@ use crate::model::{
     AgentId, ChatSiteId, ConversationId, FolderId, NotificationId, SidebarSide, SpaceId, SplitDirection, TabId,
     TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
 };
+use crate::site_info::{PermissionState, SitePermissionKind};
 use std::fmt;
 
 /// Context-menu action applied to an HTML audio or video element.
@@ -68,6 +69,56 @@ pub enum Command {
     TabNext,
     TabPrevious,
     LocationFocus,
+    AddressBarOpen {
+        new_tab: bool,
+        initial_query: Option<String>,
+    },
+    AddressBarSubmit {
+        input: String,
+        new_tab: bool,
+    },
+    AddressBarSwitchToTab {
+        tab_id: TabId,
+    },
+    AddressBarCopyCurrentUrl,
+    PaletteOpen {
+        initial_query: Option<String>,
+    },
+    SitePanelToggle,
+    SitePermissionSet {
+        origin: Option<String>,
+        permission: SitePermissionKind,
+        state: PermissionState,
+    },
+    SiteTrackingProtectionToggle {
+        origin: Option<String>,
+    },
+    SiteClearData {
+        origin: Option<String>,
+    },
+    SiteBookmarkToggle {
+        tab_id: Option<TabId>,
+    },
+    SiteScreenshot {
+        tab_id: Option<TabId>,
+    },
+    SiteShare {
+        tab_id: Option<TabId>,
+    },
+    SiteEditStyle {
+        tab_id: Option<TabId>,
+    },
+    SiteReaderModeToggle {
+        tab_id: Option<TabId>,
+    },
+    SettingsSetSearchEngine {
+        name: String,
+        search_url: String,
+    },
+    LayoutToggleCompactMode,
+    SidebarToggleSide,
+    FolderCollapseAll,
+    FolderExpandAll,
     NavigationBack {
         tab_id: Option<TabId>,
     },
@@ -325,6 +376,25 @@ impl Command {
             Self::TabNext => "tab.next",
             Self::TabPrevious => "tab.previous",
             Self::LocationFocus => "location.focus",
+            Self::AddressBarOpen { .. } => "address_bar.open",
+            Self::AddressBarSubmit { .. } => "address_bar.submit",
+            Self::AddressBarSwitchToTab { .. } => "address_bar.switch_to_tab",
+            Self::AddressBarCopyCurrentUrl => "address_bar.copy_current_url",
+            Self::PaletteOpen { .. } => "palette.open",
+            Self::SitePanelToggle => "site.panel.toggle",
+            Self::SitePermissionSet { .. } => "site.permission.set",
+            Self::SiteTrackingProtectionToggle { .. } => "site.tracking_protection.toggle",
+            Self::SiteClearData { .. } => "site.clear_data",
+            Self::SiteBookmarkToggle { .. } => "site.bookmark.toggle",
+            Self::SiteScreenshot { .. } => "site.screenshot",
+            Self::SiteShare { .. } => "site.share",
+            Self::SiteEditStyle { .. } => "site.edit_style",
+            Self::SiteReaderModeToggle { .. } => "site.reader_mode.toggle",
+            Self::SettingsSetSearchEngine { .. } => "settings.set_search_engine",
+            Self::LayoutToggleCompactMode => "layout.toggle_compact_mode",
+            Self::SidebarToggleSide => "sidebar.toggle_side",
+            Self::FolderCollapseAll => "folder.collapse_all",
+            Self::FolderExpandAll => "folder.expand_all",
             Self::NavigationBack { .. } => "navigation.back",
             Self::NavigationForward { .. } => "navigation.forward",
             Self::NavigationReload { .. } => "navigation.reload",
@@ -422,6 +492,68 @@ impl Command {
             "tab.next" => Ok(Self::TabNext),
             "tab.previous" => Ok(Self::TabPrevious),
             "location.focus" => Ok(Self::LocationFocus),
+            "address_bar.open" => Ok(Self::AddressBarOpen {
+                new_tab: parse_bool_arg(name, args, "new_tab", false)?,
+                initial_query: find_arg(args, "initial_query").map(str::to_string),
+            }),
+            "address_bar.submit" => Ok(Self::AddressBarSubmit {
+                input: parse_required_string_arg(name, args, "input")?,
+                new_tab: parse_bool_arg(name, args, "new_tab", false)?,
+            }),
+            "address_bar.switch_to_tab" => Ok(Self::AddressBarSwitchToTab {
+                tab_id: TabId(parse_required_u64_arg(name, args, "tab_id")?),
+            }),
+            "address_bar.copy_current_url" => Ok(Self::AddressBarCopyCurrentUrl),
+            "palette.open" => Ok(Self::PaletteOpen {
+                initial_query: find_arg(args, "initial_query").map(str::to_string),
+            }),
+            "site.panel.toggle" => Ok(Self::SitePanelToggle),
+            "site.permission.set" => {
+                let raw_perm = parse_required_string_arg(name, args, "permission")?;
+                let permission = SitePermissionKind::parse(&raw_perm).ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("unknown site permission `{raw_perm}`"),
+                })?;
+                let raw_state = parse_required_string_arg(name, args, "state")?;
+                let state = PermissionState::parse(&raw_state).ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("unknown permission state `{raw_state}`"),
+                })?;
+                Ok(Self::SitePermissionSet {
+                    origin: find_arg(args, "origin").map(str::to_string),
+                    permission,
+                    state,
+                })
+            }
+            "site.tracking_protection.toggle" => Ok(Self::SiteTrackingProtectionToggle {
+                origin: find_arg(args, "origin").map(str::to_string),
+            }),
+            "site.clear_data" => Ok(Self::SiteClearData {
+                origin: find_arg(args, "origin").map(str::to_string),
+            }),
+            "site.bookmark.toggle" => Ok(Self::SiteBookmarkToggle {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "site.screenshot" => Ok(Self::SiteScreenshot {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "site.share" => Ok(Self::SiteShare {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "site.edit_style" => Ok(Self::SiteEditStyle {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "site.reader_mode.toggle" => Ok(Self::SiteReaderModeToggle {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "settings.set_search_engine" => Ok(Self::SettingsSetSearchEngine {
+                name: parse_required_string_arg(name, args, "name")?,
+                search_url: parse_required_string_arg(name, args, "search_url")?,
+            }),
+            "layout.toggle_compact_mode" => Ok(Self::LayoutToggleCompactMode),
+            "sidebar.toggle_side" => Ok(Self::SidebarToggleSide),
+            "folder.collapse_all" => Ok(Self::FolderCollapseAll),
+            "folder.expand_all" => Ok(Self::FolderExpandAll),
             "navigation.back" => Ok(Self::NavigationBack {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
             }),
@@ -762,6 +894,8 @@ pub enum ArgumentType {
     Float,
     ToolbarLayout,
     SidebarSide,
+    SitePermission,
+    PermissionState,
 }
 
 /// Schema entry describing one argument of a command.
@@ -877,6 +1011,178 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             name: "location.focus".to_string(),
             title: "Focus Location Bar".to_string(),
             description: "Move keyboard focus to the address bar".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "address_bar.open".to_string(),
+            title: "Open Floating Address Bar".to_string(),
+            description: "Open the floating address bar over the page".to_string(),
+            arguments: vec![
+                ArgumentSchema::new(
+                    "new_tab",
+                    ArgumentType::Bool,
+                    false,
+                    "Open submitted URL or search in a new tab",
+                ),
+                ArgumentSchema::new(
+                    "initial_query",
+                    ArgumentType::String,
+                    false,
+                    "Optional initial query text",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "address_bar.submit".to_string(),
+            title: "Submit Address Bar".to_string(),
+            description: "Navigate to a URL or search query in the current or a new tab".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("input", ArgumentType::String, true, "URL or search query text"),
+                ArgumentSchema::new(
+                    "new_tab",
+                    ArgumentType::Bool,
+                    false,
+                    "Whether to open the destination in a new tab",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "address_bar.switch_to_tab".to_string(),
+            title: "Switch to Open Tab".to_string(),
+            description: "Activate an open tab across spaces from the address bar".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "tab_id",
+                ArgumentType::TabId,
+                true,
+                "Tab to switch to",
+            )],
+        },
+        CommandDescriptor {
+            name: "address_bar.copy_current_url".to_string(),
+            title: "Copy Current URL".to_string(),
+            description: "Copy the active tab's URL to the clipboard".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "palette.open".to_string(),
+            title: "Open Command Palette".to_string(),
+            description: "Open the command palette in Actions mode".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "initial_query",
+                ArgumentType::String,
+                false,
+                "Optional initial filter query",
+            )],
+        },
+        CommandDescriptor {
+            name: "site.panel.toggle".to_string(),
+            title: "Toggle Site Data Panel".to_string(),
+            description: "Open or close the site security, permissions, and extensions panel".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "site.permission.set".to_string(),
+            title: "Set Site Permission".to_string(),
+            description: "Allow, block, or reset a permission for a site origin".to_string(),
+            arguments: vec![
+                ArgumentSchema::new(
+                    "origin",
+                    ArgumentType::String,
+                    false,
+                    "Target origin (defaults to active tab)",
+                ),
+                ArgumentSchema::new("permission", ArgumentType::SitePermission, true, "Permission category"),
+                ArgumentSchema::new(
+                    "state",
+                    ArgumentType::PermissionState,
+                    true,
+                    "Permission state (allow, block, prompt)",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "site.tracking_protection.toggle".to_string(),
+            title: "Toggle Tracking Protection".to_string(),
+            description: "Enable or disable tracking protection for the current site".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "origin",
+                ArgumentType::String,
+                false,
+                "Target origin (defaults to active tab)",
+            )],
+        },
+        CommandDescriptor {
+            name: "site.clear_data".to_string(),
+            title: "Clear Site Data".to_string(),
+            description: "Clear cookies and stored site data for the current site".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "origin",
+                ArgumentType::String,
+                false,
+                "Target origin (defaults to active tab)",
+            )],
+        },
+        CommandDescriptor {
+            name: "site.bookmark.toggle".to_string(),
+            title: "Toggle Page Bookmark".to_string(),
+            description: "Bookmark or unbookmark the active tab's page".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "site.screenshot".to_string(),
+            title: "Capture Screenshot".to_string(),
+            description: "Capture a screenshot of the current page".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "site.share".to_string(),
+            title: "Share Page".to_string(),
+            description: "Share or copy the current page link".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "site.edit_style".to_string(),
+            title: "Customize Site Style".to_string(),
+            description: "Open per-site appearance customization".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "site.reader_mode.toggle".to_string(),
+            title: "Toggle Reader Mode".to_string(),
+            description: "Toggle reader view for the active page".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "settings.set_search_engine".to_string(),
+            title: "Set Default Search Engine".to_string(),
+            description: "Set the default search engine used by the address bar".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("name", ArgumentType::String, true, "Display name of the search engine"),
+                ArgumentSchema::new("search_url", ArgumentType::String, true, "Search URL template with %s"),
+            ],
+        },
+        CommandDescriptor {
+            name: "layout.toggle_compact_mode".to_string(),
+            title: "Toggle Compact Mode".to_string(),
+            description: "Toggle compact mode in profile layout settings".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "sidebar.toggle_side".to_string(),
+            title: "Toggle Tabs on Right".to_string(),
+            description: "Move the vertical sidebar between left and right edges".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "folder.collapse_all".to_string(),
+            title: "Collapse All Folders".to_string(),
+            description: "Collapse every folder in the active space".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "folder.expand_all".to_string(),
+            title: "Expand All Folders".to_string(),
+            description: "Expand every folder in the active space".to_string(),
             arguments: Vec::new(),
         },
         CommandDescriptor {

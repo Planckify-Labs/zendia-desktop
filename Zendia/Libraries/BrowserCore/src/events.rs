@@ -6,11 +6,13 @@
 
 //! Event bus for notifying views and services when browser state changes.
 
+use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, SidePanelId};
 use crate::model::{
-    Conversation, Essential, Folder, FolderId, InputMode, LayoutSettings, NotificationId, PinnedTab, ServiceState,
-    SidebarNotification, Space, SpaceId, SplitGroup, Tab, TabId, ThemeSettings, WhichKeyState,
+    Bookmark, Conversation, Essential, Folder, FolderId, InputMode, LayoutSettings, NotificationId, PinnedTab,
+    ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, Tab, TabId, ThemeSettings, WhichKeyState,
 };
+use crate::site_info::SiteInfo;
 use std::fmt;
 use std::sync::Mutex;
 
@@ -79,6 +81,26 @@ pub enum Event {
         panel_id: SidePanelId,
     },
     LocationFocusRequested,
+    AddressBarOpenRequested {
+        new_tab: bool,
+        initial_query: Option<String>,
+    },
+    PaletteOpenRequested {
+        initial_query: Option<String>,
+    },
+    SitePanelToggleRequested,
+    SearchEngineChanged {
+        engine: SearchEngine,
+    },
+    BookmarksChanged {
+        bookmarks: Vec<Bookmark>,
+    },
+    SiteInfoUpdated {
+        info: SiteInfo,
+    },
+    SiteDataCleared {
+        origin: String,
+    },
     ModeChanged {
         mode: InputMode,
     },

@@ -11,23 +11,28 @@
 //! Without a [`TabSource`] (such as in the UI gallery or headless tests), tabs also come from sample data.
 
 use crate::BrowserCore;
+use crate::address_bar::{SearchEngine, builtin_palette_entries, resolve_navigation_url};
 use crate::commands::{Command, CommandDescriptor, CommandError, CommandResult, builtin_command_descriptors};
 use crate::contributions::{
-    ContributionId, ContributionSource, Contributions, MenuEntryKind, PaletteEntry, SidePanelEntry, SidePanelId,
-    SidePanelLayout, SidePanelSide, ToolbarArea, ToolbarItem, ToolbarItemKind, ToolbarPlacement, ToolbarPlacementRules,
+    ContributionId, ContributionSource, Contributions, MenuEntryKind, SidePanelEntry, SidePanelId, SidePanelLayout,
+    SidePanelSide, ToolbarArea, ToolbarItem, ToolbarItemKind, ToolbarPlacement, ToolbarPlacementRules,
 };
 use crate::events::{Event, EventBus, Subscription};
 use crate::menus::{APP_MENU_VIM_MODE_ID, builtin_menu_entries};
 use crate::model::{
-    Agent, AgentId, BrowserModel, ChatSite, ChatSiteId, Conversation, ConversationId, ConversationStatus,
-    ConversationStep, Download, DownloadId, DownloadStatus, Essential, Folder, FolderId, HistoryEntry, HistoryEntryId,
-    InputMode, LayoutSettings, MediaSession, MediaSessionId, ModelEffort, ModelId, ModelInfo, NotificationId,
-    PinnedTab, ServiceId, ServiceState, ServiceStatus, SidebarNotification, SidebarNotificationLink, SidebarSide,
-    Space, SpaceGradient, SpaceId, SplitDirection, SplitGroup, SplitGroupId, StepId, StepKind, StepStatus, Tab, TabId,
-    TabKind, TabMoveTarget, ThemeOverrides, ThemeScheme, ThemeSettings, ToolbarLayout, WhichKeyEntry, WhichKeyState,
-    Window, WindowId,
+    Agent, AgentId, Bookmark, BookmarkId, BrowserModel, ChatSite, ChatSiteId, Conversation, ConversationId,
+    ConversationStatus, ConversationStep, Download, DownloadId, DownloadStatus, Essential, Folder, FolderId,
+    HistoryEntry, HistoryEntryId, InputMode, LayoutSettings, MediaSession, MediaSessionId, ModelEffort, ModelId,
+    ModelInfo, NotificationId, PinnedTab, ServiceId, ServiceState, ServiceStatus, SidebarNotification,
+    SidebarNotificationLink, SidebarSide, Space, SpaceGradient, SpaceId, SplitDirection, SplitGroup, SplitGroupId,
+    StepId, StepKind, StepStatus, Tab, TabId, TabKind, TabMoveTarget, ThemeOverrides, ThemeScheme, ThemeSettings,
+    ToolbarLayout, WhichKeyEntry, WhichKeyState, Window, WindowId,
+};
+use crate::site_info::{
+    PermissionState, SiteDataSummary, SiteExtension, SiteInfo, SitePermission, SitePermissionKind, origin_for_url,
 };
 use crate::tab_source::{TabSource, TabUpdate};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 const MAX_ESSENTIALS: usize = 12;
@@ -140,6 +145,18 @@ impl StubBackend {
             }
         }
         self.bus.publish(Event::SidebarNotificationAdded { notification });
+    }
+
+    /// Updates the default search engine owned by the core (called by adapters reading profile settings).
+    pub fn set_search_engine(&self, engine: SearchEngine) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.model.search_engine == engine {
+                return;
+            }
+            state.model.search_engine = engine.clone();
+        }
+        self.bus.publish(Event::SearchEngineChanged { engine });
     }
 
     /// Shows or hides the empty-essentials promo card in the sidebar.
@@ -538,10 +555,15 @@ impl StubBackend {
                 message: "input must not be empty".to_string(),
             });
         }
-        let url = if trimmed.contains("://") || trimmed.starts_with("about:") {
-            trimmed.to_string()
-        } else {
-            format!("https://{trimmed}")
+        let engine = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.search_engine.clone()
+        };
+        let Some(url) = resolve_navigation_url(trimmed, &engine) else {
+            return Err(CommandError::InvalidArgument {
+                command: "navigation.load_url".to_string(),
+                message: "location input is empty".to_string(),
+            });
         };
         self.feed_tab_updated(
             tab_id,
@@ -553,6 +575,216 @@ impl StubBackend {
                 ..TabUpdate::default()
             },
         );
+        Ok(())
+    }
+
+    fn resolve_site_origin(&self, origin: Option<String>, command: &str) -> Result<(String, String), CommandError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(raw) = origin {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(CommandError::InvalidArgument {
+                    command: command.to_string(),
+                    message: "origin must not be empty".to_string(),
+                });
+            }
+            return Ok((origin_for_url(trimmed), trimmed.to_string()));
+        }
+        let url = state
+            .model
+            .active_tab()
+            .map(|tab| tab.url.clone())
+            .unwrap_or_else(|| "about:blank".to_string());
+        Ok((origin_for_url(&url), url))
+    }
+
+    fn handle_address_bar_submit(
+        &self,
+        input: String,
+        new_tab: bool,
+        tab_source: Option<Arc<dyn TabSource>>,
+    ) -> CommandResult {
+        let (resolved, active_tab) = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(url) = resolve_navigation_url(&input, &state.model.search_engine) else {
+                return Err(CommandError::InvalidArgument {
+                    command: "address_bar.submit".to_string(),
+                    message: "address bar input is empty".to_string(),
+                });
+            };
+            (url, state.model.active_tab)
+        };
+        if new_tab {
+            if let Some(source) = tab_source {
+                source.new_tab(Some(&resolved), active_tab, true)
+            } else {
+                self.handle_stub_tab_new(Some(resolved), active_tab, true)
+            }
+        } else {
+            let target = self.resolve_target_tab(None, "address_bar.submit")?;
+            if let Some(source) = tab_source {
+                source.load_url(target, &resolved)
+            } else {
+                self.handle_stub_load_url(target, resolved)
+            }
+        }
+    }
+
+    fn handle_address_bar_switch_to_tab(&self, tab_id: TabId, tab_source: Option<Arc<dyn TabSource>>) -> CommandResult {
+        let space_switch = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(tab) = state.model.tab(tab_id).cloned() else {
+                return Err(CommandError::TargetNotFound {
+                    command: "address_bar.switch_to_tab".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            if let Some(space_id) = tab.space_id
+                && state.model.active_space != Some(space_id)
+            {
+                state.model.active_space = Some(space_id);
+                if let Some(window) = state.model.windows.first_mut() {
+                    window.active_space = Some(space_id);
+                }
+                Some(space_id)
+            } else {
+                None
+            }
+        };
+        if let Some(space_id) = space_switch {
+            self.bus.publish(Event::SpaceSwitched { space_id });
+        }
+        if let Some(source) = tab_source {
+            source.activate_tab(tab_id)
+        } else {
+            self.feed_tab_activated(Some(tab_id));
+            Ok(())
+        }
+    }
+
+    fn handle_site_permission_set(
+        &self,
+        origin: Option<String>,
+        permission: SitePermissionKind,
+        perm_state: PermissionState,
+    ) -> CommandResult {
+        let (origin_key, url) = self.resolve_site_origin(origin, "site.permission.set")?;
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let bookmarked = state.model.is_url_bookmarked(&url);
+            let entry = state
+                .model
+                .site_info
+                .entry(origin_key)
+                .or_insert_with(|| SiteInfo::for_url(&url));
+            entry.set_permission(permission, perm_state);
+            entry.bookmarked = bookmarked;
+            entry.clone()
+        };
+        self.bus.publish(Event::SiteInfoUpdated { info: updated });
+        Ok(())
+    }
+
+    fn handle_site_tracking_protection_toggle(&self, origin: Option<String>) -> CommandResult {
+        let (origin_key, url) = self.resolve_site_origin(origin, "site.tracking_protection.toggle")?;
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let bookmarked = state.model.is_url_bookmarked(&url);
+            let entry = state
+                .model
+                .site_info
+                .entry(origin_key)
+                .or_insert_with(|| SiteInfo::for_url(&url));
+            entry.tracking_protection_enabled = !entry.tracking_protection_enabled;
+            entry.bookmarked = bookmarked;
+            entry.clone()
+        };
+        self.bus.publish(Event::SiteInfoUpdated { info: updated });
+        Ok(())
+    }
+
+    fn handle_site_clear_data(&self, origin: Option<String>) -> CommandResult {
+        let (origin_key, url) = self.resolve_site_origin(origin, "site.clear_data")?;
+        let updated = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let bookmarked = state.model.is_url_bookmarked(&url);
+            let entry = state
+                .model
+                .site_info
+                .entry(origin_key.clone())
+                .or_insert_with(|| SiteInfo::for_url(&url));
+            entry.clear_data();
+            entry.bookmarked = bookmarked;
+            entry.clone()
+        };
+        self.bus.publish(Event::SiteDataCleared { origin: origin_key });
+        self.bus.publish(Event::SiteInfoUpdated { info: updated });
+        Ok(())
+    }
+
+    fn handle_site_bookmark_toggle(&self, tab_id: Option<TabId>) -> CommandResult {
+        let target = self.resolve_target_tab(tab_id, "site.bookmark.toggle")?;
+        let (bookmarks, updated_site) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(tab) = state.model.tab(target).cloned() else {
+                return Err(CommandError::TargetNotFound {
+                    command: "site.bookmark.toggle".to_string(),
+                    target: format!("tab {}", target.0),
+                });
+            };
+            let normalized = tab.url.trim().trim_end_matches('/').to_string();
+            if let Some(pos) = state
+                .model
+                .bookmarks
+                .iter()
+                .position(|b| b.url.trim().trim_end_matches('/').eq_ignore_ascii_case(&normalized))
+            {
+                state.model.bookmarks.remove(pos);
+            } else {
+                let next_id = state.model.bookmarks.iter().map(|b| b.id.0).max().unwrap_or(0) + 1;
+                state.model.bookmarks.push(Bookmark {
+                    id: BookmarkId(next_id),
+                    url: tab.url.clone(),
+                    title: tab.display_title(),
+                    favicon: tab.favicon.clone(),
+                    folder: None,
+                    created_at_unix: 1_764_000_000,
+                });
+            }
+            let bookmarked = state.model.is_url_bookmarked(&tab.url);
+            let origin_key = origin_for_url(&tab.url);
+            let updated_site = {
+                let entry = state
+                    .model
+                    .site_info
+                    .entry(origin_key)
+                    .or_insert_with(|| SiteInfo::for_url(&tab.url));
+                entry.bookmarked = bookmarked;
+                entry.clone()
+            };
+            (state.model.bookmarks.clone(), updated_site)
+        };
+        self.bus.publish(Event::BookmarksChanged { bookmarks });
+        self.bus.publish(Event::SiteInfoUpdated { info: updated_site });
+        Ok(())
+    }
+
+    fn handle_folders_set_all_collapsed(&self, collapsed: bool) -> CommandResult {
+        let changed: Vec<Folder> = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let active_space = state.model.active_space;
+            let mut updated = Vec::new();
+            for folder in &mut state.model.folders {
+                if (active_space.is_none() || Some(folder.space_id) == active_space) && folder.collapsed != collapsed {
+                    folder.collapsed = collapsed;
+                    updated.push(folder.clone());
+                }
+            }
+            updated
+        };
+        for folder in changed {
+            self.bus.publish(Event::FolderUpdated { folder });
+        }
         Ok(())
     }
 
@@ -1810,6 +2042,100 @@ impl BrowserCore for StubBackend {
                 self.bus.publish(Event::LocationFocusRequested);
                 Ok(())
             }
+            Command::AddressBarOpen { new_tab, initial_query } => {
+                self.bus
+                    .publish(Event::AddressBarOpenRequested { new_tab, initial_query });
+                Ok(())
+            }
+            Command::AddressBarSubmit { input, new_tab } => self.handle_address_bar_submit(input, new_tab, tab_source),
+            Command::AddressBarSwitchToTab { tab_id } => self.handle_address_bar_switch_to_tab(tab_id, tab_source),
+            Command::AddressBarCopyCurrentUrl => {
+                let url = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.active_tab().map(|tab| tab.url.clone()).unwrap_or_default()
+                };
+                if !url.is_empty() {
+                    self.bus.publish(Event::ClipboardCopyRequested { text: url });
+                }
+                Ok(())
+            }
+            Command::PaletteOpen { initial_query } => {
+                self.bus.publish(Event::PaletteOpenRequested { initial_query });
+                Ok(())
+            }
+            Command::SitePanelToggle => {
+                self.bus.publish(Event::SitePanelToggleRequested);
+                Ok(())
+            }
+            Command::SitePermissionSet {
+                origin,
+                permission,
+                state,
+            } => self.handle_site_permission_set(origin, permission, state),
+            Command::SiteTrackingProtectionToggle { origin } => self.handle_site_tracking_protection_toggle(origin),
+            Command::SiteClearData { origin } => self.handle_site_clear_data(origin),
+            Command::SiteBookmarkToggle { tab_id } => self.handle_site_bookmark_toggle(tab_id),
+            Command::SiteScreenshot { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                eprintln!(
+                    "zendia: stub site.screenshot for tab {} — capture service not connected yet",
+                    target.0
+                );
+                Ok(())
+            }
+            Command::SiteShare { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                let url = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.tab(target).map(|tab| tab.url.clone()).unwrap_or_default()
+                };
+                if !url.is_empty() {
+                    self.bus.publish(Event::ClipboardCopyRequested { text: url });
+                }
+                Ok(())
+            }
+            Command::SiteEditStyle { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                eprintln!(
+                    "zendia: stub site.edit_style for tab {} — appearance editor not connected yet",
+                    target.0
+                );
+                Ok(())
+            }
+            Command::SiteReaderModeToggle { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                eprintln!(
+                    "zendia: stub site.reader_mode.toggle for tab {} — reader mode not connected yet",
+                    target.0
+                );
+                Ok(())
+            }
+            Command::SettingsSetSearchEngine {
+                name: engine_name,
+                search_url,
+            } => {
+                if engine_name.trim().is_empty() || search_url.trim().is_empty() {
+                    return Err(CommandError::InvalidArgument {
+                        command: name,
+                        message: "search engine name and search_url must not be empty".to_string(),
+                    });
+                }
+                self.set_search_engine(SearchEngine::new(engine_name.trim(), search_url.trim()));
+                Ok(())
+            }
+            Command::LayoutToggleCompactMode => {
+                let current = self.model().layout.compact_mode;
+                self.handle_layout_set_compact_mode(!current)
+            }
+            Command::SidebarToggleSide => {
+                let next = match self.model().layout.sidebar_side {
+                    SidebarSide::Left => SidebarSide::Right,
+                    SidebarSide::Right => SidebarSide::Left,
+                };
+                self.handle_sidebar_set_side(next)
+            }
+            Command::FolderCollapseAll => self.handle_folders_set_all_collapsed(true),
+            Command::FolderExpandAll => self.handle_folders_set_all_collapsed(false),
             Command::NavigationBack { tab_id } => {
                 let target = self.resolve_target_tab(tab_id, &name)?;
                 if let Some(source) = tab_source {
@@ -2384,41 +2710,7 @@ fn sample_contributions() -> Contributions {
             },
         ],
         menu_entries: builtin_menu_entries(false, "ChatGPT", 0),
-        palette_entries: vec![
-            PaletteEntry {
-                id: ContributionId::new("zendia.palette.new_tab"),
-                title: "New Tab".to_string(),
-                detail: Some("Open a new tab in the current space".to_string()),
-                category: "Tabs".to_string(),
-                icon: Some("plus".to_string()),
-                command: "tab.new".to_string(),
-                command_args: Vec::new(),
-                shortcut_hint: Some("Ctrl+T".to_string()),
-                source: ContributionSource::BuiltIn,
-            },
-            PaletteEntry {
-                id: ContributionId::new("zendia.palette.toggle_chat"),
-                title: "Toggle Agent Panel".to_string(),
-                detail: Some("Open or close the active agent conversation".to_string()),
-                category: "Agents".to_string(),
-                icon: Some("chat".to_string()),
-                command: "panel.toggle".to_string(),
-                command_args: vec![("panel_id".to_string(), "zendia.agent".to_string())],
-                shortcut_hint: None,
-                source: ContributionSource::BuiltIn,
-            },
-            PaletteEntry {
-                id: ContributionId::new("zendia.palette.toggle_webchat"),
-                title: "Toggle Web Chat Panel".to_string(),
-                detail: Some("Open ChatGPT, Gemini, or another chat site".to_string()),
-                category: "Web chat".to_string(),
-                icon: Some("webchat".to_string()),
-                command: "panel.toggle".to_string(),
-                command_args: vec![("panel_id".to_string(), "zendia.webchat".to_string())],
-                shortcut_hint: None,
-                source: ContributionSource::BuiltIn,
-            },
-        ],
+        palette_entries: builtin_palette_entries(),
         side_panels: vec![
             SidePanelEntry {
                 id: SidePanelId::new("zendia.agent"),
@@ -2885,7 +3177,99 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
             visited_at_unix: 1_763_986_800,
             visit_count: 5,
         },
+        HistoryEntry {
+            id: HistoryEntryId(3),
+            url: "https://doc.rust-lang.org/std/".to_string(),
+            title: "Rust Standard Library".to_string(),
+            visited_at_unix: 1_763_982_000,
+            visit_count: 9,
+        },
+        HistoryEntry {
+            id: HistoryEntryId(4),
+            url: "https://zendia.local/changelog".to_string(),
+            title: "Zendia Changelog".to_string(),
+            visited_at_unix: 1_763_978_400,
+            visit_count: 7,
+        },
     ];
+
+    let bookmarks = vec![
+        Bookmark {
+            id: BookmarkId(1),
+            url: "https://wikipedia.org/".to_string(),
+            title: "Wikipedia".to_string(),
+            favicon: Some("book".to_string()),
+            folder: Some("Top Sites".to_string()),
+            created_at_unix: 1_763_900_000,
+        },
+        Bookmark {
+            id: BookmarkId(2),
+            url: "https://youtube.com/".to_string(),
+            title: "YouTube".to_string(),
+            favicon: Some("media-play".to_string()),
+            folder: Some("Top Sites".to_string()),
+            created_at_unix: 1_763_900_100,
+        },
+        Bookmark {
+            id: BookmarkId(3),
+            url: "https://reddit.com/".to_string(),
+            title: "Reddit".to_string(),
+            favicon: Some("flame".to_string()),
+            folder: Some("Top Sites".to_string()),
+            created_at_unix: 1_763_900_200,
+        },
+        Bookmark {
+            id: BookmarkId(4),
+            url: "https://addons.zendia.org/".to_string(),
+            title: "Add-ons for Zendia".to_string(),
+            favicon: Some("extension".to_string()),
+            folder: Some("Top Sites".to_string()),
+            created_at_unix: 1_763_900_300,
+        },
+        Bookmark {
+            id: BookmarkId(5),
+            url: "https://zendia.local/docs".to_string(),
+            title: "Zendia Documentation".to_string(),
+            favicon: Some("book".to_string()),
+            folder: Some("Engineering".to_string()),
+            created_at_unix: 1_763_910_000,
+        },
+    ];
+
+    let mut site_info = BTreeMap::new();
+    let mut zendia_site = SiteInfo::for_url("https://zendia.local/docs");
+    zendia_site.bookmarked = true;
+    zendia_site.data = SiteDataSummary {
+        cookie_count: 4,
+        storage_bytes: 128 * 1024,
+    };
+    zendia_site.permissions = vec![
+        SitePermission {
+            kind: SitePermissionKind::Camera,
+            state: PermissionState::Allow,
+        },
+        SitePermission {
+            kind: SitePermissionKind::Location,
+            state: PermissionState::Block,
+        },
+        SitePermission {
+            kind: SitePermissionKind::Notifications,
+            state: PermissionState::Allow,
+        },
+    ];
+    site_info.insert(zendia_site.origin.clone(), zendia_site);
+
+    let site_extensions = vec![SiteExtension {
+        id: ContributionId::new("ext.ublock_origin"),
+        name: "uBlock Origin".to_string(),
+        icon: "tracking-protection-fill".to_string(),
+        enabled: true,
+        has_site_access: true,
+        command: "extension.ublock.toggle".to_string(),
+        source: ContributionSource::Extension {
+            extension_id: "ublock-origin@zendia".to_string(),
+        },
+    }];
 
     let claude_agent = AgentId::new("claude-code");
     let codex_agent = AgentId::new("codex");
@@ -3041,6 +3425,10 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         split_groups,
         downloads,
         history,
+        bookmarks,
+        search_engine: SearchEngine::default(),
+        site_info,
+        site_extensions,
         media_sessions,
         sidebar_notifications: Vec::new(),
         show_essentials_promo: false,
@@ -4189,6 +4577,158 @@ mod tests {
             .unwrap(),
             Command::NotificationDismiss {
                 notification_id: NotificationId(1),
+            }
+        );
+    }
+
+    #[test]
+    fn address_bar_palette_and_site_commands_handle_stub_state_and_events() {
+        let core = StubBackend::new();
+        let sub = core.subscribe();
+
+        // View-level open requests emit their events.
+        core.invoke(Command::AddressBarOpen {
+            new_tab: true,
+            initial_query: None,
+        })
+        .unwrap();
+        assert_eq!(
+            sub.try_recv().unwrap(),
+            Event::AddressBarOpenRequested {
+                new_tab: true,
+                initial_query: None
+            }
+        );
+
+        core.invoke(Command::PaletteOpen {
+            initial_query: Some("theme".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            sub.try_recv().unwrap(),
+            Event::PaletteOpenRequested {
+                initial_query: Some("theme".to_string())
+            }
+        );
+
+        core.invoke(Command::SitePanelToggle).unwrap();
+        assert_eq!(sub.try_recv().unwrap(), Event::SitePanelToggleRequested);
+
+        // Search engine setting updates core state and governs address_bar.submit.
+        core.invoke(Command::SettingsSetSearchEngine {
+            name: "DuckDuckGo".to_string(),
+            search_url: "https://duckduckgo.com/?q=%s".to_string(),
+        })
+        .unwrap();
+        assert_eq!(core.model().search_engine.name, "DuckDuckGo");
+        assert!(matches!(sub.try_recv().unwrap(), Event::SearchEngineChanged { .. }));
+
+        let before_tabs = core.model().tabs.len();
+        core.invoke(Command::AddressBarSubmit {
+            input: "rust language".to_string(),
+            new_tab: true,
+        })
+        .unwrap();
+        assert_eq!(core.model().tabs.len(), before_tabs + 1);
+        assert_eq!(
+            core.model().active_tab().unwrap().url,
+            "https://duckduckgo.com/?q=rust+language"
+        );
+        // Drain tab opened & activated events.
+        while sub.try_recv().is_ok() {}
+
+        // Switch to tab across spaces switches space and activates target tab.
+        let work_tab_id = TabId(14);
+        core.invoke(Command::AddressBarSwitchToTab { tab_id: work_tab_id })
+            .unwrap();
+        assert_eq!(core.model().active_space, Some(SpaceId(2)));
+        assert_eq!(core.model().active_tab, Some(work_tab_id));
+        while sub.try_recv().is_ok() {}
+
+        // Site permissions, tracking protection, clear data, and bookmarks.
+        core.invoke(Command::SitePermissionSet {
+            origin: None,
+            permission: SitePermissionKind::Microphone,
+            state: PermissionState::Allow,
+        })
+        .unwrap();
+        assert_eq!(
+            core.model()
+                .active_site_info()
+                .permission_state(SitePermissionKind::Microphone),
+            PermissionState::Allow
+        );
+        assert!(matches!(sub.try_recv().unwrap(), Event::SiteInfoUpdated { .. }));
+
+        let tp_before = core.model().active_site_info().tracking_protection_enabled;
+        core.invoke(Command::SiteTrackingProtectionToggle { origin: None })
+            .unwrap();
+        assert_eq!(core.model().active_site_info().tracking_protection_enabled, !tp_before);
+        assert!(matches!(sub.try_recv().unwrap(), Event::SiteInfoUpdated { .. }));
+
+        core.invoke(Command::SiteClearData { origin: None }).unwrap();
+        assert!(core.model().active_site_info().data.is_empty());
+        assert!(matches!(sub.try_recv().unwrap(), Event::SiteDataCleared { .. }));
+        assert!(matches!(sub.try_recv().unwrap(), Event::SiteInfoUpdated { .. }));
+
+        let was_bookmarked = core.model().active_site_info().bookmarked;
+        core.invoke(Command::SiteBookmarkToggle { tab_id: None }).unwrap();
+        assert_eq!(core.model().active_site_info().bookmarked, !was_bookmarked);
+        while sub.try_recv().is_ok() {}
+
+        // Action row commands and global action helpers.
+        core.invoke(Command::SiteShare { tab_id: None }).unwrap();
+        assert!(matches!(sub.try_recv().unwrap(), Event::ClipboardCopyRequested { .. }));
+        core.invoke(Command::SiteScreenshot { tab_id: None }).unwrap();
+        core.invoke(Command::SiteEditStyle { tab_id: None }).unwrap();
+        core.invoke(Command::SiteReaderModeToggle { tab_id: None }).unwrap();
+
+        let compact_before = core.model().layout.compact_mode;
+        core.invoke(Command::LayoutToggleCompactMode).unwrap();
+        assert_eq!(core.model().layout.compact_mode, !compact_before);
+
+        let side_before = core.model().layout.sidebar_side;
+        core.invoke(Command::SidebarToggleSide).unwrap();
+        assert_ne!(core.model().layout.sidebar_side, side_before);
+
+        // Command descriptors and parsing round-trip.
+        let names: Vec<String> = core.commands().into_iter().map(|d| d.name).collect();
+        for required in [
+            "address_bar.open",
+            "address_bar.submit",
+            "address_bar.switch_to_tab",
+            "address_bar.copy_current_url",
+            "palette.open",
+            "site.panel.toggle",
+            "site.permission.set",
+            "site.tracking_protection.toggle",
+            "site.clear_data",
+            "site.bookmark.toggle",
+            "site.screenshot",
+            "site.share",
+            "site.edit_style",
+            "site.reader_mode.toggle",
+            "settings.set_search_engine",
+            "layout.toggle_compact_mode",
+            "sidebar.toggle_side",
+            "folder.collapse_all",
+            "folder.expand_all",
+        ] {
+            assert!(names.iter().any(|n| n == required), "missing descriptor `{required}`");
+        }
+        assert_eq!(
+            Command::from_name_and_args(
+                "site.permission.set",
+                &[
+                    ("permission".to_string(), "camera".to_string()),
+                    ("state".to_string(), "block".to_string()),
+                ]
+            )
+            .unwrap(),
+            Command::SitePermissionSet {
+                origin: None,
+                permission: SitePermissionKind::Camera,
+                state: PermissionState::Block,
             }
         );
     }

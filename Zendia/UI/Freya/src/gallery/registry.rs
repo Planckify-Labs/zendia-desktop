@@ -366,6 +366,60 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "address-bar",
+        title: "Address bar",
+        phase: 3,
+        icon: "search-glass",
+        summary: "Floating address bar, ranked results (search, URL, tabs, bookmarks, history, actions), Actions command palette, and Site Data Panel.",
+        states: &[
+            GalleryStateSpec {
+                id: "floating-empty",
+                label: "Floating Empty",
+                description: "Centered floating address bar opened empty for a new tab showing top site suggestions.",
+            },
+            GalleryStateSpec {
+                id: "floating-results",
+                label: "Results: Architecture",
+                description: "Floating address bar querying \"Architecture\" with highlighted search row and Switch to Tab row.",
+            },
+            GalleryStateSpec {
+                id: "results-mixed",
+                label: "Results: URL & Mixed",
+                description: "Direct URL visit row paired with matching open tabs, bookmarks, and history entries.",
+            },
+            GalleryStateSpec {
+                id: "actions-unfiltered",
+                label: "Actions Unfiltered",
+                description: "Command palette (Actions mode) with Zen global actions and active keymap labels.",
+            },
+            GalleryStateSpec {
+                id: "actions-filtered",
+                label: "Actions Filtered",
+                description: "Command palette filtered by \"tab\" showing fuzzy-ranked command matches.",
+            },
+            GalleryStateSpec {
+                id: "actions-empty",
+                label: "Actions No Match",
+                description: "Command palette empty state when no command matches the typed filter.",
+            },
+            GalleryStateSpec {
+                id: "site-not-secure",
+                label: "Site Panel (HTTP)",
+                description: "Site Data Panel on a not-secure http:// page with action row, extensions, tracking protection, and warning badge.",
+            },
+            GalleryStateSpec {
+                id: "site-secure-perms",
+                label: "Site Panel (HTTPS)",
+                description: "Site Data Panel on a secure https:// page with granted/blocked permissions, cookies, and bookmarked state.",
+            },
+            GalleryStateSpec {
+                id: "site-internal",
+                label: "Site Panel (Internal)",
+                description: "Site Data Panel on an internal about:newtab page.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
@@ -585,6 +639,26 @@ fn format_command_detail(command: &Command) -> String {
         Command::TabClose { tab_id, force } => format!("tab={tab_id:?} force={force}"),
         Command::TabActivate { tab_id } => format!("tab={}", tab_id.0),
         Command::NavigationLoadUrl { input, .. } => input.clone(),
+        Command::AddressBarOpen { new_tab, initial_query } => {
+            format!("new_tab={new_tab} query={initial_query:?}")
+        }
+        Command::AddressBarSubmit { input, new_tab } => format!("\"{input}\" new_tab={new_tab}"),
+        Command::AddressBarSwitchToTab { tab_id } => format!("tab={}", tab_id.0),
+        Command::PaletteOpen { initial_query } => format!("query={initial_query:?}"),
+        Command::SitePermissionSet {
+            origin,
+            permission,
+            state,
+        } => format!("{}={} origin={origin:?}", permission.as_str(), state.as_str()),
+        Command::SiteTrackingProtectionToggle { origin } | Command::SiteClearData { origin } => {
+            format!("origin={origin:?}")
+        }
+        Command::SiteBookmarkToggle { tab_id }
+        | Command::SiteScreenshot { tab_id }
+        | Command::SiteShare { tab_id }
+        | Command::SiteEditStyle { tab_id }
+        | Command::SiteReaderModeToggle { tab_id } => format!("tab={tab_id:?}"),
+        Command::SettingsSetSearchEngine { name, search_url } => format!("{name} ({search_url})"),
         Command::SpaceSwitch { space_id } => format!("space={}", space_id.0),
         Command::SpaceClearTabs { space_id } => format!("space={space_id:?}"),
         Command::TabPin { tab_id }

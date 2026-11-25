@@ -438,7 +438,10 @@ pub fn builtin_app_menu_entries(vim_mode_enabled: bool) -> Vec<MenuEntry> {
     let loc = MenuLocation::AppMenu;
     let mut entries = vec![
         // Group: new
-        menu_entry("zendia.app.new_tab", loc, "New Tab", Some("tab"), "tab.new", "new", 10),
+        MenuEntry {
+            shortcut_hint: Some("Ctrl+T".to_string()),
+            ..menu_entry("zendia.app.new_tab", loc, "New Tab", Some("tab"), "tab.new", "new", 10)
+        },
         menu_entry(
             "zendia.app.new_window",
             loc,

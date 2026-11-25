@@ -13,10 +13,12 @@
 //!
 //! See `Zendia/Documentation/Architecture.md`, "The command layer".
 
+pub mod address_bar;
 pub mod commands;
 pub mod events;
 pub mod menus;
 pub mod model;
+pub mod site_info;
 pub mod stub;
 pub mod tab_source;
 

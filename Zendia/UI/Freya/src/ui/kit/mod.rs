@@ -15,6 +15,7 @@ pub mod key_label;
 pub mod list_row;
 pub mod overlay;
 pub mod panel;
+pub mod picker;
 pub mod transitions;
 
 pub use controls::{IconButton, KitChip, KitSlider, KitSwitch};
@@ -24,4 +25,5 @@ pub use key_label::{KeyCap, KeyLabel, parse_key_notation};
 pub use list_row::ListRow;
 pub use overlay::{AnchoredPopover, ConfirmationCard, Toast};
 pub use panel::{GlassPanel, Pill};
+pub use picker::{PickerItem, PickerList};
 pub use transitions::{FadeTransition, SlideDirection, SlideTransition};

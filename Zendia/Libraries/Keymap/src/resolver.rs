@@ -159,8 +159,11 @@ mod tests {
         let new_tab = resolver.resolve(&table, KeyStroke::from_str("<C-t>").unwrap());
         assert_eq!(
             new_tab,
-            Resolution::Matched(CommandInvocation::new("tab.new").with_arg("activate", ArgValue::Bool(true)))
+            Resolution::Matched(CommandInvocation::new("address_bar.open").with_arg("new_tab", ArgValue::Bool(true)))
         );
+
+        let palette = resolver.resolve(&table, KeyStroke::from_str("<C-k>").unwrap());
+        assert_eq!(palette, Resolution::Matched(CommandInvocation::new("palette.open")));
 
         let hard_reload = resolver.resolve(&table, KeyStroke::from_str("<C-S-r>").unwrap());
         assert_eq!(

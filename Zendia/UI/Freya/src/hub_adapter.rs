@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use zendia_browser_core::BrowserCore;
+use zendia_browser_core::address_bar::SearchEngine;
 use zendia_browser_core::commands::{CommandError, CommandResult, MediaAction};
 use zendia_browser_core::model::{Tab, TabId, TabKind};
 use zendia_browser_core::stub::StubBackend;
@@ -43,6 +44,10 @@ pub struct HubTabAdapter {
 
 impl HubTabAdapter {
     pub fn new(core: Arc<StubBackend>, device_pixel_ratio: f64) -> Self {
+        // Seed the browser core with the search engine Ladybird's settings configured so result providers and
+        // address_bar.submit use the user's real default engine.
+        let engine = SearchEngine::from_url(&startup().settings.search_url);
+        core.set_search_engine(engine);
         Self {
             core,
             viewport: Mutex::new(ViewportState {
@@ -68,20 +73,8 @@ impl HubTabAdapter {
     }
 
     pub fn search_engine_name(&self) -> Option<String> {
-        let url = &startup().settings.search_url;
-        if url.contains("google.") {
-            Some("Google".to_string())
-        } else if url.contains("duckduckgo.") {
-            Some("DuckDuckGo".to_string())
-        } else if url.contains("kagi.") {
-            Some("Kagi".to_string())
-        } else if url.contains("bing.") {
-            Some("Bing".to_string())
-        } else if url.contains("brave.") {
-            Some("Brave".to_string())
-        } else {
-            Some("Web".to_string())
-        }
+        let name = self.core.model().search_engine.name;
+        if name.is_empty() { None } else { Some(name) }
     }
 
     fn record_capabilities(&self, view_id: u64, state: &Hub_ViewState) {

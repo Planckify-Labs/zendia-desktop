@@ -6,6 +6,7 @@
 
 //! Gallery section renderers and shared visual framing helpers.
 
+pub mod address_bar;
 pub mod declared;
 pub mod icons;
 pub mod keymap;
@@ -63,6 +64,11 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
         }
         .into_element(),
         "sidebar" => sidebar::SidebarSection {
+            state_id: state_id.to_string(),
+            gallery_core: Arc::clone(gallery_core),
+        }
+        .into_element(),
+        "address-bar" => address_bar::AddressBarSection {
             state_id: state_id.to_string(),
             gallery_core: Arc::clone(gallery_core),
         }
