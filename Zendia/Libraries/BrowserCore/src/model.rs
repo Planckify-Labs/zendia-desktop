@@ -18,6 +18,7 @@ use crate::events::Event;
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::site_info::{SiteExtension, SiteInfo, origin_for_url};
+use crate::space_routing::SpaceRoutingSettings;
 use crate::split::Glance;
 use crate::toasts::Toast;
 use std::collections::BTreeMap;
@@ -749,6 +750,7 @@ pub struct BrowserModel {
     pub windows: Vec<Window>,
     pub spaces: Vec<Space>,
     pub active_space: Option<SpaceId>,
+    pub space_routing: SpaceRoutingSettings,
     pub tabs: Vec<Tab>,
     pub active_tab: Option<TabId>,
     pub essentials: Vec<Essential>,
@@ -1165,6 +1167,10 @@ impl BrowserModel {
             }
             Event::SpacesUpdated { spaces } => {
                 self.spaces = spaces.clone();
+                true
+            }
+            Event::SpaceRoutingChanged { settings } => {
+                self.space_routing = settings.clone();
                 true
             }
             Event::TabsReordered {

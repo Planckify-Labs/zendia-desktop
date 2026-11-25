@@ -28,6 +28,7 @@ pub mod model;
 pub mod picker;
 pub mod region;
 pub mod site_info;
+pub mod space_routing;
 pub mod split;
 pub mod stub;
 pub mod tab_source;

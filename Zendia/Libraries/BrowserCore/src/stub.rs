@@ -910,6 +910,266 @@ impl StubBackend {
         Ok(())
     }
 
+    fn handle_space_or_routing_command(&self, command: Command) -> CommandResult {
+        use crate::library::LibrarySection;
+        use crate::space_routing;
+
+        match command {
+            Command::SpaceCreate { name, icon } => {
+                let spaces = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    space_routing::create_space(&mut state.model, name, icon);
+                    state.model.spaces.clone()
+                };
+                self.bus.publish(Event::SpacesUpdated { spaces });
+                Ok(())
+            }
+            Command::SpaceRename { space_id, name } => {
+                let spaces = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    space_routing::rename_space(&mut state.model, space_id, name)?;
+                    state.model.spaces.clone()
+                };
+                self.bus.publish(Event::SpacesUpdated { spaces });
+                Ok(())
+            }
+            Command::SpaceStartRename { space_id } => {
+                let exists = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space(space_id).is_some()
+                };
+                if !exists {
+                    return Err(CommandError::TargetNotFound {
+                        command: "space.start_rename".to_string(),
+                        target: format!("space {}", space_id.0),
+                    });
+                }
+                self.request_view(ViewRequest::SpaceRename { space_id });
+                Ok(())
+            }
+            Command::SpaceSetIcon { space_id, icon } => {
+                let spaces = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    space_routing::set_space_icon(&mut state.model, space_id, icon)?;
+                    state.model.spaces.clone()
+                };
+                self.bus.publish(Event::SpacesUpdated { spaces });
+                Ok(())
+            }
+            Command::SpaceStartIconPicker { space_id } => {
+                let exists = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space(space_id).is_some()
+                };
+                if !exists {
+                    return Err(CommandError::TargetNotFound {
+                        command: "space.start_icon_picker".to_string(),
+                        target: format!("space {}", space_id.0),
+                    });
+                }
+                self.request_view(ViewRequest::SpaceIconPicker { space_id });
+                Ok(())
+            }
+            Command::SpaceOpenThemePicker { space_id } => {
+                let space_name =
+                    {
+                        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                        state.model.space(space_id).map(|s| s.name.clone()).ok_or_else(|| {
+                            CommandError::TargetNotFound {
+                                command: "space.open_theme_picker".to_string(),
+                                target: format!("space {}", space_id.0),
+                            }
+                        })?
+                    };
+                self.show_toast(format!("Theme picker for {space_name} arrives in Phase 11"), None, None);
+                Ok(())
+            }
+            Command::SpaceReorder { space_id, index } => {
+                let spaces = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    space_routing::reorder_space(&mut state.model, space_id, index)?;
+                    state.model.spaces.clone()
+                };
+                self.bus.publish(Event::SpacesUpdated { spaces });
+                Ok(())
+            }
+            Command::SpaceDelete { space_id } => {
+                let (prev_active, new_active, spaces, tabs, essentials, pinned_tabs, folders) = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let prev_active = state.model.active_space;
+                    let new_active = space_routing::delete_space(&mut state.model, space_id)?;
+                    (
+                        prev_active,
+                        new_active,
+                        state.model.spaces.clone(),
+                        state.model.tabs.clone(),
+                        state.model.essentials.clone(),
+                        state.model.pinned_tabs.clone(),
+                        state.model.folders.clone(),
+                    )
+                };
+                self.bus.publish(Event::SpacesUpdated { spaces });
+                self.bus.publish(Event::TabsReordered {
+                    tabs,
+                    essentials,
+                    pinned_tabs,
+                    folders,
+                });
+                if prev_active != Some(new_active) {
+                    self.bus.publish(Event::SpaceSwitched { space_id: new_active });
+                }
+                Ok(())
+            }
+            Command::SpaceUnload { space_id } => {
+                let space_name =
+                    {
+                        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                        state.model.space(space_id).map(|s| s.name.clone()).ok_or_else(|| {
+                            CommandError::TargetNotFound {
+                                command: "space.unload".to_string(),
+                                target: format!("space {}", space_id.0),
+                            }
+                        })?
+                    };
+                self.show_toast(format!("Unloaded tabs in {space_name}"), None, None);
+                Ok(())
+            }
+            Command::SpaceUnloadOthers { space_id } => {
+                let exists = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space(space_id).is_some()
+                };
+                if !exists {
+                    return Err(CommandError::TargetNotFound {
+                        command: "space.unload_others".to_string(),
+                        target: format!("space {}", space_id.0),
+                    });
+                }
+                self.show_toast("Unloaded all other spaces".to_string(), None, None);
+                Ok(())
+            }
+            Command::SpaceOpenTab { tab_id } => {
+                let target_space = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let Some(tab) = state.model.tab(tab_id) else {
+                        return Err(CommandError::TargetNotFound {
+                            command: "space.open_tab".to_string(),
+                            target: format!("tab {}", tab_id.0),
+                        });
+                    };
+                    tab.space_id.filter(|sid| state.model.active_space != Some(*sid))
+                };
+                if let Some(space_id) = target_space {
+                    self.handle_space_switch(space_id)?;
+                }
+                if let Some(source) = self.current_tab_source() {
+                    source.activate_tab(tab_id)?;
+                } else {
+                    self.feed_tab_activated(Some(tab_id));
+                }
+                self.request_view(ViewRequest::LibraryClose);
+                Ok(())
+            }
+            Command::SpaceRoutingAdd {
+                match_type,
+                pattern,
+                target,
+            } => {
+                let settings = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    space_routing::add_rule(&mut state.model.space_routing, match_type, pattern, target)?;
+                    state.model.space_routing.clone()
+                };
+                self.bus.publish(Event::SpaceRoutingChanged { settings });
+                Ok(())
+            }
+            Command::SpaceRoutingUpdate {
+                rule_id,
+                match_type,
+                pattern,
+                target,
+            } => {
+                let settings = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    space_routing::update_rule(&mut state.model.space_routing, rule_id, match_type, pattern, target)?;
+                    state.model.space_routing.clone()
+                };
+                self.bus.publish(Event::SpaceRoutingChanged { settings });
+                Ok(())
+            }
+            Command::SpaceRoutingDelete { rule_id } => {
+                let settings = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    space_routing::delete_rule(&mut state.model.space_routing, rule_id)?;
+                    state.model.space_routing.clone()
+                };
+                self.bus.publish(Event::SpaceRoutingChanged { settings });
+                Ok(())
+            }
+            Command::SpaceRoutingReorder { rule_id, index } => {
+                let settings = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    space_routing::reorder_rule(&mut state.model.space_routing, rule_id, index)?;
+                    state.model.space_routing.clone()
+                };
+                self.bus.publish(Event::SpaceRoutingChanged { settings });
+                Ok(())
+            }
+            Command::SpaceRoutingSetDefaultExternal { target } => {
+                let settings = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space_routing.default_external = target;
+                    state.model.space_routing.clone()
+                };
+                self.bus.publish(Event::SpaceRoutingChanged { settings });
+                Ok(())
+            }
+            Command::SpaceRoutingStartEdit { rule_id } => {
+                let exists = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space_routing.rules.iter().any(|r| r.id == rule_id)
+                };
+                if !exists {
+                    return Err(CommandError::TargetNotFound {
+                        command: "space_routing.start_edit".to_string(),
+                        target: format!("route {}", rule_id.0),
+                    });
+                }
+                self.request_view(ViewRequest::SpaceRoutingEdit { rule_id });
+                Ok(())
+            }
+            Command::SpaceRoutingAddDomain { tab_id } => {
+                let (settings, rule_id) = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let resolved_tab = tab_id.or(state.model.active_tab);
+                    let host = resolved_tab
+                        .and_then(|id| state.model.tab(id))
+                        .and_then(|tab| space_routing::extract_host(&tab.url));
+                    let Some(host) = host else {
+                        return Err(CommandError::InvalidArgument {
+                            command: "space_routing.add_domain".to_string(),
+                            message: "tab has no routable host".to_string(),
+                        });
+                    };
+                    let rule = space_routing::add_rule(
+                        &mut state.model.space_routing,
+                        space_routing::RouteMatchType::Contains,
+                        host,
+                        space_routing::RouteTarget::MostRecentSpace,
+                    )?;
+                    (state.model.space_routing.clone(), rule.id)
+                };
+                self.bus.publish(Event::SpaceRoutingChanged { settings });
+                self.request_view(ViewRequest::LibraryOpen {
+                    section: Some(LibrarySection::SpaceRouting),
+                });
+                self.request_view(ViewRequest::SpaceRoutingEdit { rule_id });
+                Ok(())
+            }
+            _ => unreachable!("non space/routing command routed to handle_space_or_routing_command"),
+        }
+    }
+
     fn handle_tab_pin(&self, tab_id: TabId) -> CommandResult {
         let (updated_tab, pinned_tabs, essentials_changed, updated_folder) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -2353,6 +2613,24 @@ impl BrowserCore for StubBackend {
                 self.show_toast(crate::toasts::messages::YANK_COPIED.to_string(), None, None);
                 Ok(())
             }
+            command @ (Command::SpaceCreate { .. }
+            | Command::SpaceRename { .. }
+            | Command::SpaceStartRename { .. }
+            | Command::SpaceSetIcon { .. }
+            | Command::SpaceStartIconPicker { .. }
+            | Command::SpaceOpenThemePicker { .. }
+            | Command::SpaceReorder { .. }
+            | Command::SpaceDelete { .. }
+            | Command::SpaceUnload { .. }
+            | Command::SpaceUnloadOthers { .. }
+            | Command::SpaceOpenTab { .. }
+            | Command::SpaceRoutingAdd { .. }
+            | Command::SpaceRoutingUpdate { .. }
+            | Command::SpaceRoutingDelete { .. }
+            | Command::SpaceRoutingReorder { .. }
+            | Command::SpaceRoutingSetDefaultExternal { .. }
+            | Command::SpaceRoutingStartEdit { .. }
+            | Command::SpaceRoutingAddDomain { .. }) => self.handle_space_or_routing_command(command),
             Command::SitePermissionSet {
                 origin,
                 permission,
@@ -3859,6 +4137,7 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         windows,
         spaces,
         active_space: Some(default_space),
+        space_routing: crate::space_routing::SpaceRoutingSettings::default(),
         tabs,
         active_tab,
         essentials,

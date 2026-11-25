@@ -21,6 +21,7 @@ use crate::model::{
 use crate::picker::PickerRequestId;
 use crate::region::RegionRect;
 use crate::site_info::{PermissionState, SitePermissionKind};
+use crate::space_routing::{RouteMatchType, RouteTarget, SpaceRouteId};
 use crate::split::{DropZone, parse_direction};
 use crate::toasts::ToastId;
 use std::fmt;
@@ -611,6 +612,88 @@ pub enum Command {
     HistoryCopyUrl {
         entry_id: HistoryEntryId,
     },
+    /// Creates a new workspace with an optional name and icon.
+    SpaceCreate {
+        name: Option<String>,
+        icon: Option<String>,
+    },
+    /// Renames a workspace.
+    SpaceRename {
+        space_id: SpaceId,
+        name: String,
+    },
+    /// Starts inline renaming of a workspace card in the library.
+    SpaceStartRename {
+        space_id: SpaceId,
+    },
+    /// Updates or clears a workspace's icon.
+    SpaceSetIcon {
+        space_id: SpaceId,
+        icon: String,
+    },
+    /// Opens the icon picker for a workspace in the library.
+    SpaceStartIconPicker {
+        space_id: SpaceId,
+    },
+    /// Opens the theme picker for a workspace (placeholder until Phase 11).
+    SpaceOpenThemePicker {
+        space_id: SpaceId,
+    },
+    /// Reorders a workspace to another index.
+    SpaceReorder {
+        space_id: SpaceId,
+        index: usize,
+    },
+    /// Deletes a workspace and moves its tabs to another space.
+    SpaceDelete {
+        space_id: SpaceId,
+    },
+    /// Unloads tabs in a workspace.
+    SpaceUnload {
+        space_id: SpaceId,
+    },
+    /// Unloads tabs in every other workspace.
+    SpaceUnloadOthers {
+        space_id: SpaceId,
+    },
+    /// Switches to a tab's workspace, activates the tab, and closes the library.
+    SpaceOpenTab {
+        tab_id: TabId,
+    },
+    /// Adds a URL space routing rule.
+    SpaceRoutingAdd {
+        match_type: RouteMatchType,
+        pattern: String,
+        target: RouteTarget,
+    },
+    /// Updates an existing URL space routing rule.
+    SpaceRoutingUpdate {
+        rule_id: SpaceRouteId,
+        match_type: RouteMatchType,
+        pattern: String,
+        target: RouteTarget,
+    },
+    /// Deletes a URL space routing rule.
+    SpaceRoutingDelete {
+        rule_id: SpaceRouteId,
+    },
+    /// Reorders a URL space routing rule to another priority index.
+    SpaceRoutingReorder {
+        rule_id: SpaceRouteId,
+        index: usize,
+    },
+    /// Sets the default destination for externally opened links.
+    SpaceRoutingSetDefaultExternal {
+        target: RouteTarget,
+    },
+    /// Opens the edit form for a space routing rule in the library.
+    SpaceRoutingStartEdit {
+        rule_id: SpaceRouteId,
+    },
+    /// Creates a space routing rule for a tab's domain and opens Space routing.
+    SpaceRoutingAddDomain {
+        tab_id: Option<TabId>,
+    },
     /// Starts the page region picker overlay on the active or specified tab.
     RegionPick {
         tab_id: Option<TabId>,
@@ -888,6 +971,24 @@ impl Command {
             Self::HistoryClear { .. } => "history.clear",
             Self::HistoryClearDay { .. } => "history.clear_day",
             Self::HistoryCopyUrl { .. } => "history.copy_url",
+            Self::SpaceCreate { .. } => "space.create",
+            Self::SpaceRename { .. } => "space.rename",
+            Self::SpaceStartRename { .. } => "space.start_rename",
+            Self::SpaceSetIcon { .. } => "space.set_icon",
+            Self::SpaceStartIconPicker { .. } => "space.start_icon_picker",
+            Self::SpaceOpenThemePicker { .. } => "space.open_theme_picker",
+            Self::SpaceReorder { .. } => "space.reorder",
+            Self::SpaceDelete { .. } => "space.delete",
+            Self::SpaceUnload { .. } => "space.unload",
+            Self::SpaceUnloadOthers { .. } => "space.unload_others",
+            Self::SpaceOpenTab { .. } => "space.open_tab",
+            Self::SpaceRoutingAdd { .. } => "space_routing.add",
+            Self::SpaceRoutingUpdate { .. } => "space_routing.update",
+            Self::SpaceRoutingDelete { .. } => "space_routing.delete",
+            Self::SpaceRoutingReorder { .. } => "space_routing.reorder",
+            Self::SpaceRoutingSetDefaultExternal { .. } => "space_routing.set_default_external",
+            Self::SpaceRoutingStartEdit { .. } => "space_routing.start_edit",
+            Self::SpaceRoutingAddDomain { .. } => "space_routing.add_domain",
             Self::RegionPick { .. } => "region.pick",
             Self::RegionCapture { .. } => "region.capture",
             Self::RegionCancel => "region.cancel",
@@ -1726,10 +1827,15 @@ impl Command {
                 })
             }
             "region.cancel" => Ok(Self::RegionCancel),
-            _ => Ok(Self::vim_profile_alias(name).unwrap_or_else(|| Self::Custom {
-                name: name.to_string(),
-                args: args.to_vec(),
-            })),
+            _ => {
+                if let Some(cmd) = crate::space_routing::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                Ok(Self::vim_profile_alias(name).unwrap_or_else(|| Self::Custom {
+                    name: name.to_string(),
+                    args: args.to_vec(),
+                }))
+            }
         }
     }
 
@@ -1913,7 +2019,7 @@ pub type CommandResult = Result<(), CommandError>;
 
 /// Descriptors for the core's built-in commands.
 pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
-    vec![
+    let mut descriptors = vec![
         CommandDescriptor {
             name: "tab.new".to_string(),
             title: "New Tab".to_string(),
@@ -3592,7 +3698,9 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             description: "Toggle AgentServer between Running and Stopped to preview the service-down state".to_string(),
             arguments: Vec::new(),
         },
-    ]
+    ];
+    descriptors.extend(crate::space_routing::command_descriptors());
+    descriptors
 }
 
 fn media_session_descriptor(name: &str, title: &str, description: &str) -> CommandDescriptor {

@@ -20,6 +20,8 @@ use crate::ui::chrome::menus::{MenuLayer, use_provide_menu_state};
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::{use_core, use_provide_core_with_observer};
 use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
+use crate::ui::library::sections::space_routing::use_provide_space_routing_view_state;
+use crate::ui::library::sections::spaces::use_provide_spaces_view_state;
 use crate::ui::library::use_provide_library_state;
 use crate::ui::page::download_arc::use_provide_download_arc;
 use crate::ui::page::use_provide_keymap;
@@ -68,6 +70,8 @@ impl App for GalleryApp {
         let region_picker_state = use_provide_region_picker_state();
         let mut dock_state = use_provide_dock_state();
         let library_state = use_provide_library_state();
+        let library_spaces_state = use_provide_spaces_view_state();
+        let library_routing_state = use_provide_space_routing_view_state();
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
@@ -94,6 +98,25 @@ impl App for GalleryApp {
                         let _ = gallery_core.invoke(Command::LibraryFocusSet {
                             focused: *library_state.open.peek(),
                         });
+                    }
+                    ViewRequest::SpaceRename { space_id } => {
+                        if let Some(space) = gallery_core.model().space(*space_id) {
+                            library_spaces_state.start_rename(*space_id, space.name.clone());
+                        }
+                    }
+                    ViewRequest::SpaceIconPicker { space_id } => {
+                        library_spaces_state.open_icon_picker(*space_id, None);
+                    }
+                    ViewRequest::SpaceRoutingEdit { rule_id } => {
+                        if let Some(rule) = gallery_core
+                            .model()
+                            .space_routing
+                            .rules
+                            .iter()
+                            .find(|r| r.id == *rule_id)
+                        {
+                            library_routing_state.start_edit(rule);
+                        }
                     }
                     ViewRequest::LocationFocus => {
                         menu_state.close_all();
@@ -336,6 +359,8 @@ impl App for GalleryApp {
                                     if !section_id.starts_with("library") {
                                         library_state.close();
                                         library_state.clear_gallery_overrides();
+                                        library_spaces_state.reset();
+                                        library_routing_state.reset();
                                     }
                                     active_section_id.set(section_id.to_string());
                                     active_state_id.set(default_state.to_string());

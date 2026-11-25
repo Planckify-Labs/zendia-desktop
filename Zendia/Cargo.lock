@@ -5102,6 +5102,7 @@ name = "zendia-browser-core"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "regex",
  "zendia-keymap",
  "zendia-module-api",
 ]

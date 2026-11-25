@@ -891,6 +891,60 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "library-spaces",
+        title: "Library · Spaces",
+        phase: 9,
+        icon: "layers",
+        summary: "Library Spaces cards (inline rename, tab drag, menu, scroll) and Space routing rules & editor.",
+        states: &[
+            GalleryStateSpec {
+                id: "spaces-two",
+                label: "Spaces · Two Cards",
+                description: "Two workspace cards (Space and Research) with tabs, divider, move handle, ... menu, and + button.",
+            },
+            GalleryStateSpec {
+                id: "spaces-scrolled",
+                label: "Spaces · Scrolled",
+                description: "Five workspace cards scrolled horizontally inside the Spaces strip.",
+            },
+            GalleryStateSpec {
+                id: "spaces-renaming",
+                label: "Spaces · Renaming",
+                description: "Inline rename input active on the Space card with the teal focus ring.",
+            },
+            GalleryStateSpec {
+                id: "spaces-dragging",
+                label: "Spaces · Tab Drag",
+                description: "Dragging a tab between workspace cards with floating ghost pill and accent drop indicator.",
+            },
+            GalleryStateSpec {
+                id: "spaces-menu",
+                label: "Spaces · Card Menu",
+                description: "Card `...` actions menu open with rename, icon, theme, unload, clear, create, delete, and routing entries.",
+            },
+            GalleryStateSpec {
+                id: "routing-rules",
+                label: "Routing · Rules",
+                description: "Space routing rules list with search bar, match types, target spaces, and external-links footer.",
+            },
+            GalleryStateSpec {
+                id: "routing-empty",
+                label: "Routing · Empty",
+                description: "Empty state when no space routing rules have been configured yet.",
+            },
+            GalleryStateSpec {
+                id: "routing-adding",
+                label: "Routing · Add Rule",
+                description: "New route form with Contains / Is Exactly / RegEx chips, URL pattern input, and space picker.",
+            },
+            GalleryStateSpec {
+                id: "routing-invalid-regex",
+                label: "Routing · Invalid Regex",
+                description: "Editing a regex rule with an invalid pattern showing the error border, message, and disabled Save button.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
