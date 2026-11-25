@@ -21,7 +21,9 @@ use crate::model::{
 };
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
+use crate::share::{SharePayload, ShareSettings};
 use crate::site_info::SiteInfo;
+use crate::space_appearance::SpaceAppearance;
 use crate::space_routing::{SpaceRouteId, SpaceRoutingSettings};
 use crate::split::Glance;
 use crate::toasts::{Toast, ToastId};
@@ -50,6 +52,13 @@ pub enum Event {
     },
     SpacesUpdated {
         spaces: Vec<Space>,
+    },
+    SpaceAppearanceChanged {
+        space_id: SpaceId,
+        appearance: SpaceAppearance,
+    },
+    ShareSettingsChanged {
+        settings: ShareSettings,
     },
     SpaceRoutingChanged {
         settings: SpaceRoutingSettings,
@@ -303,6 +312,18 @@ pub enum ViewRequest {
     LibraryMediaPreviewClose,
     /// Move the open media preview by `delta` items (`-1` previous, `+1` next).
     LibraryMediaPreviewStep { delta: i32 },
+    /// Open the sidebar space creation form.
+    SpaceCreateFormOpen,
+    /// Close the sidebar space creation form.
+    SpaceCreateFormClose,
+    /// Open the gradient generator theme picker for `space_id` (or the active space when `None`).
+    ThemePickerOpen { space_id: Option<SpaceId> },
+    /// Close the gradient generator theme picker.
+    ThemePickerClose,
+    /// Open the share link confirmation modal for `payload`.
+    ShareConfirmOpen { payload: SharePayload },
+    /// Close the share link confirmation modal.
+    ShareConfirmClose,
 }
 
 /// Returned when the core's event bus has been dropped.

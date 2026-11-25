@@ -972,17 +972,19 @@ impl StubBackend {
                 Ok(())
             }
             Command::SpaceOpenThemePicker { space_id } => {
-                let space_name =
-                    {
-                        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                        state.model.space(space_id).map(|s| s.name.clone()).ok_or_else(|| {
-                            CommandError::TargetNotFound {
-                                command: "space.open_theme_picker".to_string(),
-                                target: format!("space {}", space_id.0),
-                            }
-                        })?
-                    };
-                self.show_toast(format!("Theme picker for {space_name} arrives in Phase 11"), None, None);
+                let exists = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space(space_id).is_some()
+                };
+                if !exists {
+                    return Err(CommandError::TargetNotFound {
+                        command: "space.open_theme_picker".to_string(),
+                        target: format!("space {}", space_id.0),
+                    });
+                }
+                self.request_view(ViewRequest::ThemePickerOpen {
+                    space_id: Some(space_id),
+                });
                 Ok(())
             }
             Command::SpaceReorder { space_id, index } => {
@@ -1168,6 +1170,256 @@ impl StubBackend {
                 Ok(())
             }
             _ => unreachable!("non space/routing command routed to handle_space_or_routing_command"),
+        }
+    }
+
+    fn resolve_target_space(&self, space_id: Option<SpaceId>, command_name: &str) -> Result<SpaceId, CommandError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let id = space_id
+            .or(state.model.active_space)
+            .or_else(|| state.model.spaces.first().map(|s| s.id))
+            .ok_or_else(|| CommandError::TargetNotFound {
+                command: command_name.to_string(),
+                target: "active space".to_string(),
+            })?;
+        if state.model.space(id).is_none() {
+            return Err(CommandError::TargetNotFound {
+                command: command_name.to_string(),
+                target: format!("space {}", id.0),
+            });
+        }
+        Ok(id)
+    }
+
+    fn apply_space_appearance(&self, space_id: SpaceId, appearance: crate::space_appearance::SpaceAppearance) {
+        let (spaces, stored) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let is_dark = !matches!(state.model.theme.scheme, ThemeScheme::Light);
+            let gradient = appearance.to_space_gradient(is_dark);
+            if let Some(space) = state.model.spaces.iter_mut().find(|s| s.id == space_id) {
+                space.gradient = gradient;
+            }
+            state.model.space_appearances.insert(space_id, appearance.clone());
+            (state.model.spaces.clone(), appearance)
+        };
+        self.bus.publish(Event::SpaceAppearanceChanged {
+            space_id,
+            appearance: stored,
+        });
+        self.bus.publish(Event::SpacesUpdated { spaces });
+    }
+
+    fn handle_space_editing_or_share_command(&self, command: Command) -> CommandResult {
+        use crate::share;
+        use crate::space_appearance::{SpaceAppearance, SpaceColorScheme};
+
+        match command {
+            Command::SpaceCreateFormOpen => {
+                self.request_view(ViewRequest::LibraryClose);
+                self.request_view(ViewRequest::SpaceCreateFormOpen);
+                Ok(())
+            }
+            Command::SpaceCreateFormCancel => {
+                self.request_view(ViewRequest::ThemePickerClose);
+                self.request_view(ViewRequest::SpaceCreateFormClose);
+                Ok(())
+            }
+            Command::SpaceCreateFormSubmit {
+                name,
+                icon,
+                profile,
+                appearance,
+            } => {
+                let trimmed = name.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err(CommandError::InvalidArgument {
+                        command: "space.create_form.submit".to_string(),
+                        message: "space name cannot be empty".to_string(),
+                    });
+                }
+                let (created_id, spaces, stored_appearance) = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let mut created = crate::space_routing::create_space(&mut state.model, Some(trimmed), icon);
+                    let mut app = appearance.unwrap_or_default();
+                    if let Some(profile_name) = profile.filter(|p| !p.trim().is_empty()) {
+                        app.profile = profile_name.trim().to_string();
+                    }
+                    let is_dark = !matches!(state.model.theme.scheme, ThemeScheme::Light);
+                    if !app.dots.is_empty() {
+                        created.gradient = app.to_space_gradient(is_dark);
+                        if let Some(slot) = state.model.spaces.iter_mut().find(|s| s.id == created.id) {
+                            slot.gradient = created.gradient.clone();
+                        }
+                    }
+                    state.model.space_appearances.insert(created.id, app.clone());
+                    (created.id, state.model.spaces.clone(), app)
+                };
+                self.bus.publish(Event::SpaceAppearanceChanged {
+                    space_id: created_id,
+                    appearance: stored_appearance,
+                });
+                self.bus.publish(Event::SpacesUpdated { spaces });
+                self.handle_space_switch(created_id)?;
+                self.request_view(ViewRequest::ThemePickerClose);
+                self.request_view(ViewRequest::SpaceCreateFormClose);
+                Ok(())
+            }
+            Command::ThemePickerOpen { space_id } => {
+                if let Some(id) = space_id {
+                    let _ = self.resolve_target_space(Some(id), "theme.picker.open")?;
+                }
+                self.request_view(ViewRequest::ThemePickerOpen { space_id });
+                Ok(())
+            }
+            Command::ThemePickerClose => {
+                self.request_view(ViewRequest::ThemePickerClose);
+                Ok(())
+            }
+            Command::SpaceAppearanceSet { space_id, appearance } => {
+                let id = self.resolve_target_space(space_id, "space.appearance.set")?;
+                self.apply_space_appearance(id, appearance);
+                Ok(())
+            }
+            Command::SpaceAppearanceApplyPreset { space_id, page, index } => {
+                let id = self.resolve_target_space(space_id, "space.appearance.apply_preset")?;
+                let mut preset_app =
+                    SpaceAppearance::from_preset(page, index).ok_or_else(|| CommandError::InvalidArgument {
+                        command: "space.appearance.apply_preset".to_string(),
+                        message: format!("preset ({page}, {index}) out of range"),
+                    })?;
+                {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let existing = state.model.space_appearance(id);
+                    preset_app.opacity = existing.opacity;
+                    preset_app.texture_kind = existing.texture_kind;
+                    preset_app.texture_amount = existing.texture_amount;
+                    preset_app.scheme = existing.scheme;
+                    preset_app.profile = existing.profile;
+                }
+                self.apply_space_appearance(id, preset_app);
+                Ok(())
+            }
+            Command::SpaceAppearanceSetScheme { space_id, scheme } => {
+                let id = self.resolve_target_space(space_id, "space.appearance.set_scheme")?;
+                let mut appearance = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space_appearance(id)
+                };
+                appearance.scheme = scheme;
+                let theme_settings = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.theme.scheme = scheme.to_theme_scheme();
+                    state.model.theme.clone()
+                };
+                self.bus.publish(Event::SettingsChanged { theme: theme_settings });
+                self.apply_space_appearance(id, appearance);
+                Ok(())
+            }
+            Command::SpaceAppearanceSetOpacity { space_id, opacity } => {
+                let id = self.resolve_target_space(space_id, "space.appearance.set_opacity")?;
+                let mut appearance = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space_appearance(id)
+                };
+                appearance.set_opacity(opacity);
+                self.apply_space_appearance(id, appearance);
+                Ok(())
+            }
+            Command::SpaceAppearanceSetTexture { space_id, kind, amount } => {
+                let id = self.resolve_target_space(space_id, "space.appearance.set_texture")?;
+                let mut appearance = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space_appearance(id)
+                };
+                appearance.set_texture(kind, amount);
+                self.apply_space_appearance(id, appearance);
+                Ok(())
+            }
+            Command::SpaceAppearanceCycleHarmony { space_id } => {
+                let id = self.resolve_target_space(space_id, "space.appearance.cycle_harmony")?;
+                let mut appearance = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space_appearance(id)
+                };
+                appearance.cycle_harmony();
+                self.apply_space_appearance(id, appearance);
+                Ok(())
+            }
+            Command::SpaceAppearanceReset { space_id } => {
+                let id = self.resolve_target_space(space_id, "space.appearance.reset")?;
+                let existing = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.space_appearance(id)
+                };
+                let reset = SpaceAppearance {
+                    profile: existing.profile,
+                    scheme: SpaceColorScheme::Auto,
+                    ..SpaceAppearance::default()
+                };
+                self.apply_space_appearance(id, reset);
+                Ok(())
+            }
+            Command::ShareOpen {
+                tab_id,
+                space_id,
+                folder_id,
+            } => {
+                let (payload, skip_confirm) = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    (
+                        share::build_share_payload(&state.model, tab_id, space_id, folder_id),
+                        state.model.share.dont_ask_again,
+                    )
+                };
+                if skip_confirm {
+                    let link = share::stub_share_link(&payload.title, &payload.url);
+                    eprintln!(
+                        "zendia: stub share.open (dont_ask_again=true) — title={:?} url={:?} name={:?} link={}",
+                        payload.title, payload.url, payload.initial_name, link
+                    );
+                    self.bus.publish(Event::ClipboardCopyRequested { text: link });
+                    self.show_toast("Share link copied!".to_string(), None, Some(6000));
+                } else {
+                    self.request_view(ViewRequest::ShareConfirmOpen { payload });
+                }
+                Ok(())
+            }
+            Command::ShareConfirm {
+                display_name,
+                dont_ask_again,
+                url,
+                title,
+            } => {
+                let clean_name = share::normalize_display_name(&display_name);
+                let (settings, resolved_title, resolved_url) = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.model.share.display_name = clean_name.clone();
+                    if dont_ask_again {
+                        state.model.share.dont_ask_again = true;
+                    }
+                    let fallback = share::build_share_payload(&state.model, None, None, None);
+                    (
+                        state.model.share.clone(),
+                        title.filter(|t| !t.trim().is_empty()).unwrap_or(fallback.title),
+                        url.filter(|u| !u.trim().is_empty()).unwrap_or(fallback.url),
+                    )
+                };
+                let link = share::stub_share_link(&resolved_title, &resolved_url);
+                eprintln!(
+                    "zendia: stub share.confirm — title={:?} url={:?} name={:?} dont_ask={} link={}",
+                    resolved_title, resolved_url, clean_name, settings.dont_ask_again, link
+                );
+                self.bus.publish(Event::ShareSettingsChanged { settings });
+                self.bus.publish(Event::ClipboardCopyRequested { text: link });
+                self.show_toast("Share link copied!".to_string(), None, Some(6000));
+                self.request_view(ViewRequest::ShareConfirmClose);
+                Ok(())
+            }
+            Command::ShareCancel => {
+                self.request_view(ViewRequest::ShareConfirmClose);
+                Ok(())
+            }
+            _ => unreachable!("handle_space_editing_or_share_command called with unexpected command"),
         }
     }
 
@@ -2632,6 +2884,21 @@ impl BrowserCore for StubBackend {
             | Command::SpaceRoutingSetDefaultExternal { .. }
             | Command::SpaceRoutingStartEdit { .. }
             | Command::SpaceRoutingAddDomain { .. }) => self.handle_space_or_routing_command(command),
+            command @ (Command::SpaceCreateFormOpen
+            | Command::SpaceCreateFormSubmit { .. }
+            | Command::SpaceCreateFormCancel
+            | Command::ThemePickerOpen { .. }
+            | Command::ThemePickerClose
+            | Command::SpaceAppearanceSet { .. }
+            | Command::SpaceAppearanceApplyPreset { .. }
+            | Command::SpaceAppearanceSetScheme { .. }
+            | Command::SpaceAppearanceSetOpacity { .. }
+            | Command::SpaceAppearanceSetTexture { .. }
+            | Command::SpaceAppearanceCycleHarmony { .. }
+            | Command::SpaceAppearanceReset { .. }
+            | Command::ShareOpen { .. }
+            | Command::ShareConfirm { .. }
+            | Command::ShareCancel) => self.handle_space_editing_or_share_command(command),
             command @ (Command::DownloadOpen { .. }
             | Command::DownloadShowInFolder { .. }
             | Command::DownloadPause { .. }
@@ -4169,7 +4436,9 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         windows,
         spaces,
         active_space: Some(default_space),
+        space_appearances: BTreeMap::new(),
         space_routing: crate::space_routing::SpaceRoutingSettings::default(),
+        share: crate::share::ShareSettings::default(),
         tabs,
         active_tab,
         essentials,

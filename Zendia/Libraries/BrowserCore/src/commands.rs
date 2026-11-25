@@ -21,6 +21,7 @@ use crate::model::{
 use crate::picker::PickerRequestId;
 use crate::region::RegionRect;
 use crate::site_info::{PermissionState, SitePermissionKind};
+use crate::space_appearance::{SpaceAppearance, SpaceColorScheme, TextureKind};
 use crate::space_routing::{RouteMatchType, RouteTarget, SpaceRouteId};
 use crate::split::{DropZone, parse_direction};
 use crate::toasts::ToastId;
@@ -774,6 +775,73 @@ pub enum Command {
     },
     /// Cancels an active region pick without capturing.
     RegionCancel,
+    /// Opens the sidebar space creation form.
+    SpaceCreateFormOpen,
+    /// Submits the sidebar space creation form with name, optional icon, profile, and appearance.
+    SpaceCreateFormSubmit {
+        name: String,
+        icon: Option<String>,
+        profile: Option<String>,
+        appearance: Option<SpaceAppearance>,
+    },
+    /// Cancels and closes the sidebar space creation form.
+    SpaceCreateFormCancel,
+    /// Opens the gradient generator theme picker for `space_id` (or the active space).
+    ThemePickerOpen {
+        space_id: Option<SpaceId>,
+    },
+    /// Closes the gradient generator theme picker.
+    ThemePickerClose,
+    /// Updates a space's full gradient appearance configuration.
+    SpaceAppearanceSet {
+        space_id: Option<SpaceId>,
+        appearance: SpaceAppearance,
+    },
+    /// Applies a predefined swatch preset `(page, index)` to a space.
+    SpaceAppearanceApplyPreset {
+        space_id: Option<SpaceId>,
+        page: usize,
+        index: usize,
+    },
+    /// Sets auto, light, or dark appearance scheme on a space and updates window scheme.
+    SpaceAppearanceSetScheme {
+        space_id: Option<SpaceId>,
+        scheme: SpaceColorScheme,
+    },
+    /// Sets a space's gradient opacity intensity.
+    SpaceAppearanceSetOpacity {
+        space_id: Option<SpaceId>,
+        opacity: f32,
+    },
+    /// Sets a space's texture kind and dial intensity.
+    SpaceAppearanceSetTexture {
+        space_id: Option<SpaceId>,
+        kind: TextureKind,
+        amount: f32,
+    },
+    /// Cycles the color harmony of a multi-dot space gradient.
+    SpaceAppearanceCycleHarmony {
+        space_id: Option<SpaceId>,
+    },
+    /// Resets a space's custom gradient dots back to the default theme.
+    SpaceAppearanceReset {
+        space_id: Option<SpaceId>,
+    },
+    /// Opens the share confirmation dialog for the current page, space, or folder.
+    ShareOpen {
+        tab_id: Option<TabId>,
+        space_id: Option<SpaceId>,
+        folder_id: Option<FolderId>,
+    },
+    /// Confirms sharing and copies the stub share link.
+    ShareConfirm {
+        display_name: String,
+        dont_ask_again: bool,
+        url: Option<String>,
+        title: Option<String>,
+    },
+    /// Cancels and dismisses the share confirmation dialog.
+    ShareCancel,
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -1079,6 +1147,21 @@ impl Command {
             Self::RegionPick { .. } => "region.pick",
             Self::RegionCapture { .. } => "region.capture",
             Self::RegionCancel => "region.cancel",
+            Self::SpaceCreateFormOpen => "space.create_form.open",
+            Self::SpaceCreateFormSubmit { .. } => "space.create_form.submit",
+            Self::SpaceCreateFormCancel => "space.create_form.cancel",
+            Self::ThemePickerOpen { .. } => "theme.picker.open",
+            Self::ThemePickerClose => "theme.picker.close",
+            Self::SpaceAppearanceSet { .. } => "space.appearance.set",
+            Self::SpaceAppearanceApplyPreset { .. } => "space.appearance.apply_preset",
+            Self::SpaceAppearanceSetScheme { .. } => "space.appearance.set_scheme",
+            Self::SpaceAppearanceSetOpacity { .. } => "space.appearance.set_opacity",
+            Self::SpaceAppearanceSetTexture { .. } => "space.appearance.set_texture",
+            Self::SpaceAppearanceCycleHarmony { .. } => "space.appearance.cycle_harmony",
+            Self::SpaceAppearanceReset { .. } => "space.appearance.reset",
+            Self::ShareOpen { .. } => "share.open",
+            Self::ShareConfirm { .. } => "share.confirm",
+            Self::ShareCancel => "share.cancel",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -1973,6 +2056,12 @@ impl Command {
             "region.cancel" => Ok(Self::RegionCancel),
             _ => {
                 if let Some(cmd) = crate::space_routing::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                if let Some(cmd) = crate::space_appearance::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                if let Some(cmd) = crate::share::parse_command(name, args)? {
                     return Ok(cmd);
                 }
                 Ok(Self::vim_profile_alias(name).unwrap_or_else(|| Self::Custom {
@@ -4033,6 +4122,8 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
         },
     ];
     descriptors.extend(crate::space_routing::command_descriptors());
+    descriptors.extend(crate::space_appearance::command_descriptors());
+    descriptors.extend(crate::share::command_descriptors());
     descriptors
 }
 

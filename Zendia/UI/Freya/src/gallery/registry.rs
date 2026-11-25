@@ -989,6 +989,84 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "spaces-editing",
+        title: "Spaces Editing",
+        phase: 11,
+        icon: "edit-theme",
+        summary: "Space creation form in the sidebar, gradient generator color pad with presets/wave/texture dial, and horizontal space swipe.",
+        states: &[
+            GalleryStateSpec {
+                id: "create-empty",
+                label: "Create · Empty",
+                description: "Sidebar space creation form in its initial empty state with dashed icon button, Default profile, and Theme... button.",
+            },
+            GalleryStateSpec {
+                id: "create-filled",
+                label: "Create · Filled",
+                description: "Space creation form filled with name, sparkles icon, Work profile, and live custom gradient backdrop.",
+            },
+            GalleryStateSpec {
+                id: "gradient-empty",
+                label: "Gradient · Empty",
+                description: "Gradient generator popup open with no dots placed ('Click to add a color'), scheme toggles, presets, wave slider, and texture dial.",
+            },
+            GalleryStateSpec {
+                id: "gradient-one-dot",
+                label: "Gradient · 1 Dot",
+                description: "Gradient generator with a single dot placed on the pad live-updating the space backdrop.",
+            },
+            GalleryStateSpec {
+                id: "gradient-two-dots",
+                label: "Gradient · 2 Dots",
+                description: "Gradient generator with two complementary dots interpolated in OKLab space.",
+            },
+            GalleryStateSpec {
+                id: "gradient-three-dots",
+                label: "Gradient · 3 Dots",
+                description: "Gradient generator with three analogous dots, wave opacity slider, and active grain texture dial.",
+            },
+            GalleryStateSpec {
+                id: "gradient-presets",
+                label: "All Presets",
+                description: "All seven gradient preset pages (Vivid, Pastel, Deep, and Monochrome) clickable for live backdrop preview.",
+            },
+            GalleryStateSpec {
+                id: "swipe-between",
+                label: "Swipe · Spaces",
+                description: "Horizontal sidebar swipe mid-gesture between Space and Work with blended backdrop and target space cue.",
+            },
+            GalleryStateSpec {
+                id: "swipe-add-space",
+                label: "Swipe · Add Space",
+                description: "Horizontal swipe past the last space revealing the radial edge glow and circular + progress badge.",
+            },
+        ],
+    },
+    GallerySectionSpec {
+        id: "share",
+        title: "Share",
+        phase: 12,
+        icon: "share",
+        summary: "Share link confirmation modal dialog with optional display name and 'Don't ask me again' preference.",
+        states: &[
+            GalleryStateSpec {
+                id: "confirm-named",
+                label: "Confirm · Named",
+                description: "Share link confirmation dialog with display name 'Alex' entered over the browser window.",
+            },
+            GalleryStateSpec {
+                id: "confirm-empty",
+                label: "Confirm · Anonymous",
+                description: "Share link confirmation dialog with empty optional name field for anonymous sharing.",
+            },
+            GalleryStateSpec {
+                id: "confirm-dont-ask",
+                label: "Confirm · Don't Ask",
+                description: "Share link confirmation dialog with 'Don't ask me again' checked.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
@@ -1289,6 +1367,30 @@ fn format_command_detail(command: &Command) -> String {
             whole_page,
         } => format!("tab={tab_id:?} whole_page={whole_page} rect={rect:?}"),
         Command::RegionCancel => "cancelled".to_string(),
+        Command::SpaceCreateFormSubmit { name, profile, .. } => format!("name=\"{name}\" profile={profile:?}"),
+        Command::ThemePickerOpen { space_id } => format!("space={space_id:?}"),
+        Command::SpaceAppearanceApplyPreset { space_id, page, index } => {
+            format!("space={space_id:?} preset=({page},{index})")
+        }
+        Command::SpaceAppearanceSetScheme { space_id, scheme } => {
+            format!("space={space_id:?} scheme={}", scheme.as_str())
+        }
+        Command::SpaceAppearanceSetOpacity { space_id, opacity } => {
+            format!("space={space_id:?} opacity={opacity:.2}")
+        }
+        Command::SpaceAppearanceSetTexture { space_id, kind, amount } => {
+            format!("space={space_id:?} {}={amount:.2}", kind.as_str())
+        }
+        Command::ShareOpen {
+            tab_id,
+            space_id,
+            folder_id,
+        } => format!("tab={tab_id:?} space={space_id:?} folder={folder_id:?}"),
+        Command::ShareConfirm {
+            display_name,
+            dont_ask_again,
+            ..
+        } => format!("name=\"{display_name}\" dont_ask={dont_ask_again}"),
         Command::Custom { args, .. } => {
             if args.is_empty() {
                 "no args".to_string()

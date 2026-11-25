@@ -34,6 +34,10 @@ use crate::ui::chrome::sidebar::split_group::SplitGroupRow;
 use crate::ui::chrome::sidebar::tab_row::{DragGhostOverlay, NewTabRow, VerticalTabRow};
 use crate::ui::chrome::toolbar::{ToolbarItemView, WindowControls};
 use crate::ui::core_view::use_core;
+use crate::ui::spaces::{
+    SpaceAddSwipeOverlay, SpaceCreationForm, SpaceSwipeIndicator, SpaceSwipeMode, handle_sidebar_wheel,
+    try_use_space_editing_state,
+};
 use crate::ui::theme::{ThemeRole, motion, use_theme};
 use freya::animation::*;
 use freya::prelude::*;
@@ -57,6 +61,9 @@ impl Component for SidebarFrame {
         let theme = use_theme();
         let _palette = ChromePalette::for_scheme(theme.scheme);
         let sidebar_state = try_use_sidebar_state();
+        let space_editing = try_use_space_editing_state();
+        let create_form_open = space_editing.is_some_and(|s| *s.create_form_open.read());
+        let swipe = space_editing.map(|s| s.swipe.read().clone()).unwrap_or_default();
 
         let (
             layout,
@@ -129,9 +136,9 @@ impl Component for SidebarFrame {
             SIDEBAR_COLLAPSED_WIDTH + (expanded_width - SIDEBAR_COLLAPSED_WIDTH) * anim_factor
         };
 
-        let is_collapsed_visual = !expanded && anim_factor < 0.35;
+        let is_collapsed_visual = !expanded && anim_factor < 0.35 && !create_form_open;
         let show_top_row = !layout.has_top_toolbar() && !is_collapsed_visual;
-        let show_url_bar = !self.slots.sidebar_url_bar.is_empty() && !is_collapsed_visual;
+        let show_url_bar = !self.slots.sidebar_url_bar.is_empty() && !is_collapsed_visual && !create_form_open;
         let show_sidebar_window_controls = show_window_controls_in_sidebar_top(&layout);
         let active_space_id = active_space.as_ref().map(|s| s.id);
 
@@ -297,6 +304,30 @@ impl Component for SidebarFrame {
         let show_space_switcher = spaces.len() > 1;
         let tight_bottom = !layout.has_top_toolbar() && expanded_width < 220.0;
 
+        let swipe_target_meta = swipe.target_space_id.and_then(|tid| {
+            spaces
+                .iter()
+                .find(|s| s.id == tid)
+                .map(|s| (s.name.clone(), s.icon.clone()))
+        });
+        let side_factor = if layout.sidebar_side == SidebarSide::Right {
+            -1.0
+        } else {
+            1.0
+        };
+        let swipe_strip_offset = match swipe.mode {
+            SpaceSwipeMode::SwitchSpace => swipe.offset_x * 0.45,
+            SpaceSwipeMode::AddSpace => -swipe.add_progress * displayed_width * 0.25 * side_factor,
+            SpaceSwipeMode::Idle => 0.0,
+        };
+
+        let wheel_core = core.clone();
+        let on_sidebar_wheel = move |e: Event<WheelEventData>| {
+            if let Some(editing) = space_editing {
+                handle_sidebar_wheel(&e, &wheel_core, editing, displayed_width);
+            }
+        };
+
         let bottom_bar = if is_collapsed_visual {
             rect()
                 .width(Size::fill())
@@ -368,38 +399,74 @@ impl Component for SidebarFrame {
             4.0
         };
 
+        let sidebar_body: Element = if let Some(editing) = space_editing.filter(|_| create_form_open) {
+            SpaceCreationForm { state: editing }.into_element()
+        } else {
+            rect()
+                .width(Size::fill())
+                .height(Size::flex(1.0))
+                .content(Content::Flex)
+                .overflow(Overflow::Clip)
+                .child(
+                    rect()
+                        .width(Size::fill())
+                        .height(Size::fill())
+                        .content(Content::Flex)
+                        .offset_x(swipe_strip_offset)
+                        .child(essentials_section)
+                        .child(space_header)
+                        .child(
+                            ScrollView::new().width(Size::fill()).height(Size::flex(1.0)).child(
+                                rect()
+                                    .width(Size::fill())
+                                    .padding(Gaps::new(2.0, 0.0, 4.0, 0.0))
+                                    .spacing(2.0)
+                                    .cross_align(if is_collapsed_visual {
+                                        Alignment::center()
+                                    } else {
+                                        Alignment::Start
+                                    })
+                                    .children(pinned_rows)
+                                    .children(folder_rows)
+                                    .child(separator)
+                                    .child(new_tab_row)
+                                    .children(normal_rows),
+                            ),
+                        ),
+                )
+                .maybe_child(
+                    (swipe.mode == SpaceSwipeMode::SwitchSpace)
+                        .then_some(swipe_target_meta)
+                        .flatten()
+                        .map(|(target_name, target_icon)| SpaceSwipeIndicator {
+                            target_name,
+                            target_icon,
+                            offset_x: swipe.offset_x,
+                        }),
+                )
+                .maybe_child(
+                    (swipe.mode == SpaceSwipeMode::AddSpace).then_some(SpaceAddSwipeOverlay {
+                        progress: swipe.add_progress,
+                        sidebar_side: layout.sidebar_side,
+                    }),
+                )
+                .into_element()
+        };
+
         rect()
             .width(Size::px(displayed_width))
             .height(Size::fill())
             .padding(Gaps::new(top_pad, pad, pad, pad))
             .content(Content::Flex)
             .overflow(Overflow::Clip)
+            .on_wheel(on_sidebar_wheel)
             .maybe_child(sidebar_top_row)
             .maybe_child(url_bar_row)
-            .child(essentials_section)
-            .child(space_header)
-            .child(
-                ScrollView::new().width(Size::fill()).height(Size::flex(1.0)).child(
-                    rect()
-                        .width(Size::fill())
-                        .padding(Gaps::new(2.0, 0.0, 4.0, 0.0))
-                        .spacing(2.0)
-                        .cross_align(if is_collapsed_visual {
-                            Alignment::center()
-                        } else {
-                            Alignment::Start
-                        })
-                        .children(pinned_rows)
-                        .children(folder_rows)
-                        .child(separator)
-                        .child(new_tab_row)
-                        .children(normal_rows),
-                ),
-            )
-            .child(SidebarMediaControls {
+            .child(sidebar_body)
+            .maybe_child((!create_form_open).then_some(SidebarMediaControls {
                 collapsed: is_collapsed_visual,
-            })
-            .maybe_child(notification_stack)
+            }))
+            .maybe_child((!create_form_open).then_some(notification_stack).flatten())
             .child(bottom_bar)
             .maybe_child(active_drag.map(|drag| DragGhostOverlay {
                 drag,

@@ -822,7 +822,16 @@ pub fn builtin_palette_entries() -> Vec<PaletteEntry> {
             "Create a new workspace",
             "Spaces",
             "plus",
-            "space.create_dialog",
+            "space.create_form.open",
+            Vec::new(),
+        ),
+        palette_entry(
+            "zen.action.share_page",
+            "Share Link…",
+            "Create a share link for the current page",
+            "Share",
+            "share",
+            "share.open",
             Vec::new(),
         ),
         palette_entry(

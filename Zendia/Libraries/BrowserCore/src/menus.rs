@@ -1252,6 +1252,15 @@ pub fn builtin_folder_context_entries() -> Vec<MenuEntry> {
         ),
         menu_entry("zendia.folder.new_tab", loc, "New Tab", None, "tab.new", "organize", 10),
         menu_entry(
+            "zendia.folder.share",
+            loc,
+            "Share Folder…",
+            None,
+            "share.open",
+            "organize",
+            20,
+        ),
+        menu_entry(
             "zendia.folder.unpack",
             loc,
             "Unpack Folder",
@@ -1312,6 +1321,33 @@ pub fn builtin_space_context_entries() -> Vec<MenuEntry> {
             "space.clear_tabs",
             "tabs",
             20,
+        ),
+        menu_entry(
+            "zendia.space.theme",
+            loc,
+            "Theme…",
+            Some("edit-theme"),
+            "theme.picker.open",
+            "manage",
+            10,
+        ),
+        menu_entry(
+            "zendia.space.create",
+            loc,
+            "New Space…",
+            Some("plus"),
+            "space.create_form.open",
+            "manage",
+            20,
+        ),
+        menu_entry(
+            "zendia.space.share",
+            loc,
+            "Share Space…",
+            Some("share"),
+            "share.open",
+            "manage",
+            30,
         ),
     ]
 }
@@ -1553,10 +1589,10 @@ fn inject_arg_recursive(items: &mut [ResolvedMenuItem], arg_key: &str, arg_value
                         "tab.new" | "space.next" | "space.previous" | "space.switch"
                     )
             }
-            "folder_id" => item.command.starts_with("folder."),
+            "folder_id" => item.command.starts_with("folder.") || item.command == "share.open",
             "space_id" => matches!(
                 item.command.as_str(),
-                "space.switch" | "space.clear_tabs" | "folder.create"
+                "space.switch" | "space.clear_tabs" | "folder.create" | "theme.picker.open" | "share.open"
             ),
             _ => false,
         };

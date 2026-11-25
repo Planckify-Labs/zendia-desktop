@@ -222,7 +222,11 @@ impl Component for SiteDataPanelCard {
                 active: false,
                 enabled: is_web,
                 on_press: EventHandler::new(move |_| {
-                    share_core.invoke_or_log(Command::SiteShare { tab_id: None });
+                    share_core.invoke_or_log(Command::ShareOpen {
+                        tab_id: None,
+                        space_id: None,
+                        folder_id: None,
+                    });
                     if let Some(close) = &close_share {
                         close.call(());
                     }
