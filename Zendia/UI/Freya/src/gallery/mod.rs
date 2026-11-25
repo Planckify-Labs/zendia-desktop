@@ -241,6 +241,7 @@ impl App for GalleryApp {
                     ViewRequest::ShareConfirmClose => {
                         share_state.close();
                     }
+                    ViewRequest::SettingsOpen { .. } | ViewRequest::SettingsClose => {}
                 },
                 _ => {}
             }
@@ -401,7 +402,7 @@ impl App for GalleryApp {
                                     if section_id != "library-media" {
                                         library_state.close();
                                     }
-                                    if section_id != "agent-panel" {
+                                    if section_id != "agent-panel" && section_id != "settings" {
                                         dock_state.open_panels.set(Vec::new());
                                         dock_state.focused_panel.set(None);
                                         dock_state.model_card_open.set(false);

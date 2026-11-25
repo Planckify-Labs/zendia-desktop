@@ -17,7 +17,9 @@ use crate::contributions::{Contributions, SidePanelId, ToolbarArea, ToolbarPlace
 use crate::events::Event;
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
+use crate::modules::{ExtensionInfo, PluginInfo};
 use crate::onboarding::OnboardingState;
+use crate::settings::BrowserSettings;
 use crate::share::ShareSettings;
 use crate::site_info::{SiteExtension, SiteInfo, origin_for_url};
 use crate::space_appearance::SpaceAppearance;
@@ -811,6 +813,10 @@ pub struct BrowserModel {
     pub focus: FocusState,
     pub theme: ThemeSettings,
     pub layout: LayoutSettings,
+    pub settings: BrowserSettings,
+    pub plugins_enabled: bool,
+    pub plugins: Vec<PluginInfo>,
+    pub extensions: Vec<ExtensionInfo>,
     pub vim_mode_enabled: bool,
     pub shield_enabled: bool,
     pub onboarding: OnboardingState,
@@ -1433,6 +1439,19 @@ impl BrowserModel {
             }
             Event::SettingsChanged { theme } => {
                 self.theme = theme.clone();
+                true
+            }
+            Event::BrowserSettingsChanged { settings } => {
+                self.settings = settings.clone();
+                true
+            }
+            Event::PluginsChanged { enabled, plugins } => {
+                self.plugins_enabled = *enabled;
+                self.plugins = plugins.clone();
+                true
+            }
+            Event::ExtensionsChanged { extensions } => {
+                self.extensions = extensions.clone();
                 true
             }
             Event::LayoutSettingsChanged { layout } => {

@@ -19,6 +19,8 @@ use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, motion, use_theme};
 use freya::animation::*;
 use freya::prelude::*;
 use zendia_browser_core::commands::Command;
+use zendia_browser_core::model::{ServiceId, ServiceStatus};
+use zendia_browser_core::modules::service_status_in;
 use zendia_browser_core::site_info::{PermissionState, SiteExtension, SiteInfo};
 
 const SITE_PANEL_WIDTH: f32 = 236.0;
@@ -237,6 +239,15 @@ impl Component for SiteDataPanelCard {
         // Extensions section.
         let add_ext_core = core.clone();
         let close_add_ext = self.on_close.clone();
+        let ext_service_status = {
+            let model = core.model().read();
+            service_status_in(&model.services, ServiceId::ExtensionServer)
+        };
+        let extensions_paused = match &ext_service_status {
+            ServiceStatus::Running => false,
+            ServiceStatus::Stopped { reason } if reason.as_deref() == Some("stub mode") => false,
+            _ => true,
+        };
 
         let ext_tiles = self.extensions.iter().map(|ext| {
             let ext_core = core.clone();
@@ -244,7 +255,7 @@ impl Component for SiteDataPanelCard {
             let close_ext = self.on_close.clone();
             SiteExtensionTile {
                 extension: ext.clone(),
-                enabled: ext.enabled && is_web,
+                enabled: ext.enabled && is_web && !extensions_paused,
                 on_press: EventHandler::new(move |_| {
                     if let Ok(parsed) = Command::from_name_and_args(&ext_cmd, &[]) {
                         ext_core.invoke_or_log(parsed);
@@ -262,11 +273,36 @@ impl Component for SiteDataPanelCard {
             .width(Size::fill())
             .spacing(7.0)
             .child(
-                label()
-                    .text("Extensions")
-                    .font_size(12.5)
-                    .font_weight(FontWeight::MEDIUM)
-                    .color(primary_text),
+                rect()
+                    .width(Size::fill())
+                    .direction(Direction::Horizontal)
+                    .main_align(Alignment::SpaceBetween)
+                    .cross_align(Alignment::center())
+                    .child(
+                        label()
+                            .text("Extensions")
+                            .font_size(12.5)
+                            .font_weight(FontWeight::MEDIUM)
+                            .color(primary_text),
+                    )
+                    .maybe_child(extensions_paused.then(|| {
+                        let status_label = if matches!(ext_service_status, ServiceStatus::Restarting) {
+                            "Restarting"
+                        } else {
+                            "Paused"
+                        };
+                        rect()
+                            .padding(Gaps::new(2.0, 7.0, 2.0, 7.0))
+                            .corner_radius(CornerRadius::new_all(999.0))
+                            .background(theme.rgba(ThemeRole::Warning).with_alpha(0.18).to_color())
+                            .child(
+                                label()
+                                    .text(status_label)
+                                    .font_size(10.0)
+                                    .font_weight(FontWeight::SEMI_BOLD)
+                                    .color(theme.color(ThemeRole::Warning)),
+                            )
+                    })),
             )
             .child(
                 rect()
@@ -277,9 +313,8 @@ impl Component for SiteDataPanelCard {
                     .children(ext_tiles)
                     .child(SiteAddExtensionTile {
                         on_press: EventHandler::new(move |_| {
-                            add_ext_core.invoke_or_log(Command::Custom {
-                                name: "extensions.open".to_string(),
-                                args: Vec::new(),
+                            add_ext_core.invoke_or_log(Command::SettingsOpen {
+                                group: Some(zendia_browser_core::settings::SettingsGroupId::Extensions),
                             });
                             if let Some(close) = &close_add_ext {
                                 close.call(());
@@ -476,10 +511,7 @@ impl Component for SiteDataPanelCard {
                         .cursor(CursorIcon::Pointer)
                         .on_press(move |e: Event<PressEventData>| {
                             e.stop_propagation();
-                            more_settings_core.invoke_or_log(Command::Custom {
-                                name: "settings.open".to_string(),
-                                args: Vec::new(),
-                            });
+                            more_settings_core.invoke_or_log(Command::SettingsOpen { group: None });
                             more_open.set(false);
                             if let Some(close) = &close_more {
                                 close.call(());

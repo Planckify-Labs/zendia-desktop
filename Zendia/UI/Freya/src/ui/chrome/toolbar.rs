@@ -21,8 +21,9 @@ use crate::ui::vim::toolbar_focus::{apply_toolbar_cursor_bg, apply_toolbar_curso
 use freya::prelude::*;
 use zendia_browser_core::address_bar::display_url_for_sidebar;
 use zendia_browser_core::commands::Command;
-use zendia_browser_core::contributions::{BadgeTone, ToolbarItem, ToolbarItemKind};
-use zendia_browser_core::model::{ConversationStatus, SidebarSide};
+use zendia_browser_core::contributions::{BadgeTone, ContributionSource, ToolbarBadge, ToolbarItem, ToolbarItemKind};
+use zendia_browser_core::model::{ConversationStatus, ServiceId, ServiceStatus, SidebarSide};
+use zendia_browser_core::modules::service_status_in;
 
 const ICON_MINIMIZE_SVG: &[u8] =
     br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M2.5 6.5h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"#;
@@ -100,9 +101,15 @@ impl Component for ToolbarItemView {
             .into_element();
         }
 
-        let (active_tab_id, can_back, can_forward, is_loading, sidebar_side, chat_status_dot) = {
+        let (active_tab_id, can_back, can_forward, is_loading, sidebar_side, chat_status_dot, extension_paused) = {
             let model = core.model().read();
             let active = model.active_tab();
+            let is_extension_item = matches!(self.item.source, ContributionSource::Extension { .. });
+            let ext_paused = is_extension_item
+                && !matches!(
+                    service_status_in(&model.services, ServiceId::ExtensionServer),
+                    ServiceStatus::Running
+                );
             let chat_dot = if self.item.id.as_str() == "zendia.chat" {
                 let is_open = dock_state.is_some_and(|ds| ds.is_agent_open());
                 let server_running = model.services.iter().any(|s| {
@@ -129,10 +136,13 @@ impl Component for ToolbarItemView {
                 active.is_some_and(|tab| tab.is_loading),
                 model.layout.sidebar_side,
                 chat_dot,
+                ext_paused,
             )
         };
 
-        let effective_enabled = if !self.item.enabled {
+        let effective_enabled = if extension_paused {
+            true
+        } else if !self.item.enabled {
             false
         } else {
             match self.item.command.as_str() {
@@ -296,7 +306,9 @@ impl Component for ToolbarItemView {
             apply_toolbar_cursor_bg(base, &core.model().read(), self.item.id.as_str(), &theme)
         };
 
-        let icon_role = if effective_enabled {
+        let icon_role = if extension_paused {
+            ThemeRole::Warning
+        } else if effective_enabled {
             if is_zendia_capsule || hovered() || is_pressed {
                 ThemeRole::Text
             } else {
@@ -308,6 +320,11 @@ impl Component for ToolbarItemView {
 
         let effective_badge = if is_agents_button {
             zendia_browser_core::agent::agents_button_badge(&core.model().read()).or_else(|| self.item.badge.clone())
+        } else if extension_paused {
+            Some(ToolbarBadge {
+                text: "II".to_string(),
+                tone: BadgeTone::Warning,
+            })
         } else {
             self.item.badge.clone()
         };
@@ -354,7 +371,13 @@ impl Component for ToolbarItemView {
             .corner_radius(CornerRadius::new_all(radius))
             .background(bg)
             .border(focus_border)
-            .opacity(if effective_enabled { 1.0 } else { 0.36 })
+            .opacity(if extension_paused {
+                0.58
+            } else if effective_enabled {
+                1.0
+            } else {
+                0.36
+            })
             .center()
             .cursor(if effective_enabled {
                 CursorIcon::Pointer

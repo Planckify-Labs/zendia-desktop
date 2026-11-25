@@ -46,6 +46,7 @@ mod library_media;
 mod onboarding;
 mod page_layouts;
 mod pickers;
+pub mod settings_modules;
 
 pub use agent::{AGENT_PANEL_ID, AGENTS_PANEL_ID, build_rich_sample_conversation, sample_declared_agent_page};
 
@@ -112,7 +113,9 @@ impl StubBackend {
     /// Non-tab data (spaces, downloads, history, agents, conversations, models, chat sites, services, and built-in
     /// contributions) is still populated from sample data.
     pub fn new_for_external_tabs() -> Self {
-        Self::from_model(sample_model(false))
+        let backend = Self::from_model(sample_model(false));
+        backend.enable_live_modules();
+        backend
     }
 
     fn from_model(model: BrowserModel) -> Self {
@@ -3377,6 +3380,23 @@ impl BrowserCore for StubBackend {
             | Command::RegionPick { .. }
             | Command::RegionCapture { .. }
             | Command::RegionCancel) => self.handle_picker_or_region_command(command),
+            command @ (Command::SettingsOpen { .. }
+            | Command::SettingsClose
+            | Command::SettingsSet { .. }
+            | Command::SettingsResetGroup { .. }
+            | Command::PluginToggle { .. }
+            | Command::PluginSetEnabled { .. }
+            | Command::PluginSetAllEnabled { .. }
+            | Command::PluginRemove { .. }
+            | Command::PluginOpenPanel { .. }
+            | Command::PluginRestart { .. }
+            | Command::ExtensionToggle { .. }
+            | Command::ExtensionSetEnabled { .. }
+            | Command::ExtensionSetToolbarPinned { .. }
+            | Command::ExtensionInvokeAction { .. }
+            | Command::ServiceSetState { .. }
+            | Command::ServiceCycleState { .. }
+            | Command::ServiceRestart { .. }) => self.handle_settings_or_module_command(command),
             Command::Custom { name, args } => {
                 eprintln!("zendia: stub backend does not handle command `{name}` (args: {args:?})");
                 Err(CommandError::UnknownCommand(name))
@@ -4502,6 +4522,10 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         focus: crate::focus::FocusState::default(),
         theme: ThemeSettings::default(),
         layout: LayoutSettings::default(),
+        settings: crate::settings::BrowserSettings::default(),
+        plugins_enabled: true,
+        plugins: crate::modules::sample_plugins(),
+        extensions: crate::modules::sample_extensions(),
         vim_mode_enabled: false,
         shield_enabled: true,
         onboarding: crate::onboarding::OnboardingState::default_seen(),

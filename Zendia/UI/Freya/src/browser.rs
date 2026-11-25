@@ -27,6 +27,7 @@ use crate::ui::page::{
     PageArea, PageStage, PageSurfaceContext, PaneMode, VimOverlayLayer, use_provide_keymap, use_provide_page_surfaces,
 };
 use crate::ui::panels::use_provide_dock_state;
+use crate::ui::settings::use_provide_settings_host;
 use crate::ui::share::{ShareConfirmOverlay, use_provide_share_state};
 use crate::ui::spaces::{GradientGeneratorOverlay, use_provide_space_editing_state};
 use crate::ui::theme::{ThemeRole, use_provide_theme, use_theme};
@@ -347,6 +348,7 @@ pub fn app() -> impl IntoElement {
             }
         }
     });
+    let settings_host = use_provide_settings_host();
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -537,6 +539,15 @@ pub fn app() -> impl IntoElement {
                 }
                 ViewRequest::ShareConfirmClose => {
                     share_state.close();
+                }
+                ViewRequest::SettingsOpen { group } => {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    settings_host.open_os_window(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, *group);
+                }
+                ViewRequest::SettingsClose => {
+                    settings_host.close_os_window();
                 }
             },
             _ => {}

@@ -1161,6 +1161,100 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "settings",
+        title: "Settings & Modules",
+        phase: 13,
+        icon: "settings",
+        summary: "Native settings window (Zen and Zendia groups, search), plugins, extension toolbar buttons, and service-down states.",
+        states: &[
+            GalleryStateSpec {
+                id: "look-and-feel",
+                label: "Look & Feel",
+                description: "Browser Layout preview cards, vertical tabs, Tokyonight theme & glass sliders, compact mode, and window drag.",
+            },
+            GalleryStateSpec {
+                id: "tab-management",
+                label: "Tabs",
+                description: "Workspace tab cycling toggles, pinned tab restore/essentials, and Close Tab Shortcut Behavior.",
+            },
+            GalleryStateSpec {
+                id: "spaces",
+                label: "Spaces",
+                description: "Session continuity, active spaces overview, and Create New Space link.",
+            },
+            GalleryStateSpec {
+                id: "glance",
+                label: "Glance",
+                description: "Enable Glance toggle and link-click trigger modifier selector.",
+            },
+            GalleryStateSpec {
+                id: "vim",
+                label: "Vim",
+                description: "Opt-in Vim mode toggle, mode indicator resting style, and quick shortcut reference.",
+            },
+            GalleryStateSpec {
+                id: "agents",
+                label: "Agents",
+                description: "Default agent selector, side panel dock layout/side, automation toggles, and instructions link.",
+            },
+            GalleryStateSpec {
+                id: "webchat",
+                label: "Web Chat",
+                description: "Web chat dock layout/side, configured sites list, and add custom chat site form.",
+            },
+            GalleryStateSpec {
+                id: "plugins",
+                label: "Plugins",
+                description: "Sandboxed plugin list with master toggle, Page Notes sample plugin, capabilities, and details.",
+            },
+            GalleryStateSpec {
+                id: "plugins-stopped",
+                label: "Plugin Stopped",
+                description: "Plugin list showing a stopped plugin sandbox alongside a running plugin with Restart recovery.",
+            },
+            GalleryStateSpec {
+                id: "extensions-services",
+                label: "Ext & Services",
+                description: "WebExtension cards with toolbar pin toggles and live Background Services state controls.",
+            },
+            GalleryStateSpec {
+                id: "search-results",
+                label: "Search",
+                description: "Live settings search matching \"sidebar\" with grouped interactive controls.",
+            },
+            GalleryStateSpec {
+                id: "search-empty",
+                label: "No Matches",
+                description: "Settings search empty state when no setting matches the typed query.",
+            },
+            GalleryStateSpec {
+                id: "ext-toolbar-normal",
+                label: "Ext Normal",
+                description: "Contributed uBlock Origin extension button active in the top toolbar and Site Data Panel.",
+            },
+            GalleryStateSpec {
+                id: "ext-toolbar-paused",
+                label: "Ext Paused",
+                description: "ExtensionServer stopped: paused extension toolbar button (II warning badge) and paused Site Data Panel.",
+            },
+            GalleryStateSpec {
+                id: "service-down-agent",
+                label: "Agent Down",
+                description: "Agent panel with AgentServer stopped, preserving the conversation trace with Restart action.",
+            },
+            GalleryStateSpec {
+                id: "service-down-plugin",
+                label: "Plugin Down",
+                description: "Docked Page Notes plugin panel showing the stopped state when PluginHost is down.",
+            },
+            GalleryStateSpec {
+                id: "service-down-input",
+                label: "Input Down",
+                description: "Vim Mode settings with InputServer stopped, noting fallback to standard shortcuts.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.

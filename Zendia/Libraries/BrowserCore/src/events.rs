@@ -19,9 +19,11 @@ use crate::model::{
     ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings,
     WhichKeyState, WindowId,
 };
+use crate::modules::{ExtensionInfo, PluginInfo};
 use crate::onboarding::OnboardingState;
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
+use crate::settings::{BrowserSettings, SettingsGroupId};
 use crate::share::{SharePayload, ShareSettings};
 use crate::site_info::SiteInfo;
 use crate::space_appearance::SpaceAppearance;
@@ -213,6 +215,16 @@ pub enum Event {
     SettingsChanged {
         theme: ThemeSettings,
     },
+    BrowserSettingsChanged {
+        settings: BrowserSettings,
+    },
+    PluginsChanged {
+        enabled: bool,
+        plugins: Vec<PluginInfo>,
+    },
+    ExtensionsChanged {
+        extensions: Vec<ExtensionInfo>,
+    },
     LayoutSettingsChanged {
         layout: LayoutSettings,
     },
@@ -342,6 +354,10 @@ pub enum ViewRequest {
     ShareConfirmOpen { payload: SharePayload },
     /// Close the share link confirmation modal.
     ShareConfirmClose,
+    /// Open Zendia's native settings window, optionally focused on a specific group.
+    SettingsOpen { group: Option<SettingsGroupId> },
+    /// Close Zendia's native settings window.
+    SettingsClose,
 }
 
 /// Returned when the core's event bus has been dropped.
