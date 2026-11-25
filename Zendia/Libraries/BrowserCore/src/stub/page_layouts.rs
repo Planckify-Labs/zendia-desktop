@@ -8,7 +8,7 @@
 
 use super::{StubBackend, StubState};
 use crate::commands::{Command, CommandError, CommandResult};
-use crate::events::Event;
+use crate::events::{Event, ViewRequest};
 use crate::media::{self, MediaControl};
 use crate::model::{
     Download, DownloadId, DownloadStatus, MediaSessionId, SpaceId, SplitDirection, SplitGroup, SplitGroupId, TabId,
@@ -33,7 +33,7 @@ impl StubBackend {
                 let new_tab = self.open_tab_for(&name, None, anchor, tab_source.as_ref())?;
                 self.split_with(&name, anchor, new_tab, DropZone::Right)?;
                 self.activate(new_tab, tab_source.as_ref())?;
-                self.bus.publish(Event::AddressBarOpenRequested {
+                self.request_view(ViewRequest::AddressBarOpen {
                     new_tab: false,
                     initial_query: None,
                 });
@@ -162,7 +162,7 @@ impl StubBackend {
                 Ok(())
             }
             Command::LayoutCompactRevealSidebar => {
-                self.bus.publish(Event::CompactSidebarRevealRequested);
+                self.request_view(ViewRequest::CompactSidebarReveal);
                 Ok(())
             }
             Command::LayoutSetTabSwitchMotion { enabled } => {

@@ -32,8 +32,10 @@ Read these fully before writing code:
   so keymaps and the palette reach it. Handle it in the stub (`stub.rs`, or a child module like
   `stub/page_layouts.rs`), publish events, and make `BrowserModel::apply_event` apply them, because each view keeps
   its own copy of the model and only events update it.
-- **View-level requests** (open a popup in this window) follow the existing core-event pattern, such as
-  `AddressBarOpenRequested`. They reach every window; list each new one in your report for the phase 6 routing fix.
+- **View-level requests** (open a popup or panel in this window) are a `ViewRequest` variant, published by the stub
+  with `self.request_view(...)`. The core stamps each with the window that invoked the command, and `CoreView` drops
+  requests for other windows, so never add a plain `Event` for one. Handle the new variant in the observers in
+  `browser.rs` and `gallery/mod.rs`.
 - **Non-UI logic goes in BrowserCore with unit tests**: geometry, ranking, ordering rules, state changes.
 - **License**: every new file starts with the Zendia header (`Copyright (c) 2026-present, the Zendia developers.` and
   `SPDX-License-Identifier: BSD-2-Clause`). Never copy Zen or Firefox code or CSS (MPL); re-express what you learn as

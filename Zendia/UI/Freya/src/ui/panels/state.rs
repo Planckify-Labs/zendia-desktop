@@ -12,7 +12,7 @@
 use freya::prelude::*;
 use zendia_browser_core::agent::{AGENT_PANEL_ID, AGENTS_PANEL_ID, InstructionAttachment};
 use zendia_browser_core::contributions::SidePanelId;
-use zendia_browser_core::events::Event;
+use zendia_browser_core::events::ViewRequest;
 use zendia_browser_core::webchat::WEBCHAT_PANEL_ID;
 
 /// Microphone dictation state inside the agent composer.
@@ -160,22 +160,22 @@ impl DockHostState {
             .and_then(|(id, width)| (id == panel_id).then_some(*width))
     }
 
-    /// Applies view-level `BrowserCore` events that drive side panel visibility and agent sub-views.
-    pub fn apply_event(&mut self, event: &Event) {
-        match event {
-            Event::PanelOpenRequested { panel_id, focus } => {
+    /// Applies a view request that opens or closes side panels or the agent panel's model card and instructions page.
+    pub fn apply_request(&mut self, request: &ViewRequest) {
+        match request {
+            ViewRequest::PanelOpen { panel_id, focus } => {
                 self.open_panel(panel_id.clone());
                 if !*focus {
                     self.focused_panel.set_if_modified(None);
                 }
             }
-            Event::PanelCloseRequested { panel_id } => {
+            ViewRequest::PanelClose { panel_id } => {
                 self.close_panel(panel_id);
             }
-            Event::PanelToggled { panel_id } => {
+            ViewRequest::PanelToggle { panel_id } => {
                 self.toggle_panel(panel_id.clone());
             }
-            Event::AgentModelCardRequested => {
+            ViewRequest::AgentModelCard => {
                 let agent_id = SidePanelId::new(AGENT_PANEL_ID);
                 if !self.is_open(&agent_id) {
                     self.open_panel(agent_id);
@@ -186,7 +186,7 @@ impl DockHostState {
                     self.model_card_list_view.set_if_modified(false);
                 }
             }
-            Event::AgentInstructionsRequested => {
+            ViewRequest::AgentInstructions => {
                 let agent_id = SidePanelId::new(AGENT_PANEL_ID);
                 if !self.is_open(&agent_id) {
                     self.open_panel(agent_id);

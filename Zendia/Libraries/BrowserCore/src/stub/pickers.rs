@@ -9,7 +9,7 @@
 use super::StubBackend;
 use crate::BrowserCore;
 use crate::commands::{Command, CommandError, CommandResult};
-use crate::events::Event;
+use crate::events::{Event, ViewRequest};
 use crate::model::TabId;
 use crate::picker::{PickerRequest, PickerRequestId, build_builtin_picker};
 use crate::region::{RegionCapture, RegionRect};
@@ -46,9 +46,9 @@ impl StubBackend {
             state.active_picker.take().map(|request| request.id)
         };
         if closed_id.is_some() {
-            self.bus.publish(Event::PickerClosed { request_id: closed_id });
+            self.request_view(ViewRequest::PickerClosed { request_id: closed_id });
         }
-        self.bus.publish(Event::RegionPickCancelled);
+        self.request_view(ViewRequest::RegionPickCancelled);
     }
 
     /// Handles `picker.*` and `region.*` commands routed from [`StubBackend::invoke`].
@@ -116,7 +116,7 @@ impl StubBackend {
             resolved
         };
 
-        self.bus.publish(Event::PickerOpenRequested { request });
+        self.request_view(ViewRequest::PickerOpen { request });
         Ok(())
     }
 
@@ -160,7 +160,7 @@ impl StubBackend {
             request_id: resolved_id.clone(),
             item_id,
         });
-        self.bus.publish(Event::PickerClosed {
+        self.request_view(ViewRequest::PickerClosed {
             request_id: Some(resolved_id),
         });
 
@@ -187,7 +187,7 @@ impl StubBackend {
                 state.active_picker.take().map(|active| active.id)
             }
         };
-        self.bus.publish(Event::PickerClosed { request_id: closed_id });
+        self.request_view(ViewRequest::PickerClosed { request_id: closed_id });
         Ok(())
     }
 
@@ -207,7 +207,7 @@ impl StubBackend {
                 state.model.active_tab
             }
         };
-        self.bus.publish(Event::RegionPickRequested { tab_id: target_tab });
+        self.request_view(ViewRequest::RegionPick { tab_id: target_tab });
         Ok(())
     }
 
@@ -251,7 +251,7 @@ impl StubBackend {
     }
 
     fn handle_region_cancel(&self) -> CommandResult {
-        self.bus.publish(Event::RegionPickCancelled);
+        self.request_view(ViewRequest::RegionPickCancelled);
         Ok(())
     }
 }
@@ -260,7 +260,7 @@ impl StubBackend {
 mod tests {
     use crate::BrowserCore;
     use crate::commands::Command;
-    use crate::events::Event;
+    use crate::events::{Event, ViewRequest};
     use crate::model::TabId;
     use crate::picker::{PickerItem, PickerLayout, PickerRequest, PickerRequestId};
     use crate::region::RegionRect;
@@ -296,8 +296,14 @@ mod tests {
         let mut saw_region_cancel = false;
         while let Ok(ev) = sub.try_recv() {
             match ev {
-                Event::PickerClosed { .. } => saw_closed = true,
-                Event::RegionPickCancelled => saw_region_cancel = true,
+                Event::ViewRequested {
+                    request: ViewRequest::PickerClosed { .. },
+                    ..
+                } => saw_closed = true,
+                Event::ViewRequested {
+                    request: ViewRequest::RegionPickCancelled,
+                    ..
+                } => saw_region_cancel = true,
                 _ => {}
             }
         }
@@ -338,9 +344,15 @@ mod tests {
         let mut saw_closed = false;
         while let Ok(ev) = sub.try_recv() {
             match ev {
-                Event::PickerOpenRequested { .. } => saw_open = true,
+                Event::ViewRequested {
+                    request: ViewRequest::PickerOpen { .. },
+                    ..
+                } => saw_open = true,
                 Event::PickerChosen { item_id, .. } if item_id == "tab.11" => saw_chosen = true,
-                Event::PickerClosed { .. } => saw_closed = true,
+                Event::ViewRequested {
+                    request: ViewRequest::PickerClosed { .. },
+                    ..
+                } => saw_closed = true,
                 _ => {}
             }
         }
@@ -426,9 +438,15 @@ mod tests {
         let mut saw_cancel = false;
         while let Ok(ev) = sub.try_recv() {
             match ev {
-                Event::RegionPickRequested { .. } => saw_pick = true,
+                Event::ViewRequested {
+                    request: ViewRequest::RegionPick { .. },
+                    ..
+                } => saw_pick = true,
                 Event::RegionCaptured { .. } => capture_count += 1,
-                Event::RegionPickCancelled => saw_cancel = true,
+                Event::ViewRequested {
+                    request: ViewRequest::RegionPickCancelled,
+                    ..
+                } => saw_cancel = true,
                 _ => {}
             }
         }

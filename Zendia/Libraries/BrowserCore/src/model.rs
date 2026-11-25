@@ -967,6 +967,18 @@ impl BrowserModel {
         self.services.iter().find(|state| state.service == service)
     }
 
+    /// Returns the window that takes view requests from callers with no window of their own.
+    ///
+    /// The core does not track window focus yet, so this is the first window.
+    pub fn focused_window(&self) -> Option<WindowId> {
+        self.windows.first().map(|window| window.id)
+    }
+
+    /// Returns whether a view request addressed to `target` is for the view of `window`.
+    pub fn view_request_is_for(&self, target: Option<WindowId>, window: WindowId) -> bool {
+        target.or_else(|| self.focused_window()) == Some(window)
+    }
+
     /// Returns profile settings for `panel_id`, falling back to its contribution's defaults.
     pub fn panel_prefs(&self, panel_id: &SidePanelId) -> SidePanelPrefs {
         if let Some(prefs) = self.side_panel_prefs.get(panel_id) {
@@ -1077,7 +1089,7 @@ impl BrowserModel {
 
     /// Applies an event published by the core to keep a view's cached snapshot in sync.
     ///
-    /// Returns `true` if the snapshot changed, or `false` when the event is view-local (such as `PanelToggled`) or
+    /// Returns `true` if the snapshot changed, or `false` when the event is view-local (such as `ViewRequested`) or
     /// requires a full snapshot refresh (`ModelReplaced`).
     pub fn apply_event(&mut self, event: &Event) -> bool {
         match event {
@@ -1399,32 +1411,12 @@ impl BrowserModel {
                 self.webchat_dictating = *dictating;
                 true
             }
-            Event::PanelToggled { .. }
-            | Event::PanelOpenRequested { .. }
-            | Event::PanelCloseRequested { .. }
-            | Event::AgentModelCardRequested
-            | Event::AgentInstructionsRequested
-            | Event::AgentRosterChanged
-            | Event::WebChatReloadRequested { .. }
-            | Event::WebChatNavigateHomeRequested { .. }
-            | Event::LocationFocusRequested
-            | Event::AddressBarOpenRequested { .. }
-            | Event::PaletteOpenRequested { .. }
-            | Event::SitePanelToggleRequested
-            | Event::AppMenuToggleRequested
-            | Event::AboutDialogRequested
+            Event::AgentRosterChanged
             | Event::QuitRequested
             | Event::ClipboardCopyRequested { .. }
-            | Event::TabRenameRequested { .. }
-            | Event::FolderRenameRequested { .. }
-            | Event::CompactSidebarRevealRequested
-            | Event::WhichKeyAllRequested { .. }
-            | Event::PickerOpenRequested { .. }
             | Event::PickerChosen { .. }
-            | Event::PickerClosed { .. }
-            | Event::RegionPickRequested { .. }
             | Event::RegionCaptured { .. }
-            | Event::RegionPickCancelled
+            | Event::ViewRequested { .. }
             | Event::ModelReplaced => false,
         }
     }

@@ -17,7 +17,7 @@ use crate::contributions::{
     ContributionId, ContributionSource, Contributions, MenuEntryKind, SidePanelEntry, SidePanelId, SidePanelLayout,
     SidePanelSide, ToolbarArea, ToolbarItem, ToolbarItemKind, ToolbarPlacement, ToolbarPlacementRules,
 };
-use crate::events::{Event, EventBus, Subscription};
+use crate::events::{Event, EventBus, Subscription, ViewRequest};
 use crate::input_state::StatuslineSettings;
 use crate::menus::{APP_MENU_VIM_MODE_ID, builtin_menu_entries};
 use crate::model::{
@@ -35,6 +35,7 @@ use crate::site_info::{
     PermissionState, SiteDataSummary, SiteExtension, SiteInfo, SitePermission, SitePermissionKind, origin_for_url,
 };
 use crate::tab_source::{TabSource, TabUpdate};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -47,6 +48,27 @@ mod pickers;
 pub use agent::{AGENT_PANEL_ID, AGENTS_PANEL_ID, build_rich_sample_conversation, sample_declared_agent_page};
 
 const MAX_ESSENTIALS: usize = 12;
+
+thread_local! {
+    /// The window whose view invoked the command running on this thread, if any.
+    static INVOKING_WINDOW: Cell<Option<WindowId>> = const { Cell::new(None) };
+}
+
+/// Sets [`INVOKING_WINDOW`] for one command and restores the previous value when dropped, so nested commands keep
+/// their caller's window and a panic does not leak it into the next command.
+struct InvokingWindowScope(Option<WindowId>);
+
+impl InvokingWindowScope {
+    fn enter(window: WindowId) -> Self {
+        Self(INVOKING_WINDOW.replace(Some(window)))
+    }
+}
+
+impl Drop for InvokingWindowScope {
+    fn drop(&mut self) {
+        INVOKING_WINDOW.set(self.0);
+    }
+}
 
 struct StubState {
     model: BrowserModel,
@@ -1183,7 +1205,7 @@ impl StubBackend {
     }
 
     fn handle_tab_start_rename(&self, tab_id: TabId) -> CommandResult {
-        self.bus.publish(Event::TabRenameRequested { tab_id });
+        self.request_view(ViewRequest::TabRename { tab_id });
         Ok(())
     }
 
@@ -1508,7 +1530,7 @@ impl StubBackend {
                 target: format!("folder {}", folder_id.0),
             });
         }
-        self.bus.publish(Event::FolderRenameRequested { folder_id });
+        self.request_view(ViewRequest::FolderRename { folder_id });
         Ok(())
     }
 
@@ -1687,7 +1709,7 @@ impl StubBackend {
                 target: format!("panel {}", panel_id.as_str()),
             });
         }
-        self.bus.publish(Event::PanelToggled { panel_id });
+        self.request_view(ViewRequest::PanelToggle { panel_id });
         Ok(())
     }
 
@@ -1816,7 +1838,7 @@ impl StubBackend {
 
     fn handle_webchat_reload(&self, site_id: Option<ChatSiteId>) -> CommandResult {
         let target = self.resolve_chat_site_id(site_id, "webchat.reload")?;
-        self.bus.publish(Event::WebChatReloadRequested { site_id: target });
+        self.request_view(ViewRequest::WebChatReload { site_id: target });
         Ok(())
     }
 
@@ -1826,8 +1848,7 @@ impl StubBackend {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.model.webchat_pending_prompt = None;
         }
-        self.bus
-            .publish(Event::WebChatNavigateHomeRequested { site_id: target });
+        self.request_view(ViewRequest::WebChatNavigateHome { site_id: target });
         self.publish_webchat_state();
         Ok(())
     }
@@ -1881,7 +1902,7 @@ impl StubBackend {
             prompt.len()
         );
         self.publish_webchat_state();
-        self.bus.publish(Event::PanelOpenRequested {
+        self.request_view(ViewRequest::PanelOpen {
             panel_id: SidePanelId::new(crate::webchat::WEBCHAT_PANEL_ID),
             focus: true,
         });
@@ -2064,6 +2085,17 @@ impl StubBackend {
     }
 }
 
+impl StubBackend {
+    /// Sends `request` to the view of the window that invoked the running command, or to the focused window when the
+    /// caller has none.
+    fn request_view(&self, request: ViewRequest) {
+        self.bus.publish(Event::ViewRequested {
+            window: INVOKING_WINDOW.get(),
+            request,
+        });
+    }
+}
+
 impl BrowserCore for StubBackend {
     fn model(&self) -> BrowserModel {
         self.state
@@ -2119,12 +2151,11 @@ impl BrowserCore for StubBackend {
                 }
             }
             Command::LocationFocus => {
-                self.bus.publish(Event::LocationFocusRequested);
+                self.request_view(ViewRequest::LocationFocus);
                 Ok(())
             }
             Command::AddressBarOpen { new_tab, initial_query } => {
-                self.bus
-                    .publish(Event::AddressBarOpenRequested { new_tab, initial_query });
+                self.request_view(ViewRequest::AddressBarOpen { new_tab, initial_query });
                 Ok(())
             }
             Command::AddressBarSubmit { input, new_tab } => self.handle_address_bar_submit(input, new_tab, tab_source),
@@ -2141,11 +2172,11 @@ impl BrowserCore for StubBackend {
                 Ok(())
             }
             Command::PaletteOpen { initial_query } => {
-                self.bus.publish(Event::PaletteOpenRequested { initial_query });
+                self.request_view(ViewRequest::PaletteOpen { initial_query });
                 Ok(())
             }
             Command::SitePanelToggle => {
-                self.bus.publish(Event::SitePanelToggleRequested);
+                self.request_view(ViewRequest::SitePanelToggle);
                 Ok(())
             }
             Command::SitePermissionSet {
@@ -2433,11 +2464,11 @@ impl BrowserCore for StubBackend {
                 }
             }
             Command::MenuAppToggle => {
-                self.bus.publish(Event::AppMenuToggleRequested);
+                self.request_view(ViewRequest::AppMenuToggle);
                 Ok(())
             }
             Command::AppAbout => {
-                self.bus.publish(Event::AboutDialogRequested);
+                self.request_view(ViewRequest::AboutDialog);
                 Ok(())
             }
             Command::AppQuit => {
@@ -2593,6 +2624,11 @@ impl BrowserCore for StubBackend {
                 Err(CommandError::UnknownCommand(name))
             }
         }
+    }
+
+    fn invoke_in(&self, window: WindowId, command: Command) -> CommandResult {
+        let _scope = InvokingWindowScope::enter(window);
+        self.invoke(command)
     }
 
     fn commands(&self) -> Vec<CommandDescriptor> {
@@ -3691,6 +3727,39 @@ mod tests {
     use super::*;
     use crate::events::TryRecvError;
 
+    #[test]
+    fn view_requests_go_to_the_invoking_window_or_the_focused_one() {
+        let core = StubBackend::new();
+        let sub = core.subscribe();
+
+        core.invoke_in(WindowId(2), Command::PaletteOpen { initial_query: None })
+            .unwrap();
+        assert_eq!(
+            sub.try_recv(),
+            Ok(Event::ViewRequested {
+                window: Some(WindowId(2)),
+                request: ViewRequest::PaletteOpen { initial_query: None },
+            })
+        );
+
+        // A caller with no window, such as an agent, leaves the request to the focused window.
+        core.invoke(Command::SitePanelToggle).unwrap();
+        assert_eq!(
+            sub.try_recv(),
+            Ok(Event::ViewRequested {
+                window: None,
+                request: ViewRequest::SitePanelToggle,
+            })
+        );
+
+        let model = core.model();
+        assert_eq!(model.focused_window(), Some(WindowId(1)));
+        assert!(model.view_request_is_for(None, WindowId(1)));
+        assert!(!model.view_request_is_for(None, WindowId(2)));
+        assert!(model.view_request_is_for(Some(WindowId(2)), WindowId(2)));
+        assert!(!model.view_request_is_for(Some(WindowId(2)), WindowId(1)));
+    }
+
     struct RecordingTabSource {
         core: Arc<StubBackend>,
         calls: Mutex<Vec<String>>,
@@ -3898,7 +3967,13 @@ mod tests {
 
         let mut saw_panel_toggle = false;
         while let Ok(event) = sub.try_recv() {
-            if matches!(event, Event::PanelToggled { .. }) {
+            if matches!(
+                event,
+                Event::ViewRequested {
+                    request: ViewRequest::PanelToggle { .. },
+                    ..
+                }
+            ) {
                 saw_panel_toggle = true;
             }
             view_model.apply_event(&event);
@@ -4144,7 +4219,13 @@ mod tests {
         let sub = core.subscribe();
 
         core.invoke(Command::LocationFocus).unwrap();
-        assert_eq!(sub.try_recv(), Ok(Event::LocationFocusRequested));
+        assert_eq!(
+            sub.try_recv(),
+            Ok(Event::ViewRequested {
+                window: None,
+                request: ViewRequest::LocationFocus
+            })
+        );
 
         core.invoke(Command::DebugCycleInputState).unwrap();
         let mut events = Vec::new();
@@ -4830,9 +4911,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             sub.try_recv().unwrap(),
-            Event::AddressBarOpenRequested {
-                new_tab: true,
-                initial_query: None
+            Event::ViewRequested {
+                window: None,
+                request: ViewRequest::AddressBarOpen {
+                    new_tab: true,
+                    initial_query: None
+                }
             }
         );
 
@@ -4842,13 +4926,22 @@ mod tests {
         .unwrap();
         assert_eq!(
             sub.try_recv().unwrap(),
-            Event::PaletteOpenRequested {
-                initial_query: Some("theme".to_string())
+            Event::ViewRequested {
+                window: None,
+                request: ViewRequest::PaletteOpen {
+                    initial_query: Some("theme".to_string())
+                }
             }
         );
 
         core.invoke(Command::SitePanelToggle).unwrap();
-        assert_eq!(sub.try_recv().unwrap(), Event::SitePanelToggleRequested);
+        assert_eq!(
+            sub.try_recv().unwrap(),
+            Event::ViewRequested {
+                window: None,
+                request: ViewRequest::SitePanelToggle
+            }
+        );
 
         // Search engine setting updates core state and governs address_bar.submit.
         core.invoke(Command::SettingsSetSearchEngine {

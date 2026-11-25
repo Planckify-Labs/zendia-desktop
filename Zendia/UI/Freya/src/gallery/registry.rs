@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use zendia_browser_core::BrowserCore;
 use zendia_browser_core::commands::{Command, CommandDescriptor, CommandError, CommandResult};
 use zendia_browser_core::events::Subscription;
-use zendia_browser_core::model::{BrowserModel, ThemeScheme};
+use zendia_browser_core::model::{BrowserModel, ThemeScheme, WindowId};
 use zendia_browser_core::stub::StubBackend;
 
 /// One named state selectable within a gallery section.
@@ -1160,6 +1160,22 @@ fn format_command_detail(command: &Command) -> String {
     }
 }
 
+impl GalleryCore {
+    /// Runs `command` through `invoke` and records the outcome in the stub log.
+    fn invoke_logged(&self, command: Command, invoke: impl FnOnce(Command) -> CommandResult) -> CommandResult {
+        let name = command.name().to_string();
+        let detail = format_command_detail(&command);
+        let result = invoke(command);
+        let outcome = match &result {
+            Ok(()) => CommandLogOutcome::Handled,
+            Err(CommandError::UnknownCommand(_)) => CommandLogOutcome::Unhandled,
+            Err(error) => CommandLogOutcome::Error(error.to_string()),
+        };
+        self.record(&name, detail, outcome);
+        result
+    }
+}
+
 impl BrowserCore for GalleryCore {
     fn model(&self) -> BrowserModel {
         self.stub.model()
@@ -1170,16 +1186,11 @@ impl BrowserCore for GalleryCore {
     }
 
     fn invoke(&self, command: Command) -> CommandResult {
-        let name = command.name().to_string();
-        let detail = format_command_detail(&command);
-        let result = self.stub.invoke(command);
-        let outcome = match &result {
-            Ok(()) => CommandLogOutcome::Handled,
-            Err(CommandError::UnknownCommand(_)) => CommandLogOutcome::Unhandled,
-            Err(error) => CommandLogOutcome::Error(error.to_string()),
-        };
-        self.record(&name, detail, outcome);
-        result
+        self.invoke_logged(command, |command| self.stub.invoke(command))
+    }
+
+    fn invoke_in(&self, window: WindowId, command: Command) -> CommandResult {
+        self.invoke_logged(command, |command| self.stub.invoke_in(window, command))
     }
 
     fn commands(&self) -> Vec<CommandDescriptor> {

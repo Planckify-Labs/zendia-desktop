@@ -14,7 +14,7 @@ use crate::agent::{
 };
 use crate::commands::{Command, CommandError, CommandResult};
 use crate::contributions::{SidePanelId, SidePanelLayout, SidePanelSide};
-use crate::events::Event;
+use crate::events::{Event, ViewRequest};
 use crate::model::{
     AgentId, Conversation, ConversationId, ConversationStatus, ConversationStep, ModelEffort, ModelId, ServiceId,
     ServiceState, ServiceStatus, StepId, StepKind, StepStatus, TabId,
@@ -60,11 +60,11 @@ impl StubBackend {
             }
             Command::AgentMarkSeen { conversation_id } => self.handle_agent_mark_seen(conversation_id),
             Command::AgentOpenInstructions => {
-                self.bus.publish(Event::PanelOpenRequested {
+                self.request_view(ViewRequest::PanelOpen {
                     panel_id: SidePanelId::new(AGENT_PANEL_ID),
                     focus: true,
                 });
-                self.bus.publish(Event::AgentInstructionsRequested);
+                self.request_view(ViewRequest::AgentInstructions);
                 Ok(())
             }
             Command::AgentInstructionAdd => self.handle_instruction_add(),
@@ -107,13 +107,13 @@ impl StubBackend {
 
     fn handle_panel_open(&self, panel_id: SidePanelId, focus: bool) -> CommandResult {
         self.ensure_known_panel(&panel_id, "panel.open")?;
-        self.bus.publish(Event::PanelOpenRequested { panel_id, focus });
+        self.request_view(ViewRequest::PanelOpen { panel_id, focus });
         Ok(())
     }
 
     fn handle_panel_close(&self, panel_id: SidePanelId) -> CommandResult {
         self.ensure_known_panel(&panel_id, "panel.close")?;
-        self.bus.publish(Event::PanelCloseRequested { panel_id });
+        self.request_view(ViewRequest::PanelClose { panel_id });
         Ok(())
     }
 
@@ -520,11 +520,11 @@ impl StubBackend {
 
     fn handle_agent_model(&self, agent_id: Option<AgentId>, model_id: Option<ModelId>) -> CommandResult {
         if agent_id.is_none() && model_id.is_none() {
-            self.bus.publish(Event::PanelOpenRequested {
+            self.request_view(ViewRequest::PanelOpen {
                 panel_id: SidePanelId::new(AGENT_PANEL_ID),
                 focus: false,
             });
-            self.bus.publish(Event::AgentModelCardRequested);
+            self.request_view(ViewRequest::AgentModelCard);
             return Ok(());
         }
         let target_agent = self.resolve_target_agent_id(agent_id);
@@ -861,7 +861,7 @@ impl StubBackend {
                 conversation_id: Some(conv_id),
             });
         }
-        self.bus.publish(Event::PanelOpenRequested {
+        self.request_view(ViewRequest::PanelOpen {
             panel_id: SidePanelId::new(AGENT_PANEL_ID),
             focus: true,
         });

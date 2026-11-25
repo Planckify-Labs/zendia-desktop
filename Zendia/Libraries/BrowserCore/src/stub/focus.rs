@@ -636,6 +636,7 @@ impl StubBackend {
 mod tests {
     use super::*;
     use crate::BrowserCore;
+    use crate::events::ViewRequest;
     use crate::model::{SpaceId, SplitGroup, SplitGroupId, TabId};
 
     fn stub_with_vim() -> StubBackend {
@@ -752,7 +753,13 @@ mod tests {
         assert_eq!(core.model().input_mode, InputMode::Normal);
         let mut saw_app_menu = false;
         while let Ok(event) = sub.try_recv() {
-            if matches!(event, Event::AppMenuToggleRequested) {
+            if matches!(
+                event,
+                Event::ViewRequested {
+                    request: ViewRequest::AppMenuToggle,
+                    ..
+                }
+            ) {
                 saw_app_menu = true;
             }
         }

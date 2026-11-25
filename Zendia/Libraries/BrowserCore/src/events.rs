@@ -14,7 +14,7 @@ use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::model::{
     AgentId, Bookmark, ChatSite, ChatSiteId, Conversation, ConversationId, Download, Essential, Folder, FolderId,
     InputMode, LayoutSettings, MediaSession, NotificationId, PinnedTab, ServiceState, SidebarNotification, Space,
-    SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings, WhichKeyState,
+    SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings, WhichKeyState, WindowId,
 };
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
@@ -77,12 +77,6 @@ pub enum Event {
     EssentialsPromoChanged {
         visible: bool,
     },
-    TabRenameRequested {
-        tab_id: TabId,
-    },
-    FolderRenameRequested {
-        folder_id: FolderId,
-    },
     SplitGroupUpdated {
         group: SplitGroup,
     },
@@ -105,20 +99,6 @@ pub enum Event {
     /// A download began; views play the download animation.
     DownloadStarted {
         download: Download,
-    },
-    /// View-level request to slide the compact mode sidebar out or back (Zen's `toggleSidebar`).
-    CompactSidebarRevealRequested,
-    PanelToggled {
-        panel_id: SidePanelId,
-    },
-    /// View-level request to open a side panel (optionally focusing its primary input).
-    PanelOpenRequested {
-        panel_id: SidePanelId,
-        focus: bool,
-    },
-    /// View-level request to close a side panel.
-    PanelCloseRequested {
-        panel_id: SidePanelId,
     },
     /// Profile settings for a side panel changed (layout, side, width, or fallback).
     PanelPrefsChanged {
@@ -143,10 +123,6 @@ pub enum Event {
     ConversationRemoved {
         conversation_id: ConversationId,
     },
-    /// View-level request to open the model card anchored on the agent panel's model chip.
-    AgentModelCardRequested,
-    /// View-level request to open the instructions overlay inside the agent panel.
-    AgentInstructionsRequested,
     /// Published whenever the cross-window agents roster changes (status, confirmation, or dismissal).
     AgentRosterChanged,
     /// Published when the web chat site list, active site, pending prompt, or dictation state changes.
@@ -156,23 +132,6 @@ pub enum Event {
         pending_prompt: Option<(ChatSiteId, String)>,
         dictating: bool,
     },
-    /// View-level request to reload the Hub view backing a web chat site.
-    WebChatReloadRequested {
-        site_id: ChatSiteId,
-    },
-    /// View-level request to navigate a web chat site's Hub view back to its home URL for a fresh chat.
-    WebChatNavigateHomeRequested {
-        site_id: ChatSiteId,
-    },
-    LocationFocusRequested,
-    AddressBarOpenRequested {
-        new_tab: bool,
-        initial_query: Option<String>,
-    },
-    PaletteOpenRequested {
-        initial_query: Option<String>,
-    },
-    SitePanelToggleRequested,
     SearchEngineChanged {
         engine: SearchEngine,
     },
@@ -196,10 +155,6 @@ pub enum Event {
     },
     WhichKeyChanged {
         state: Option<WhichKeyState>,
-    },
-    /// View-level request to open the all-keymaps which-key popup (`<leader>?`).
-    WhichKeyAllRequested {
-        mode: InputMode,
     },
     StatuslineSettingsChanged {
         settings: StatuslineSettings,
@@ -231,37 +186,79 @@ pub enum Event {
     ZoomChanged {
         zoom_level: f32,
     },
-    AppMenuToggleRequested,
-    AboutDialogRequested,
     QuitRequested,
     ClipboardCopyRequested {
         text: String,
-    },
-    /// View-level request to show a Zendia picker modal in the window.
-    PickerOpenRequested {
-        request: PickerRequest,
     },
     /// Published when a user or caller chooses an item in an open picker.
     PickerChosen {
         request_id: PickerRequestId,
         item_id: String,
     },
-    /// View-level notification that a picker modal closed.
-    PickerClosed {
-        request_id: Option<PickerRequestId>,
-    },
-    /// View-level request to enter the page region picker overlay.
-    RegionPickRequested {
-        tab_id: Option<TabId>,
-    },
     /// Published when a page region (or the whole page) is captured for an agent or caller.
     RegionCaptured {
         capture: RegionCapture,
     },
-    /// View-level notification that region picking was cancelled.
-    RegionPickCancelled,
     /// Signals subscribers to reload a fresh snapshot from `BrowserCore::model`.
     ModelReplaced,
+    /// A command asked one window's view to do something that only changes view state, such as opening a panel or
+    /// the palette. `window` is the window whose view invoked the command. It is `None` when the caller has no window
+    /// (a key from InputServer, an agent, a plugin), and then the focused window takes the request. Every other
+    /// window ignores it.
+    ViewRequested {
+        window: Option<WindowId>,
+        request: ViewRequest,
+    },
+}
+
+/// A request from a command to one window's view. It changes only that view's state, never the model.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ViewRequest {
+    /// Start renaming a tab inline in the sidebar.
+    TabRename { tab_id: TabId },
+    /// Start renaming a folder inline in the sidebar.
+    FolderRename { folder_id: FolderId },
+    /// Slide the compact mode sidebar out or back (Zen's `toggleSidebar`).
+    CompactSidebarReveal,
+    /// Open a side panel if it is closed, close it if it is the one in front.
+    PanelToggle { panel_id: SidePanelId },
+    /// Open a side panel, focusing its primary input when `focus` is set.
+    PanelOpen { panel_id: SidePanelId, focus: bool },
+    /// Close a side panel.
+    PanelClose { panel_id: SidePanelId },
+    /// Toggle the model card on the agent panel's model chip.
+    AgentModelCard,
+    /// Open the instructions page inside the agent panel.
+    AgentInstructions,
+    /// Reload the Hub view of a web chat site.
+    WebChatReload { site_id: ChatSiteId },
+    /// Load a web chat site's home URL in its Hub view, for a fresh chat.
+    WebChatNavigateHome { site_id: ChatSiteId },
+    /// Focus the location field.
+    LocationFocus,
+    /// Open the floating address bar.
+    AddressBarOpen {
+        new_tab: bool,
+        initial_query: Option<String>,
+    },
+    /// Open the command palette.
+    PaletteOpen { initial_query: Option<String> },
+    /// Toggle the site data panel.
+    SitePanelToggle,
+    /// Open the all-keymaps which-key popup (`<leader>?`).
+    WhichKeyAll { mode: InputMode },
+    /// Toggle the app menu.
+    AppMenuToggle,
+    /// Show the about dialog.
+    AboutDialog,
+    /// Show a picker modal.
+    PickerOpen { request: PickerRequest },
+    /// A picker modal closed.
+    PickerClosed { request_id: Option<PickerRequestId> },
+    /// Enter the page region picker overlay.
+    RegionPick { tab_id: Option<TabId> },
+    /// Region picking was cancelled.
+    RegionPickCancelled,
 }
 
 /// Returned when the core's event bus has been dropped.

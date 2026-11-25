@@ -37,7 +37,7 @@ pub use zendia_module_api::ui;
 
 use crate::commands::{Command, CommandDescriptor, CommandResult};
 use crate::events::Subscription;
-use crate::model::BrowserModel;
+use crate::model::{BrowserModel, WindowId};
 
 /// Public facade over the browser core used by Freya, headless runners, and service adapters.
 pub trait BrowserCore: Send + Sync {
@@ -47,8 +47,13 @@ pub trait BrowserCore: Send + Sync {
     /// Subscribes to subsequent events published by the core.
     fn subscribe(&self) -> Subscription;
 
-    /// Invokes a named, typed browser command.
+    /// Invokes a named, typed browser command for a caller with no window, such as an agent or a plugin. Requests it
+    /// makes of a view go to the focused window.
     fn invoke(&self, command: Command) -> CommandResult;
+
+    /// Invokes a command on behalf of `window`'s view, so requests it makes of a view (open a panel, show the palette)
+    /// reach that window and no other.
+    fn invoke_in(&self, window: WindowId, command: Command) -> CommandResult;
 
     /// Lists descriptors for all commands registered in the core.
     fn commands(&self) -> Vec<CommandDescriptor>;

@@ -30,7 +30,7 @@ use freya::prelude::*;
 use std::sync::Arc;
 use zendia_browser_core::BrowserCore;
 use zendia_browser_core::commands::Command;
-use zendia_browser_core::events::Event as CoreEvent;
+use zendia_browser_core::events::{Event as CoreEvent, ViewRequest};
 use zendia_browser_core::model::ThemeScheme;
 use zendia_module_api::ui::UiTone;
 
@@ -69,76 +69,11 @@ impl App for GalleryApp {
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
-                CoreEvent::LocationFocusRequested => {
-                    menu_state.close_all();
-                    let current_url = gallery_core
-                        .model()
-                        .active_tab()
-                        .map(|tab| tab.url.clone())
-                        .filter(|url| !url.is_empty() && url != "about:blank" && url != "about:newtab");
-                    address_bar_state.open_floating(false, current_url);
-                }
-                CoreEvent::AddressBarOpenRequested { new_tab, initial_query } => {
-                    menu_state.close_all();
-                    address_bar_state.open_floating(*new_tab, initial_query.clone());
-                }
-                CoreEvent::PaletteOpenRequested { initial_query } => {
-                    menu_state.close_all();
-                    address_bar_state.open_actions(initial_query.clone());
-                }
-                CoreEvent::SitePanelToggleRequested => {
-                    menu_state.close_all();
-                    address_bar_state.toggle_site_panel(None);
-                }
-                CoreEvent::AppMenuToggleRequested => {
-                    address_bar_state.close();
-                    address_bar_state.close_site_panel();
-                    menu_state.toggle_app_menu(None);
-                }
-                CoreEvent::AboutDialogRequested => menu_state.open_about(),
                 CoreEvent::ClipboardCopyRequested { text } if !text.is_empty() => {
                     let _ = freya::clipboard::Clipboard::set(text.clone());
                 }
-                CoreEvent::TabRenameRequested { tab_id } => {
-                    if let Some(tab) = gallery_core.model().tab(*tab_id) {
-                        sidebar_state.start_tab_rename(*tab_id, tab.display_title());
-                    }
-                }
                 CoreEvent::DownloadStarted { .. } => download_arc.launch((980.0, 520.0), (60.0, 900.0)),
-                CoreEvent::CompactSidebarRevealRequested => {
-                    let mut pinned = sidebar_state.compact_pinned;
-                    let next = !*pinned.peek();
-                    pinned.set(next);
-                    let mut revealed = sidebar_state.compact_revealed;
-                    revealed.set(next);
-                }
-                CoreEvent::FolderRenameRequested { folder_id } => {
-                    if let Some(folder) = gallery_core.model().folder(*folder_id) {
-                        sidebar_state.start_folder_rename(*folder_id, folder.name.clone());
-                    }
-                }
-                CoreEvent::PickerOpenRequested { request } => {
-                    if gallery_core.model().vim_mode_enabled {
-                        menu_state.close_all();
-                        address_bar_state.close();
-                        address_bar_state.close_site_panel();
-                        region_picker_state.stop();
-                        vim_picker_state.open(request.clone());
-                    }
-                }
-                CoreEvent::PickerClosed { .. } => {
-                    vim_picker_state.close();
-                }
-                CoreEvent::RegionPickRequested { tab_id } => {
-                    if gallery_core.model().vim_mode_enabled {
-                        menu_state.close_all();
-                        address_bar_state.close();
-                        address_bar_state.close_site_panel();
-                        vim_picker_state.close();
-                        region_picker_state.start(*tab_id);
-                    }
-                }
-                CoreEvent::RegionCaptured { .. } | CoreEvent::RegionPickCancelled => {
+                CoreEvent::RegionCaptured { .. } => {
                     region_picker_state.stop();
                 }
                 CoreEvent::VimModeChanged { enabled: false } => {
@@ -146,21 +81,93 @@ impl App for GalleryApp {
                     vim_picker_state.close();
                     region_picker_state.stop();
                 }
-                CoreEvent::WhichKeyAllRequested { mode } => {
-                    vim_statusline_state.open_all_keymaps(*mode);
-                }
                 CoreEvent::ModeChanged { .. }
                 | CoreEvent::WhichKeyChanged { .. }
                 | CoreEvent::VimModeChanged { .. } => {
                     vim_statusline_state.close_all_keymaps();
                 }
-                CoreEvent::PanelOpenRequested { .. }
-                | CoreEvent::PanelCloseRequested { .. }
-                | CoreEvent::PanelToggled { .. }
-                | CoreEvent::AgentModelCardRequested
-                | CoreEvent::AgentInstructionsRequested => {
-                    dock_state.apply_event(event);
-                }
+                CoreEvent::ViewRequested { request, .. } => match request {
+                    ViewRequest::LocationFocus => {
+                        menu_state.close_all();
+                        let current_url = gallery_core
+                            .model()
+                            .active_tab()
+                            .map(|tab| tab.url.clone())
+                            .filter(|url| !url.is_empty() && url != "about:blank" && url != "about:newtab");
+                        address_bar_state.open_floating(false, current_url);
+                    }
+                    ViewRequest::AddressBarOpen { new_tab, initial_query } => {
+                        menu_state.close_all();
+                        address_bar_state.open_floating(*new_tab, initial_query.clone());
+                    }
+                    ViewRequest::PaletteOpen { initial_query } => {
+                        menu_state.close_all();
+                        address_bar_state.open_actions(initial_query.clone());
+                    }
+                    ViewRequest::SitePanelToggle => {
+                        menu_state.close_all();
+                        address_bar_state.toggle_site_panel(None);
+                    }
+                    ViewRequest::AppMenuToggle => {
+                        address_bar_state.close();
+                        address_bar_state.close_site_panel();
+                        menu_state.toggle_app_menu(None);
+                    }
+                    ViewRequest::AboutDialog => menu_state.open_about(),
+                    ViewRequest::TabRename { tab_id } => {
+                        if let Some(tab) = gallery_core.model().tab(*tab_id) {
+                            sidebar_state.start_tab_rename(*tab_id, tab.display_title());
+                        }
+                    }
+                    ViewRequest::CompactSidebarReveal => {
+                        let mut pinned = sidebar_state.compact_pinned;
+                        let next = !*pinned.peek();
+                        pinned.set(next);
+                        let mut revealed = sidebar_state.compact_revealed;
+                        revealed.set(next);
+                    }
+                    ViewRequest::FolderRename { folder_id } => {
+                        if let Some(folder) = gallery_core.model().folder(*folder_id) {
+                            sidebar_state.start_folder_rename(*folder_id, folder.name.clone());
+                        }
+                    }
+                    ViewRequest::PickerOpen { request } => {
+                        if gallery_core.model().vim_mode_enabled {
+                            menu_state.close_all();
+                            address_bar_state.close();
+                            address_bar_state.close_site_panel();
+                            region_picker_state.stop();
+                            vim_picker_state.open(request.clone());
+                        }
+                    }
+                    ViewRequest::PickerClosed { .. } => {
+                        vim_picker_state.close();
+                    }
+                    ViewRequest::RegionPick { tab_id } => {
+                        if gallery_core.model().vim_mode_enabled {
+                            menu_state.close_all();
+                            address_bar_state.close();
+                            address_bar_state.close_site_panel();
+                            vim_picker_state.close();
+                            region_picker_state.start(*tab_id);
+                        }
+                    }
+                    ViewRequest::RegionPickCancelled => {
+                        region_picker_state.stop();
+                    }
+                    ViewRequest::WhichKeyAll { mode } => {
+                        vim_statusline_state.open_all_keymaps(*mode);
+                    }
+                    ViewRequest::PanelOpen { .. }
+                    | ViewRequest::PanelClose { .. }
+                    | ViewRequest::PanelToggle { .. }
+                    | ViewRequest::AgentModelCard
+                    | ViewRequest::AgentInstructions => {
+                        dock_state.apply_request(request);
+                    }
+                    // The gallery has no Hub, so web chat sites have no views to reload or navigate.
+                    ViewRequest::WebChatReload { .. } | ViewRequest::WebChatNavigateHome { .. } => {}
+                },
                 _ => {}
             }
         });

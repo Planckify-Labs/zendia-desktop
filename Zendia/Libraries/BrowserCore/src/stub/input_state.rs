@@ -8,7 +8,7 @@
 
 use super::StubBackend;
 use crate::commands::{Command, CommandError, CommandResult};
-use crate::events::Event;
+use crate::events::{Event, ViewRequest};
 use crate::input_state::{
     DEFAULT_ANNOUNCEMENT_TIMEOUT_MS, SAMPLE_INPUT_STEP_COUNT, StatuslineAnnouncement, StatuslineShow,
     sample_input_state,
@@ -102,7 +102,7 @@ impl StubBackend {
                     .unwrap_or_else(|error| error.into_inner())
                     .model
                     .input_mode;
-                self.bus.publish(Event::WhichKeyAllRequested { mode });
+                self.request_view(ViewRequest::WhichKeyAll { mode });
                 Ok(())
             }
             Command::WhichKeyHide => {
@@ -143,8 +143,11 @@ mod tests {
         while let Ok(event) = sub.try_recv() {
             if matches!(
                 event,
-                Event::WhichKeyAllRequested {
-                    mode: InputMode::Normal
+                Event::ViewRequested {
+                    request: ViewRequest::WhichKeyAll {
+                        mode: InputMode::Normal
+                    },
+                    ..
                 }
             ) {
                 saw_all_requested = true;
