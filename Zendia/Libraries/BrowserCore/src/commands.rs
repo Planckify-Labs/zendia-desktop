@@ -14,9 +14,9 @@ use crate::input_state::StatuslineShow;
 use crate::library::LibrarySection;
 use crate::media::MediaControl;
 use crate::model::{
-    AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, HistoryEntryId, MediaSessionId, ModelEffort, ModelId,
-    NotificationId, SidebarSide, SpaceId, SplitDirection, SplitGroupId, StepId, TabId, TabMoveTarget, ThemeOverrides,
-    ThemeScheme, ToolbarLayout,
+    AgentId, ChatSiteId, CompactHide, ConversationId, DownloadId, FolderId, HistoryEntryId, LibraryMediaId,
+    MediaSessionId, ModelEffort, ModelId, NotificationId, SidebarSide, SpaceId, SplitDirection, SplitGroupId, StepId,
+    TabId, TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
 };
 use crate::picker::PickerRequestId;
 use crate::region::RegionRect;
@@ -694,6 +694,74 @@ pub enum Command {
     SpaceRoutingAddDomain {
         tab_id: Option<TabId>,
     },
+    /// Opens a completed download (or toggles open-when-done if still in progress).
+    DownloadOpen {
+        download_id: DownloadId,
+    },
+    /// Reveals a completed download in its containing folder.
+    DownloadShowInFolder {
+        download_id: DownloadId,
+    },
+    /// Pauses an in-progress download.
+    DownloadPause {
+        download_id: DownloadId,
+    },
+    /// Resumes a paused download.
+    DownloadResume {
+        download_id: DownloadId,
+    },
+    /// Retries a failed or cancelled download.
+    DownloadRetry {
+        download_id: DownloadId,
+    },
+    /// Cancels an active or paused download.
+    DownloadCancel {
+        download_id: DownloadId,
+    },
+    /// Removes one download entry from the library list.
+    DownloadRemove {
+        download_id: DownloadId,
+    },
+    /// Clears all finished (completed, failed, and cancelled) downloads from the library list.
+    DownloadClearFinished,
+    /// Copies a download's source URL to the clipboard.
+    DownloadCopyLink {
+        download_id: DownloadId,
+    },
+    /// Toggles opening an in-progress download as soon as it finishes.
+    DownloadToggleOpenWhenDone {
+        download_id: DownloadId,
+    },
+    /// Advances simulated stub downloads by one tick.
+    DownloadTick,
+    /// Turns the library's Media scan on or off (Zen's media opt-in).
+    LibraryMediaSetEnabled {
+        enabled: bool,
+    },
+    /// Rescans the library's Media items from folders and completed downloads.
+    LibraryMediaRefresh,
+    /// Opens the full-size media preview overlay on `media_id`.
+    LibraryMediaPreviewOpen {
+        media_id: LibraryMediaId,
+    },
+    /// Closes the full-size media preview overlay.
+    LibraryMediaPreviewClose,
+    /// Moves the open media preview by `delta` (`-1` previous, `+1` next).
+    LibraryMediaPreviewStep {
+        delta: i32,
+    },
+    /// Opens a media item in its external viewer.
+    LibraryMediaOpen {
+        media_id: LibraryMediaId,
+    },
+    /// Reveals a media item in its containing folder.
+    LibraryMediaShowInFolder {
+        media_id: LibraryMediaId,
+    },
+    /// Copies a media item to the clipboard.
+    LibraryMediaCopy {
+        media_id: LibraryMediaId,
+    },
     /// Starts the page region picker overlay on the active or specified tab.
     RegionPick {
         tab_id: Option<TabId>,
@@ -989,6 +1057,25 @@ impl Command {
             Self::SpaceRoutingSetDefaultExternal { .. } => "space_routing.set_default_external",
             Self::SpaceRoutingStartEdit { .. } => "space_routing.start_edit",
             Self::SpaceRoutingAddDomain { .. } => "space_routing.add_domain",
+            Self::DownloadOpen { .. } => "download.open",
+            Self::DownloadShowInFolder { .. } => "download.show_in_folder",
+            Self::DownloadPause { .. } => "download.pause",
+            Self::DownloadResume { .. } => "download.resume",
+            Self::DownloadRetry { .. } => "download.retry",
+            Self::DownloadCancel { .. } => "download.cancel",
+            Self::DownloadRemove { .. } => "download.remove",
+            Self::DownloadClearFinished => "download.clear_finished",
+            Self::DownloadCopyLink { .. } => "download.copy_link",
+            Self::DownloadToggleOpenWhenDone { .. } => "download.toggle_open_when_done",
+            Self::DownloadTick => "download.tick",
+            Self::LibraryMediaSetEnabled { .. } => "library.media.set_enabled",
+            Self::LibraryMediaRefresh => "library.media.refresh",
+            Self::LibraryMediaPreviewOpen { .. } => "library.media.preview.open",
+            Self::LibraryMediaPreviewClose => "library.media.preview.close",
+            Self::LibraryMediaPreviewStep { .. } => "library.media.preview.step",
+            Self::LibraryMediaOpen { .. } => "library.media.open",
+            Self::LibraryMediaShowInFolder { .. } => "library.media.show_in_folder",
+            Self::LibraryMediaCopy { .. } => "library.media.copy",
             Self::RegionPick { .. } => "region.pick",
             Self::RegionCapture { .. } => "region.capture",
             Self::RegionCancel => "region.cancel",
@@ -1799,6 +1886,63 @@ impl Command {
             }
             "history.copy_url" => Ok(Self::HistoryCopyUrl {
                 entry_id: HistoryEntryId(parse_required_u64_arg(name, args, "entry_id")?),
+            }),
+            "download.open" => Ok(Self::DownloadOpen {
+                download_id: DownloadId(parse_required_u64_arg(name, args, "download_id")?),
+            }),
+            "download.show_in_folder" => Ok(Self::DownloadShowInFolder {
+                download_id: DownloadId(parse_required_u64_arg(name, args, "download_id")?),
+            }),
+            "download.pause" => Ok(Self::DownloadPause {
+                download_id: DownloadId(parse_required_u64_arg(name, args, "download_id")?),
+            }),
+            "download.resume" => Ok(Self::DownloadResume {
+                download_id: DownloadId(parse_required_u64_arg(name, args, "download_id")?),
+            }),
+            "download.retry" => Ok(Self::DownloadRetry {
+                download_id: DownloadId(parse_required_u64_arg(name, args, "download_id")?),
+            }),
+            "download.cancel" => Ok(Self::DownloadCancel {
+                download_id: DownloadId(parse_required_u64_arg(name, args, "download_id")?),
+            }),
+            "download.remove" => Ok(Self::DownloadRemove {
+                download_id: DownloadId(parse_required_u64_arg(name, args, "download_id")?),
+            }),
+            "download.clear_finished" => Ok(Self::DownloadClearFinished),
+            "download.copy_link" => Ok(Self::DownloadCopyLink {
+                download_id: DownloadId(parse_required_u64_arg(name, args, "download_id")?),
+            }),
+            "download.toggle_open_when_done" => Ok(Self::DownloadToggleOpenWhenDone {
+                download_id: DownloadId(parse_required_u64_arg(name, args, "download_id")?),
+            }),
+            "download.tick" => Ok(Self::DownloadTick),
+            "library.media.set_enabled" => Ok(Self::LibraryMediaSetEnabled {
+                enabled: parse_bool_arg(name, args, "enabled", true)?,
+            }),
+            "library.media.refresh" => Ok(Self::LibraryMediaRefresh),
+            "library.media.preview.open" => Ok(Self::LibraryMediaPreviewOpen {
+                media_id: LibraryMediaId(parse_required_u64_arg(name, args, "media_id")?),
+            }),
+            "library.media.preview.close" => Ok(Self::LibraryMediaPreviewClose),
+            "library.media.preview.step" => {
+                let raw = find_arg(args, "delta").ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: "missing required argument `delta`".to_string(),
+                })?;
+                let delta = raw.parse::<i32>().map_err(|_| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("argument `delta` expected i32, got `{raw}`"),
+                })?;
+                Ok(Self::LibraryMediaPreviewStep { delta })
+            }
+            "library.media.open" => Ok(Self::LibraryMediaOpen {
+                media_id: LibraryMediaId(parse_required_u64_arg(name, args, "media_id")?),
+            }),
+            "library.media.show_in_folder" => Ok(Self::LibraryMediaShowInFolder {
+                media_id: LibraryMediaId(parse_required_u64_arg(name, args, "media_id")?),
+            }),
+            "library.media.copy" => Ok(Self::LibraryMediaCopy {
+                media_id: LibraryMediaId(parse_required_u64_arg(name, args, "media_id")?),
             }),
             "region.pick" => Ok(Self::RegionPick {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
@@ -3233,6 +3377,195 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
                 ArgumentType::Integer,
                 true,
                 "History entry id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.open".to_string(),
+            title: "Open Download".to_string(),
+            description: "Open a completed download or toggle open-when-done for an active one".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "download_id",
+                ArgumentType::Integer,
+                true,
+                "Target download id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.show_in_folder".to_string(),
+            title: "Show Download in Folder".to_string(),
+            description: "Reveal a completed download in its containing folder".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "download_id",
+                ArgumentType::Integer,
+                true,
+                "Target download id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.pause".to_string(),
+            title: "Pause Download".to_string(),
+            description: "Pause an in-progress download".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "download_id",
+                ArgumentType::Integer,
+                true,
+                "Target download id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.resume".to_string(),
+            title: "Resume Download".to_string(),
+            description: "Resume a paused download".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "download_id",
+                ArgumentType::Integer,
+                true,
+                "Target download id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.retry".to_string(),
+            title: "Retry Download".to_string(),
+            description: "Restart a failed or cancelled download".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "download_id",
+                ArgumentType::Integer,
+                true,
+                "Target download id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.cancel".to_string(),
+            title: "Cancel Download".to_string(),
+            description: "Cancel an active or paused download".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "download_id",
+                ArgumentType::Integer,
+                true,
+                "Target download id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.remove".to_string(),
+            title: "Remove Download".to_string(),
+            description: "Remove a download entry from the library list".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "download_id",
+                ArgumentType::Integer,
+                true,
+                "Target download id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.clear_finished".to_string(),
+            title: "Clear Finished Downloads".to_string(),
+            description: "Remove all completed, failed, and cancelled downloads from the library".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "download.copy_link".to_string(),
+            title: "Copy Download Link".to_string(),
+            description: "Copy a download's source URL to the clipboard".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "download_id",
+                ArgumentType::Integer,
+                true,
+                "Target download id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.toggle_open_when_done".to_string(),
+            title: "Toggle Open Download When Done".to_string(),
+            description: "Toggle opening an in-progress download automatically when it finishes".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "download_id",
+                ArgumentType::Integer,
+                true,
+                "Target download id",
+            )],
+        },
+        CommandDescriptor {
+            name: "download.tick".to_string(),
+            title: "Tick Download Progress".to_string(),
+            description: "Advance active stub transfers by one progress step".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "library.media.set_enabled".to_string(),
+            title: "Toggle Library Media".to_string(),
+            description: "Enable or disable showing local media in the library".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "enabled",
+                ArgumentType::Bool,
+                false,
+                "Whether to enable Media in the library (default true)",
+            )],
+        },
+        CommandDescriptor {
+            name: "library.media.refresh".to_string(),
+            title: "Refresh Library Media".to_string(),
+            description: "Rescan media files from folders and completed downloads".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "library.media.preview.open".to_string(),
+            title: "Open Media Preview".to_string(),
+            description: "Open the full-size preview for a media item".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "media_id",
+                ArgumentType::Integer,
+                true,
+                "Target media item id",
+            )],
+        },
+        CommandDescriptor {
+            name: "library.media.preview.close".to_string(),
+            title: "Close Media Preview".to_string(),
+            description: "Close the full-size media preview overlay".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "library.media.preview.step".to_string(),
+            title: "Step Media Preview".to_string(),
+            description: "Move the open media preview to the previous or next item".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "delta",
+                ArgumentType::Integer,
+                true,
+                "Step offset (-1 for previous, +1 for next)",
+            )],
+        },
+        CommandDescriptor {
+            name: "library.media.open".to_string(),
+            title: "Open Media File".to_string(),
+            description: "Open a media file in its default viewer".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "media_id",
+                ArgumentType::Integer,
+                true,
+                "Target media item id",
+            )],
+        },
+        CommandDescriptor {
+            name: "library.media.show_in_folder".to_string(),
+            title: "Show Media in Folder".to_string(),
+            description: "Reveal a media file in its containing folder".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "media_id",
+                ArgumentType::Integer,
+                true,
+                "Target media item id",
+            )],
+        },
+        CommandDescriptor {
+            name: "library.media.copy".to_string(),
+            title: "Copy Media".to_string(),
+            description: "Copy a media item to the clipboard".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "media_id",
+                ArgumentType::Integer,
+                true,
+                "Target media item id",
             )],
         },
         CommandDescriptor {

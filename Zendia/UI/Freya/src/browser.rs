@@ -17,6 +17,7 @@ use crate::ui::chrome::menus::{
 };
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::use_provide_core_with_observer;
+use crate::ui::library::media_preview::{MediaPreviewOverlay, use_provide_media_preview_state};
 use crate::ui::library::sections::space_routing::use_provide_space_routing_view_state;
 use crate::ui::library::sections::spaces::use_provide_spaces_view_state;
 use crate::ui::library::use_provide_library_state;
@@ -327,6 +328,7 @@ pub fn app() -> impl IntoElement {
     let library_state = use_provide_library_state();
     let library_spaces_state = use_provide_spaces_view_state();
     let library_routing_state = use_provide_space_routing_view_state();
+    let media_preview_state = use_provide_media_preview_state();
     let webchat_views = use_provide_webchat_views(Some(Arc::clone(&hub_adapter)));
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
@@ -380,6 +382,12 @@ pub fn app() -> impl IntoElement {
                     if let Some(rule) = stub_core.model().space_routing.rules.iter().find(|r| r.id == *rule_id) {
                         library_routing_state.start_edit(rule);
                     }
+                }
+                ViewRequest::LibraryMediaPreviewOpen { .. }
+                | ViewRequest::LibraryMediaPreviewClose
+                | ViewRequest::LibraryMediaPreviewStep { .. } => {
+                    let items = stub_core.model().library_media;
+                    media_preview_state.handle_view_request(request, &items);
                 }
                 ViewRequest::LocationFocus => {
                     menu_state.close_all();
@@ -547,7 +555,7 @@ pub fn app() -> impl IntoElement {
             {
                 return;
             }
-            if vim_picker_state.is_open() || region_picker_state.is_active() {
+            if vim_picker_state.is_open() || region_picker_state.is_active() || media_preview_state.is_open() {
                 return;
             }
             if dock_state.captures_text_input()
@@ -621,5 +629,6 @@ pub fn app() -> impl IntoElement {
         .child(MenuLayer)
         .child(AddressBarLayer)
         .child(VimPickerOverlay)
+        .child(MediaPreviewOverlay)
         .child(DownloadArcLayer { pinned_progress: None })
 }

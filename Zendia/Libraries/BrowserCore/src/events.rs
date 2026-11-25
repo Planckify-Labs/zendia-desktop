@@ -12,10 +12,12 @@ use crate::contributions::{Contributions, SidePanelId};
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::library::LibrarySection;
+use crate::library_media::LibraryMediaItem;
 use crate::model::{
-    AgentId, Bookmark, ChatSite, ChatSiteId, Conversation, ConversationId, Download, Essential, Folder, FolderId,
-    HistoryEntry, InputMode, LayoutSettings, MediaSession, NotificationId, PinnedTab, ServiceState,
-    SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings, WhichKeyState, WindowId,
+    AgentId, Bookmark, ChatSite, ChatSiteId, Conversation, ConversationId, Download, DownloadId, Essential, Folder,
+    FolderId, HistoryEntry, InputMode, LayoutSettings, LibraryMediaId, MediaSession, NotificationId, PinnedTab,
+    ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings,
+    WhichKeyState, WindowId,
 };
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
@@ -104,6 +106,22 @@ pub enum Event {
     /// A download began; views play the download animation.
     DownloadStarted {
         download: Download,
+    },
+    /// A download's progress or lifecycle state changed.
+    DownloadUpdated {
+        download: Download,
+    },
+    /// A download entry was removed from the list.
+    DownloadRemoved {
+        download_id: DownloadId,
+    },
+    /// All completed, failed, and cancelled downloads were cleared from the list.
+    DownloadsClearedFinished,
+    /// The library's Media opt-in flag, scanned items, or scanned folders changed.
+    LibraryMediaChanged {
+        enabled: bool,
+        items: Vec<LibraryMediaItem>,
+        folders: Vec<String>,
     },
     /// Profile settings for a side panel changed (layout, side, width, or fallback).
     PanelPrefsChanged {
@@ -279,6 +297,12 @@ pub enum ViewRequest {
     SpaceIconPicker { space_id: SpaceId },
     /// Open the edit form for a routing rule in the library's Space routing section.
     SpaceRoutingEdit { rule_id: SpaceRouteId },
+    /// Open the library's full-size media preview on `media_id`.
+    LibraryMediaPreviewOpen { media_id: LibraryMediaId },
+    /// Close the library's media preview overlay.
+    LibraryMediaPreviewClose,
+    /// Move the open media preview by `delta` items (`-1` previous, `+1` next).
+    LibraryMediaPreviewStep { delta: i32 },
 }
 
 /// Returned when the core's event bus has been dropped.

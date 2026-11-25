@@ -16,11 +16,13 @@
 pub mod address_bar;
 pub mod agent;
 pub mod commands;
+pub mod downloads;
 pub mod events;
 pub mod focus;
 pub mod history;
 pub mod input_state;
 pub mod library;
+pub mod library_media;
 pub mod markdown;
 pub mod media;
 pub mod menus;

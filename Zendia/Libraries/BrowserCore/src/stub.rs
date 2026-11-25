@@ -42,6 +42,7 @@ use std::sync::{Arc, Mutex};
 mod agent;
 mod focus;
 mod input_state;
+mod library_media;
 mod page_layouts;
 mod pickers;
 
@@ -2631,6 +2632,25 @@ impl BrowserCore for StubBackend {
             | Command::SpaceRoutingSetDefaultExternal { .. }
             | Command::SpaceRoutingStartEdit { .. }
             | Command::SpaceRoutingAddDomain { .. }) => self.handle_space_or_routing_command(command),
+            command @ (Command::DownloadOpen { .. }
+            | Command::DownloadShowInFolder { .. }
+            | Command::DownloadPause { .. }
+            | Command::DownloadResume { .. }
+            | Command::DownloadRetry { .. }
+            | Command::DownloadCancel { .. }
+            | Command::DownloadRemove { .. }
+            | Command::DownloadClearFinished
+            | Command::DownloadCopyLink { .. }
+            | Command::DownloadToggleOpenWhenDone { .. }
+            | Command::DownloadTick
+            | Command::LibraryMediaSetEnabled { .. }
+            | Command::LibraryMediaRefresh
+            | Command::LibraryMediaPreviewOpen { .. }
+            | Command::LibraryMediaPreviewClose
+            | Command::LibraryMediaPreviewStep { .. }
+            | Command::LibraryMediaOpen { .. }
+            | Command::LibraryMediaShowInFolder { .. }
+            | Command::LibraryMediaCopy { .. }) => self.handle_library_media_command(command),
             Command::SitePermissionSet {
                 origin,
                 permission,
@@ -3793,6 +3813,12 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
             bytes_received: 2_450_000,
             total_bytes: Some(2_450_000),
             status: DownloadStatus::Completed,
+            target_path: Some("/home/user/Downloads/ladybird-architecture.pdf".to_string()),
+            speed_bytes_per_sec: None,
+            updated_at_unix: 1_763_990_400,
+            file_exists: true,
+            open_when_done: false,
+            simulated: false,
         },
         Download {
             id: DownloadId(2),
@@ -3801,6 +3827,12 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
             bytes_received: 640_000,
             total_bytes: Some(1_280_000),
             status: DownloadStatus::InProgress,
+            target_path: Some("/home/user/Downloads/freya-0.5.4.tar.gz".to_string()),
+            speed_bytes_per_sec: Some(1_600_000),
+            updated_at_unix: 1_763_991_000,
+            file_exists: true,
+            open_when_done: false,
+            simulated: false,
         },
     ];
 
@@ -4145,6 +4177,9 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         folders,
         split_groups,
         downloads,
+        library_media_enabled: false,
+        library_media: Vec::new(),
+        library_media_folders: Vec::new(),
         history,
         bookmarks,
         search_engine: SearchEngine::default(),

@@ -20,6 +20,7 @@ use crate::ui::chrome::menus::{MenuLayer, use_provide_menu_state};
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::{use_core, use_provide_core_with_observer};
 use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
+use crate::ui::library::media_preview::{MediaPreviewOverlay, use_provide_media_preview_state};
 use crate::ui::library::sections::space_routing::use_provide_space_routing_view_state;
 use crate::ui::library::sections::spaces::use_provide_spaces_view_state;
 use crate::ui::library::use_provide_library_state;
@@ -72,6 +73,7 @@ impl App for GalleryApp {
         let library_state = use_provide_library_state();
         let library_spaces_state = use_provide_spaces_view_state();
         let library_routing_state = use_provide_space_routing_view_state();
+        let media_preview_state = use_provide_media_preview_state();
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
@@ -117,6 +119,12 @@ impl App for GalleryApp {
                         {
                             library_routing_state.start_edit(rule);
                         }
+                    }
+                    ViewRequest::LibraryMediaPreviewOpen { .. }
+                    | ViewRequest::LibraryMediaPreviewClose
+                    | ViewRequest::LibraryMediaPreviewStep { .. } => {
+                        let items = gallery_core.model().library_media;
+                        media_preview_state.handle_view_request(request, &items);
                     }
                     ViewRequest::LocationFocus => {
                         menu_state.close_all();
@@ -241,7 +249,7 @@ impl App for GalleryApp {
                 {
                     return;
                 }
-                if vim_picker_state.is_open() || region_picker_state.is_active() {
+                if vim_picker_state.is_open() || region_picker_state.is_active() || media_preview_state.is_open() {
                     return;
                 }
                 if dock_state.captures_text_input()
@@ -350,6 +358,10 @@ impl App for GalleryApp {
                                     address_bar_state.close_site_panel();
                                     vim_picker_state.close();
                                     region_picker_state.stop();
+                                    media_preview_state.close();
+                                    if section_id != "library-media" {
+                                        library_state.close();
+                                    }
                                     if section_id != "agent-panel" {
                                         dock_state.open_panels.set(Vec::new());
                                         dock_state.focused_panel.set(None);
@@ -458,6 +470,7 @@ impl App for GalleryApp {
             .child(MenuLayer)
             .child(AddressBarLayer)
             .child(VimPickerOverlay)
+            .child(MediaPreviewOverlay)
     }
 }
 
