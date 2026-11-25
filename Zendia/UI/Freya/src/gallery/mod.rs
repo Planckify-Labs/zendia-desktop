@@ -206,6 +206,7 @@ impl App for GalleryApp {
                     }
                     // The gallery has no Hub, so web chat sites have no views to reload or navigate.
                     ViewRequest::WebChatReload { .. } | ViewRequest::WebChatNavigateHome { .. } => {}
+                    ViewRequest::SettingsOpen { .. } | ViewRequest::SettingsClose => {}
                 },
                 _ => {}
             }
@@ -362,7 +363,7 @@ impl App for GalleryApp {
                                     if section_id != "library-media" {
                                         library_state.close();
                                     }
-                                    if section_id != "agent-panel" {
+                                    if section_id != "agent-panel" && section_id != "settings" {
                                         dock_state.open_panels.set(Vec::new());
                                         dock_state.focused_panel.set(None);
                                         dock_state.model_card_open.set(false);

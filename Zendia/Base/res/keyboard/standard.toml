@@ -248,3 +248,9 @@ description = "Pick page region"
 keys = ["<C-S-a>", "<D-S-a>"]
 command = "agent.toggle"
 description = "Toggle agent side panel"
+
+# Settings.
+[[bindings]]
+keys = ["<C-,>", "<D-,>"]
+command = "settings.open"
+description = "Open Zendia settings"

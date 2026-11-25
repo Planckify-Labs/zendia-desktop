@@ -26,6 +26,7 @@ use crate::ui::page::{
     PageArea, PageStage, PageSurfaceContext, PaneMode, VimOverlayLayer, use_provide_keymap, use_provide_page_surfaces,
 };
 use crate::ui::panels::use_provide_dock_state;
+use crate::ui::settings::use_provide_settings_host;
 use crate::ui::theme::{ThemeRole, use_provide_theme, use_theme};
 use crate::ui::vim::use_provide_vim_statusline_state;
 use crate::ui::vim::{VimPickerOverlay, use_provide_region_picker_state, use_provide_vim_picker_state};
@@ -330,6 +331,7 @@ pub fn app() -> impl IntoElement {
     let library_routing_state = use_provide_space_routing_view_state();
     let media_preview_state = use_provide_media_preview_state();
     let webchat_views = use_provide_webchat_views(Some(Arc::clone(&hub_adapter)));
+    let settings_host = use_provide_settings_host();
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -476,6 +478,15 @@ pub fn app() -> impl IntoElement {
                     if let Some(site) = stub_core.model().chat_sites.iter().find(|site| &site.id == site_id) {
                         webchat_views.navigate_home(site);
                     }
+                }
+                ViewRequest::SettingsOpen { group } => {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    settings_host.open_os_window(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, *group);
+                }
+                ViewRequest::SettingsClose => {
+                    settings_host.close_os_window();
                 }
             },
             _ => {}

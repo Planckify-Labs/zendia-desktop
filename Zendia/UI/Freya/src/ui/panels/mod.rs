@@ -24,7 +24,7 @@ pub use state::{DictationState, DockHostState, try_use_dock_state, use_provide_d
 
 use crate::ui::agent::{chevron_left_icon, chevron_right_icon};
 use crate::ui::core_view::use_core;
-use crate::ui::kit::Icon;
+use crate::ui::kit::{DeclaredUi, Icon};
 use crate::ui::theme::{CHROME_OVERLAY_LEVEL, ResolvedScheme, ThemeRole, motion, use_theme};
 use freya::prelude::*;
 use zendia_browser_core::agent::{
@@ -32,8 +32,9 @@ use zendia_browser_core::agent::{
     resolve_panel_layout_with_min,
 };
 use zendia_browser_core::commands::Command;
-use zendia_browser_core::contributions::{SidePanelId, SidePanelLayout, SidePanelSide};
-use zendia_browser_core::model::ConversationStatus;
+use zendia_browser_core::contributions::{ContributionSource, SidePanelId, SidePanelLayout, SidePanelSide};
+use zendia_browser_core::model::{ConversationStatus, ServiceId, ServiceStatus};
+use zendia_browser_core::modules::{PluginId, PluginStatus, service_down_summary, service_status_in};
 
 /// Inset from the stage edges in Float mode.
 pub const FLOAT_INSET: f32 = 10.0;
@@ -601,15 +602,29 @@ impl Component for GenericSidePanel {
         let theme = use_theme();
         let panel_id = self.resolved.panel_id.clone();
 
-        let (title, icon_name) = {
+        let (title, icon_name, plugin_state) = {
             let model = core.model().read();
-            model
+            let entry = model
                 .contributions
                 .side_panels
                 .iter()
-                .find(|entry| entry.id == panel_id)
-                .map(|entry| (entry.title.clone(), entry.icon.clone()))
-                .unwrap_or_else(|| (panel_id.0.clone(), "layers".to_string()))
+                .find(|entry| entry.id == panel_id);
+            let title = entry.map(|e| e.title.clone()).unwrap_or_else(|| panel_id.0.clone());
+            let icon = entry.map(|e| e.icon.clone()).unwrap_or_else(|| "layers".to_string());
+            let plugin_info = entry.and_then(|e| match &e.source {
+                ContributionSource::Plugin { plugin_id } => {
+                    let host_status = service_status_in(&model.services, ServiceId::PluginHost);
+                    let plugin = model.plugins.iter().find(|p| p.id.0 == *plugin_id).cloned();
+                    Some((
+                        PluginId::new(plugin_id.clone()),
+                        host_status,
+                        model.plugins_enabled,
+                        plugin,
+                    ))
+                }
+                _ => None,
+            });
+            (title, icon, plugin_info)
         };
 
         let (subtitle, phase_badge) = match panel_id.0.as_str() {
@@ -691,95 +706,238 @@ impl Component for GenericSidePanel {
                     ),
             );
 
-        let body = rect()
-            .width(Size::fill())
-            .height(Size::flex(1.0))
-            .padding(Gaps::new(24.0, 32.0, 24.0, 32.0))
-            .center()
-            .spacing(12.0)
-            .child(
+        let body: Element = if let Some((plugin_id, host_status, master_enabled, maybe_plugin)) = plugin_state {
+            let host_down = !matches!(host_status, ServiceStatus::Running);
+            let plugin_stopped_reason = if !master_enabled {
+                Some("All plugins are disabled in Settings.".to_string())
+            } else if host_down {
+                match &host_status {
+                    ServiceStatus::Stopped { reason } => Some(
+                        reason
+                            .clone()
+                            .unwrap_or_else(|| service_down_summary(ServiceId::PluginHost).to_string()),
+                    ),
+                    ServiceStatus::Restarting | ServiceStatus::Starting => {
+                        Some("PluginHost is restarting…".to_string())
+                    }
+                    ServiceStatus::Running => None,
+                }
+            } else if let Some(ref p) = maybe_plugin {
+                if !p.enabled {
+                    Some(format!("{} is disabled.", p.name))
+                } else {
+                    match &p.status {
+                        PluginStatus::Running => None,
+                        PluginStatus::Disabled => Some(format!("{} is disabled.", p.name)),
+                        PluginStatus::Restarting => Some(format!("Restarting {}…", p.name)),
+                        PluginStatus::Stopped { reason } => Some(
+                            reason
+                                .clone()
+                                .unwrap_or_else(|| "This plugin sandbox stopped unexpectedly.".to_string()),
+                        ),
+                    }
+                }
+            } else {
+                Some("Plugin is not installed.".to_string())
+            };
+
+            if let Some(reason) = plugin_stopped_reason {
+                let is_restarting = matches!(host_status, ServiceStatus::Restarting | ServiceStatus::Starting)
+                    || maybe_plugin
+                        .as_ref()
+                        .is_some_and(|p| matches!(p.status, PluginStatus::Restarting));
+                let role = if is_restarting {
+                    ThemeRole::Warning
+                } else {
+                    ThemeRole::Danger
+                };
+                let core_restart = core.clone();
+                let pid_restart = plugin_id.clone();
                 rect()
-                    .width(Size::px(48.0))
-                    .height(Size::px(48.0))
-                    .corner_radius(CornerRadius::new_all(14.0))
-                    .background(icon_well_bg)
-                    .border(
-                        Border::new()
-                            .width(1.0)
-                            .alignment(BorderAlignment::Inner)
-                            .fill(border_col),
-                    )
-                    .center()
-                    .child(Icon::new(icon_name).size(22.0).role(ThemeRole::Accent)),
-            )
-            .child(
-                label()
                     .width(Size::fill())
-                    .text(title)
-                    .font_size(14.5)
-                    .font_weight(FontWeight::BOLD)
-                    .text_align(TextAlign::Center)
-                    .color(theme.color(ThemeRole::Text)),
-            )
-            .child(
-                rect().width(Size::fill()).max_width(Size::px(280.0)).child(
+                    .height(Size::flex(1.0))
+                    .padding(Gaps::new(24.0, 28.0, 24.0, 28.0))
+                    .center()
+                    .spacing(12.0)
+                    .child(
+                        rect()
+                            .width(Size::px(48.0))
+                            .height(Size::px(48.0))
+                            .corner_radius(CornerRadius::new_all(14.0))
+                            .background(theme.rgba(role).with_alpha(0.15).to_color())
+                            .border(
+                                Border::new()
+                                    .width(1.0)
+                                    .alignment(BorderAlignment::Inner)
+                                    .fill(theme.rgba(role).with_alpha(0.40).to_color()),
+                            )
+                            .center()
+                            .child(Icon::new("warning").size(22.0).role(role)),
+                    )
+                    .child(
+                        label()
+                            .width(Size::fill())
+                            .text(if is_restarting {
+                                format!("{title} restarting")
+                            } else {
+                                format!("{title} stopped")
+                            })
+                            .font_size(14.5)
+                            .font_weight(FontWeight::BOLD)
+                            .text_align(TextAlign::Center)
+                            .color(theme.color(ThemeRole::Text)),
+                    )
+                    .child(
+                        rect().width(Size::fill()).max_width(Size::px(280.0)).child(
+                            label()
+                                .width(Size::fill())
+                                .text(reason)
+                                .font_size(12.0)
+                                .line_height(1.48)
+                                .text_align(TextAlign::Center)
+                                .color(theme.color(ThemeRole::TextMuted)),
+                        ),
+                    )
+                    .child(
+                        rect()
+                            .a11y_role(AccessibilityRole::Button)
+                            .a11y_alt("Restart Plugin")
+                            .margin(Gaps::new(6.0, 0.0, 0.0, 0.0))
+                            .height(Size::px(30.0))
+                            .padding(Gaps::new(0.0, 14.0, 0.0, 12.0))
+                            .corner_radius(CornerRadius::new_all(999.0))
+                            .background(theme.color(ThemeRole::Accent))
+                            .direction(Direction::Horizontal)
+                            .cross_align(Alignment::center())
+                            .spacing(6.0)
+                            .cursor(CursorIcon::Pointer)
+                            .on_press(move |e: Event<PressEventData>| {
+                                e.stop_propagation();
+                                core_restart.invoke_or_log(Command::PluginRestart {
+                                    plugin_id: pid_restart.clone(),
+                                });
+                            })
+                            .child(Icon::new("reload").size(12.5).role(ThemeRole::TextOnAccent))
+                            .child(
+                                label()
+                                    .text("Restart Plugin")
+                                    .font_size(11.5)
+                                    .font_weight(FontWeight::SEMI_BOLD)
+                                    .color(theme.color(ThemeRole::TextOnAccent)),
+                            ),
+                    )
+                    .into_element()
+            } else if let Some(ui_node) = maybe_plugin.and_then(|p| p.panel_ui) {
+                ScrollView::new()
+                    .width(Size::fill())
+                    .height(Size::flex(1.0))
+                    .child(DeclaredUi::new(ui_node))
+                    .into_element()
+            } else {
+                rect()
+                    .width(Size::fill())
+                    .height(Size::flex(1.0))
+                    .center()
+                    .child(
+                        label()
+                            .text(format!("{title} is running"))
+                            .font_size(13.0)
+                            .color(theme.color(ThemeRole::TextMuted)),
+                    )
+                    .into_element()
+            }
+        } else {
+            rect()
+                .width(Size::fill())
+                .height(Size::flex(1.0))
+                .padding(Gaps::new(24.0, 32.0, 24.0, 32.0))
+                .center()
+                .spacing(12.0)
+                .child(
+                    rect()
+                        .width(Size::px(48.0))
+                        .height(Size::px(48.0))
+                        .corner_radius(CornerRadius::new_all(14.0))
+                        .background(icon_well_bg)
+                        .border(
+                            Border::new()
+                                .width(1.0)
+                                .alignment(BorderAlignment::Inner)
+                                .fill(border_col),
+                        )
+                        .center()
+                        .child(Icon::new(icon_name).size(22.0).role(ThemeRole::Accent)),
+                )
+                .child(
                     label()
                         .width(Size::fill())
-                        .text(subtitle)
-                        .font_size(12.0)
-                        .line_height(1.48)
+                        .text(title)
+                        .font_size(14.5)
+                        .font_weight(FontWeight::BOLD)
                         .text_align(TextAlign::Center)
-                        .color(theme.color(ThemeRole::TextMuted)),
-                ),
-            )
-            .child(
-                rect()
-                    .padding(Gaps::new(4.0, 10.0, 4.0, 10.0))
-                    .corner_radius(CornerRadius::new_all(999.0))
-                    .background(badge_bg)
-                    .border(
-                        Border::new()
-                            .width(1.0)
-                            .alignment(BorderAlignment::Inner)
-                            .fill(badge_border),
-                    )
-                    .child(
+                        .color(theme.color(ThemeRole::Text)),
+                )
+                .child(
+                    rect().width(Size::fill()).max_width(Size::px(280.0)).child(
                         label()
-                            .text(phase_badge)
-                            .font_size(11.0)
-                            .font_weight(FontWeight::MEDIUM)
-                            .color(theme.color(ThemeRole::Accent)),
+                            .width(Size::fill())
+                            .text(subtitle)
+                            .font_size(12.0)
+                            .line_height(1.48)
+                            .text_align(TextAlign::Center)
+                            .color(theme.color(ThemeRole::TextMuted)),
                     ),
-            )
-            .child(
-                rect()
-                    .a11y_role(AccessibilityRole::Button)
-                    .a11y_alt("Open Agent Chat")
-                    .margin(Gaps::new(6.0, 0.0, 0.0, 0.0))
-                    .height(Size::px(30.0))
-                    .padding(Gaps::new(0.0, 14.0, 0.0, 12.0))
-                    .corner_radius(CornerRadius::new_all(999.0))
-                    .background(theme.color(ThemeRole::Accent))
-                    .direction(Direction::Horizontal)
-                    .cross_align(Alignment::center())
-                    .spacing(6.0)
-                    .cursor(CursorIcon::Pointer)
-                    .on_press(move |e: Event<PressEventData>| {
-                        e.stop_propagation();
-                        core_chat.invoke_or_log(Command::PanelOpen {
-                            panel_id: SidePanelId::new(AGENT_PANEL_ID),
-                            focus: true,
-                        });
-                    })
-                    .child(Icon::new("chat").size(12.5).role(ThemeRole::Surface))
-                    .child(
-                        label()
-                            .text("Open Agent Chat")
-                            .font_size(11.5)
-                            .font_weight(FontWeight::SEMI_BOLD)
-                            .color(theme.color(ThemeRole::Surface)),
-                    ),
-            );
+                )
+                .child(
+                    rect()
+                        .padding(Gaps::new(4.0, 10.0, 4.0, 10.0))
+                        .corner_radius(CornerRadius::new_all(999.0))
+                        .background(badge_bg)
+                        .border(
+                            Border::new()
+                                .width(1.0)
+                                .alignment(BorderAlignment::Inner)
+                                .fill(badge_border),
+                        )
+                        .child(
+                            label()
+                                .text(phase_badge)
+                                .font_size(11.0)
+                                .font_weight(FontWeight::MEDIUM)
+                                .color(theme.color(ThemeRole::Accent)),
+                        ),
+                )
+                .child(
+                    rect()
+                        .a11y_role(AccessibilityRole::Button)
+                        .a11y_alt("Open Agent Chat")
+                        .margin(Gaps::new(6.0, 0.0, 0.0, 0.0))
+                        .height(Size::px(30.0))
+                        .padding(Gaps::new(0.0, 14.0, 0.0, 12.0))
+                        .corner_radius(CornerRadius::new_all(999.0))
+                        .background(theme.color(ThemeRole::Accent))
+                        .direction(Direction::Horizontal)
+                        .cross_align(Alignment::center())
+                        .spacing(6.0)
+                        .cursor(CursorIcon::Pointer)
+                        .on_press(move |e: Event<PressEventData>| {
+                            e.stop_propagation();
+                            core_chat.invoke_or_log(Command::PanelOpen {
+                                panel_id: SidePanelId::new(AGENT_PANEL_ID),
+                                focus: true,
+                            });
+                        })
+                        .child(Icon::new("chat").size(12.5).role(ThemeRole::Surface))
+                        .child(
+                            label()
+                                .text("Open Agent Chat")
+                                .font_size(11.5)
+                                .font_weight(FontWeight::SEMI_BOLD)
+                                .color(theme.color(ThemeRole::Surface)),
+                        ),
+                )
+                .into_element()
+        };
 
         rect()
             .width(Size::fill())

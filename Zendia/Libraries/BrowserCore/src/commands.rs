@@ -15,11 +15,13 @@ use crate::library::LibrarySection;
 use crate::media::MediaControl;
 use crate::model::{
     AgentId, ChatSiteId, CompactHide, ConversationId, DownloadId, FolderId, HistoryEntryId, LibraryMediaId,
-    MediaSessionId, ModelEffort, ModelId, NotificationId, SidebarSide, SpaceId, SplitDirection, SplitGroupId, StepId,
-    TabId, TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
+    MediaSessionId, ModelEffort, ModelId, NotificationId, ServiceId, ServiceStatus, SidebarSide, SpaceId,
+    SplitDirection, SplitGroupId, StepId, TabId, TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
 };
+use crate::modules::{ExtensionId, PluginId};
 use crate::picker::PickerRequestId;
 use crate::region::RegionRect;
+use crate::settings::SettingsGroupId;
 use crate::site_info::{PermissionState, SitePermissionKind};
 use crate::space_routing::{RouteMatchType, RouteTarget, SpaceRouteId};
 use crate::split::{DropZone, parse_direction};
@@ -774,6 +776,77 @@ pub enum Command {
     },
     /// Cancels an active region pick without capturing.
     RegionCancel,
+    /// Opens Zendia's native settings window, optionally on a specific group.
+    SettingsOpen {
+        group: Option<SettingsGroupId>,
+    },
+    /// Closes Zendia's native settings window.
+    SettingsClose,
+    /// Updates a Phase 13 profile setting by dotted key and string value.
+    SettingsSet {
+        key: String,
+        value: String,
+    },
+    /// Resets settings in `group` back to defaults.
+    SettingsResetGroup {
+        group: SettingsGroupId,
+    },
+    /// Toggles an installed plugin between enabled and disabled.
+    PluginToggle {
+        plugin_id: PluginId,
+    },
+    /// Explicitly enables or disables an installed plugin.
+    PluginSetEnabled {
+        plugin_id: PluginId,
+        enabled: bool,
+    },
+    /// Master toggle enabling or disabling all plugins.
+    PluginSetAllEnabled {
+        enabled: bool,
+    },
+    /// Uninstalls a plugin.
+    PluginRemove {
+        plugin_id: PluginId,
+    },
+    /// Opens a plugin's declared UI side panel.
+    PluginOpenPanel {
+        plugin_id: PluginId,
+    },
+    /// Restarts a stopped plugin sandbox.
+    PluginRestart {
+        plugin_id: PluginId,
+    },
+    /// Toggles an installed WebExtension between enabled and disabled.
+    ExtensionToggle {
+        extension_id: ExtensionId,
+    },
+    /// Explicitly enables or disables an installed WebExtension.
+    ExtensionSetEnabled {
+        extension_id: ExtensionId,
+        enabled: bool,
+    },
+    /// Pins or unpins an extension's contributed toolbar button.
+    ExtensionSetToolbarPinned {
+        extension_id: ExtensionId,
+        pinned: bool,
+    },
+    /// Triggers an installed WebExtension's toolbar action.
+    ExtensionInvokeAction {
+        extension_id: ExtensionId,
+    },
+    /// Sets a background service's health state.
+    ServiceSetState {
+        service: ServiceId,
+        status: ServiceStatus,
+    },
+    /// Cycles a background service through Running -> Restarting -> Stopped -> Running.
+    ServiceCycleState {
+        service: ServiceId,
+    },
+    /// Restarts a background service back to Running.
+    ServiceRestart {
+        service: ServiceId,
+    },
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -1079,6 +1152,23 @@ impl Command {
             Self::RegionPick { .. } => "region.pick",
             Self::RegionCapture { .. } => "region.capture",
             Self::RegionCancel => "region.cancel",
+            Self::SettingsOpen { .. } => "settings.open",
+            Self::SettingsClose => "settings.close",
+            Self::SettingsSet { .. } => "settings.set",
+            Self::SettingsResetGroup { .. } => "settings.reset_group",
+            Self::PluginToggle { .. } => "plugin.toggle",
+            Self::PluginSetEnabled { .. } => "plugin.set_enabled",
+            Self::PluginSetAllEnabled { .. } => "plugin.set_all_enabled",
+            Self::PluginRemove { .. } => "plugin.remove",
+            Self::PluginOpenPanel { .. } => "plugin.open_panel",
+            Self::PluginRestart { .. } => "plugin.restart",
+            Self::ExtensionToggle { .. } => "extension.toggle",
+            Self::ExtensionSetEnabled { .. } => "extension.set_enabled",
+            Self::ExtensionSetToolbarPinned { .. } => "extension.set_toolbar_pinned",
+            Self::ExtensionInvokeAction { .. } => "extension.invoke_action",
+            Self::ServiceSetState { .. } => "service.set_state",
+            Self::ServiceCycleState { .. } => "service.cycle_state",
+            Self::ServiceRestart { .. } => "service.restart",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -1973,6 +2063,9 @@ impl Command {
             "region.cancel" => Ok(Self::RegionCancel),
             _ => {
                 if let Some(cmd) = crate::space_routing::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                if let Some(cmd) = crate::stub::settings_modules::parse_command(name, args)? {
                     return Ok(cmd);
                 }
                 Ok(Self::vim_profile_alias(name).unwrap_or_else(|| Self::Custom {
@@ -4033,6 +4126,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
         },
     ];
     descriptors.extend(crate::space_routing::command_descriptors());
+    descriptors.extend(crate::stub::settings_modules::command_descriptors());
     descriptors
 }
 

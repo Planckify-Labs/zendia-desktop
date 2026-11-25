@@ -14,6 +14,7 @@ pub mod library;
 pub mod onboarding;
 pub mod page;
 pub mod panels;
+pub mod settings;
 pub mod theme;
 pub mod vim;
 pub mod webchat;
