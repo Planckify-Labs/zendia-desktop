@@ -23,7 +23,6 @@ use zendia_browser_core::commands::Command;
 use zendia_browser_core::contributions::{SidePanelId, SidePanelLayout, SidePanelSide};
 use zendia_browser_core::menus::build_tab_context_menu;
 use zendia_browser_core::model::{BrowserModel, ChatSiteId};
-use zendia_browser_core::stub::sample_model;
 use zendia_browser_core::webchat::{WEBCHAT_DEFAULT_WIDTH, WEBCHAT_PANEL_ID};
 use zendia_module_api::ui::UiTone;
 
@@ -58,7 +57,7 @@ impl WebChatSection {
 }
 
 fn build_fixture_model(state_id: &str) -> BrowserModel {
-    let mut model = sample_model(true);
+    let mut model = super::gallery_sample_model();
     model.active_chat_site_id = Some(ChatSiteId::new("chatgpt"));
     model.webchat_dictating = state_id == "dictation";
     if state_id == "dictation" {

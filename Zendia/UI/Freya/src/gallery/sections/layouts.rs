@@ -19,7 +19,7 @@ use std::sync::Arc;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::media;
 use zendia_browser_core::model::{BrowserModel, CompactHide, MediaSessionId, SpaceId, TabId, ToolbarLayout};
-use zendia_browser_core::stub::{sample_model, sample_update_notification};
+use zendia_browser_core::stub::sample_update_notification;
 use zendia_browser_core::toasts::{Toast, ToastAction, ToastId, messages};
 use zendia_module_api::ui::UiTone;
 
@@ -75,7 +75,7 @@ fn configure_fixture(
         let mut flights = arc.flights;
         flights.set(Vec::new());
     }
-    let mut model = sample_model(true);
+    let mut model = super::gallery_sample_model();
     model.active_tab = Some(DOCS);
     if let Some(window) = model.windows.first_mut() {
         window.active_tab = Some(DOCS);

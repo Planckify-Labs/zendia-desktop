@@ -1008,6 +1008,7 @@ pub struct GalleryCore {
 impl GalleryCore {
     pub fn new(initial_theme: ThemeScheme) -> Self {
         let stub = Arc::new(StubBackend::new());
+        stub.replace_model(crate::gallery::sections::gallery_sample_model());
         let _ = stub.invoke(Command::ThemeSet {
             scheme: Some(initial_theme),
             overrides: None,

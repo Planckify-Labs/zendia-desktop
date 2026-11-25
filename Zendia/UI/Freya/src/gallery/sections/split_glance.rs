@@ -21,7 +21,6 @@ use zendia_browser_core::model::{
     BrowserModel, SpaceId, SplitDirection, SplitGroup, SplitGroupId, TabId, TabMoveTarget,
 };
 use zendia_browser_core::split::{self, DropZone, Glance};
-use zendia_browser_core::stub::sample_model;
 use zendia_module_api::ui::UiTone;
 
 const DOCS: TabId = TabId(12);
@@ -86,7 +85,7 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
     if let Some(state) = sidebar_state {
         state.reset();
     }
-    let mut model = sample_model(true);
+    let mut model = super::gallery_sample_model();
     activate(&mut model, DOCS);
     match state_id {
         "stacked" => add_group(&mut model, vec![DOCS, ARCH], SplitDirection::Vertical, None),

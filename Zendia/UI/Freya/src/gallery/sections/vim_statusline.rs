@@ -22,7 +22,6 @@ use zendia_browser_core::input_state::{
     StatuslineAnnouncement, StatuslineShow, mode_name, which_key_all_keymaps, which_key_for_prefix,
 };
 use zendia_browser_core::model::{InputMode, SpaceId, TabId};
-use zendia_browser_core::stub::sample_model;
 use zendia_module_api::ui::UiTone;
 
 const DOCS: TabId = TabId(12);
@@ -56,7 +55,7 @@ fn configure_fixture(
         scrolling.set_if_modified(false);
     }
 
-    let mut model = sample_model(true);
+    let mut model = super::gallery_sample_model();
     model.active_tab = Some(DOCS);
     if let Some(window) = model.windows.first_mut() {
         window.active_tab = Some(DOCS);

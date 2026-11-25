@@ -22,7 +22,6 @@ use std::sync::Arc;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::model::{SIDEBAR_DEFAULT_WIDTH, SidebarSide, SpaceId, TabId, ToolbarLayout};
 use zendia_browser_core::site_info::{PermissionState, SiteDataSummary, SiteInfo, SitePermission, SitePermissionKind};
-use zendia_browser_core::stub::sample_model;
 use zendia_module_api::ui::UiTone;
 
 #[derive(Clone)]
@@ -39,7 +38,7 @@ impl PartialEq for AddressBarSection {
 
 fn configure_address_bar_fixture(state_id: &str, gallery_core: &GalleryCore) {
     let stub = gallery_core.stub();
-    let mut model = sample_model(true);
+    let mut model = super::gallery_sample_model();
     model.layout.toolbar_layout = ToolbarLayout::Single;
     model.layout.sidebar_side = SidebarSide::Left;
     model.layout.sidebar_expanded = true;

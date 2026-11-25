@@ -21,7 +21,7 @@ use zendia_browser_core::commands::Command;
 use zendia_browser_core::model::{
     SIDEBAR_DEFAULT_WIDTH, SidebarSide, SpaceId, TabId, TabKind, TabMoveTarget, ToolbarLayout,
 };
-use zendia_browser_core::stub::{sample_model, sample_update_notification};
+use zendia_browser_core::stub::sample_update_notification;
 use zendia_module_api::ui::UiTone;
 
 #[derive(Clone)]
@@ -42,7 +42,7 @@ fn configure_sidebar_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar
         state.reset();
     }
 
-    let mut model = sample_model(true);
+    let mut model = super::gallery_sample_model();
     model.layout.toolbar_layout = ToolbarLayout::Single;
     model.layout.sidebar_side = SidebarSide::Left;
     model.layout.sidebar_expanded = true;

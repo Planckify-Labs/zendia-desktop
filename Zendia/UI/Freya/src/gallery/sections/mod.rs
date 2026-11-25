@@ -29,6 +29,8 @@ use crate::gallery::registry::GalleryCore;
 use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
 use std::sync::Arc;
+use zendia_browser_core::model::{BrowserModel, ServiceId, ServiceStatus};
+use zendia_browser_core::stub::sample_model;
 
 /// Renders the active gallery section and named state.
 ///
@@ -123,6 +125,20 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
 }
 
 /// Framed card used across gallery sections to group related component states cleanly.
+/// The sample model with AgentServer stopped, as every section before the agent panels was drawn, so no agent pill,
+/// badge or dot shows there. The agent sections start AgentServer in their own fixtures.
+pub fn gallery_sample_model() -> BrowserModel {
+    let mut model = sample_model(true);
+    for service in &mut model.services {
+        if service.service == ServiceId::AgentServer {
+            service.status = ServiceStatus::Stopped {
+                reason: Some("stub mode".to_string()),
+            };
+        }
+    }
+    model
+}
+
 pub fn demo_card(title: &str, subtitle: &str, content: impl IntoElement) -> Element {
     let theme = use_theme();
     rect()

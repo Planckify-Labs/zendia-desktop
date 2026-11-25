@@ -24,7 +24,6 @@ use zendia_browser_core::model::{
 };
 use zendia_browser_core::picker::{PickerItem, PickerLayout, PickerRequest, build_agents_picker, build_tabs_picker};
 use zendia_browser_core::region::RegionRect;
-use zendia_browser_core::stub::sample_model;
 use zendia_module_api::ui::UiTone;
 
 #[derive(Clone)]
@@ -40,7 +39,7 @@ impl PartialEq for VimPickersSection {
 }
 
 fn tabs_fixture_model(vim_enabled: bool) -> BrowserModel {
-    let mut model = sample_model(true);
+    let mut model = super::gallery_sample_model();
     let space = SpaceId(1);
     model.vim_mode_enabled = vim_enabled;
     model.layout.toolbar_layout = ToolbarLayout::Single;

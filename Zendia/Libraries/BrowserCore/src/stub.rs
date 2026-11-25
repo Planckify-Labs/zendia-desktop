@@ -3645,11 +3645,10 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
                 reason: Some("stub mode".to_string()),
             },
         },
+        // Running, so the agent surfaces show their sample conversations. `debug.toggle_agent_service` stops it.
         ServiceState {
             service: ServiceId::AgentServer,
-            status: ServiceStatus::Stopped {
-                reason: Some("stub mode".to_string()),
-            },
+            status: ServiceStatus::Running,
         },
         ServiceState {
             service: ServiceId::PluginHost,

@@ -303,7 +303,7 @@ impl StubBackend {
                             reply_step_id,
                             StepKind::Response,
                             format!(
-                                "Stub response for **{prompt_text}**.\n\nAgentServer is not running yet; this answer came from the stub backend.",
+                                "Stub response for **{prompt_text}**.\n\nAgentServer is running in stub mode until step 9 lands, so this answer came from the stub backend.",
                                 prompt_text = if trimmed.is_empty() {
                                     "your attachments"
                                 } else {
