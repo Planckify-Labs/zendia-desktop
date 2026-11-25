@@ -14,9 +14,12 @@ use crate::ui::kit::Icon;
 use crate::ui::kit::icons::prepared_icon_bytes;
 use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, use_theme};
+use crate::ui::vim::explorer::{apply_explorer_background, apply_explorer_border};
+use crate::ui::vim::hints::hint_badge_for_row;
 use freya::prelude::*;
 use std::time::{Duration, Instant};
 use zendia_browser_core::commands::Command;
+use zendia_browser_core::focus::FocusTarget;
 use zendia_browser_core::model::{Tab, TabKind, TabMoveTarget};
 
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
@@ -93,6 +96,27 @@ impl Component for VerticalTabRow {
             palette.tab_hover_bg
         } else {
             Color::TRANSPARENT
+        };
+        let focus_target = match self.tab.kind {
+            TabKind::Pinned if self.tab.folder_id.is_none() => FocusTarget::PinnedTab(tab_id),
+            TabKind::Essential => FocusTarget::Essential(tab_id),
+            _ => FocusTarget::Tab(tab_id),
+        };
+        let (bg, explorer_hint_badge, explorer_border_override) = {
+            let model = core.model().read();
+            let base_border = if focus() == Focus::Keyboard {
+                Border::new()
+                    .width(1.5)
+                    .alignment(BorderAlignment::Inner)
+                    .fill(theme.color(ThemeRole::FocusRing))
+            } else {
+                Border::new().width(0.0).fill(Color::TRANSPARENT)
+            };
+            (
+                apply_explorer_background(bg, &model, &focus_target, &theme),
+                hint_badge_for_row(&model, &focus_target, TAB_ROW_HEIGHT, &theme),
+                apply_explorer_border(base_border, &model, &focus_target, &theme),
+            )
         };
 
         let title_for_click = self.tab.display_title();
@@ -247,14 +271,7 @@ impl Component for VerticalTabRow {
                 .color(Color::from_argb(24, 0, 0, 0))
         });
 
-        let focus_border = if focus() == Focus::Keyboard {
-            Border::new()
-                .width(1.5)
-                .alignment(BorderAlignment::Inner)
-                .fill(theme.color(ThemeRole::FocusRing))
-        } else {
-            Border::new().width(0.0).fill(Color::TRANSPARENT)
-        };
+        let focus_border = explorer_border_override;
 
         if self.collapsed {
             let audio_dot = (self.tab.is_audible || self.tab.is_muted).then(|| {
@@ -295,7 +312,8 @@ impl Component for VerticalTabRow {
                 .on_press(on_press)
                 .on_mouse_down(on_mouse_down)
                 .child(favicon_tile)
-                .maybe_child(audio_dot);
+                .maybe_child(audio_dot)
+                .maybe_child(explorer_hint_badge);
             let styled_tile = match selected_shadow {
                 Some(shadow) => tile.shadow(shadow),
                 None => tile,
@@ -456,7 +474,8 @@ impl Component for VerticalTabRow {
             .child(favicon_tile)
             .child(center_el)
             .maybe_child(audio_button)
-            .maybe_child(close_button);
+            .maybe_child(close_button)
+            .maybe_child(explorer_hint_badge);
 
         let styled_row = match selected_shadow {
             Some(shadow) => row.shadow(shadow),

@@ -16,6 +16,7 @@ use crate::ui::core_view::use_core;
 use crate::ui::page::glance::{GLANCE_BACKGROUND_OPACITY, GLANCE_BACKGROUND_SCALE, GlanceLayer, glance_spring};
 use crate::ui::page::surface::PageSurface;
 use crate::ui::theme::{ThemeRole, motion, use_theme};
+use crate::ui::vim::window_mode::{WindowModeOverlay, active_pane_ring_role};
 use freya::animation::*;
 use freya::prelude::*;
 use std::time::Instant;
@@ -372,6 +373,7 @@ impl Component for PageArea {
             .on_global_pointer_move(on_global_pointer_move)
             .child(content)
             .maybe_child(drop_overlay)
+            .child(WindowModeOverlay { area: size })
             .maybe_child(glance_layer)
     }
 
@@ -402,12 +404,13 @@ impl Component for SplitPaneView {
         let menu_state = try_use_menu_state();
         let tab_id = self.tab_id;
 
-        let (title, url) = {
+        let (title, url, active_ring_role) = {
             let model = core.model().read();
-            model
+            let (title, url) = model
                 .tab(tab_id)
                 .map(|tab| (tab.display_title(), tab.url.clone()))
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (title, url, active_pane_ring_role(&model))
         };
 
         let page: Element = match self.mode {
@@ -452,7 +455,7 @@ impl Component for SplitPaneView {
                 Border::new()
                     .width(ACTIVE_RING_WIDTH)
                     .alignment(BorderAlignment::Inner)
-                    .fill(theme.color(ThemeRole::Accent))
+                    .fill(theme.color(active_ring_role))
             } else {
                 Border::new()
                     .width(1.0)

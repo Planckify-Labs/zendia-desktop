@@ -35,6 +35,7 @@ use crate::tab_source::{TabSource, TabUpdate};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+mod focus;
 mod page_layouts;
 
 const MAX_ESSENTIALS: usize = 12;
@@ -1968,6 +1969,9 @@ impl StubBackend {
         self.bus.publish(Event::ContributionsChanged {
             contributions: updated_contributions,
         });
+        if !enabled {
+            self.clear_focus_on_vim_disabled();
+        }
         Ok(())
     }
 
@@ -2457,6 +2461,24 @@ impl BrowserCore for StubBackend {
             | Command::LayoutSetTabSwitchMotion { .. }
             | Command::DebugSampleDownload
             | Command::DebugSampleMedia) => self.handle_page_layout_command(command, tab_source),
+            command @ (Command::ExplorerOpen
+            | Command::ExplorerClose
+            | Command::ExplorerMove { .. }
+            | Command::ExplorerSelect { .. }
+            | Command::ExplorerActivate
+            | Command::ExplorerPick
+            | Command::FocusHintInput { .. }
+            | Command::FocusHintCancel
+            | Command::ToolbarFocusOpen
+            | Command::ToolbarFocusClose
+            | Command::ToolbarFocusMove { .. }
+            | Command::ToolbarFocusActivate
+            | Command::WindowModeOpen
+            | Command::WindowModeClose
+            | Command::WindowModeFocusPane { .. }
+            | Command::WindowModeMovePane { .. }
+            | Command::WindowModeCarryToggle
+            | Command::WindowModeDrop) => self.handle_focus_command(command, tab_source),
             Command::Custom { name, args } => {
                 eprintln!("zendia: stub backend does not handle command `{name}` (args: {args:?})");
                 Err(CommandError::UnknownCommand(name))
@@ -3466,6 +3488,7 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         input_mode: InputMode::Normal,
         pending_keys: Vec::new(),
         which_key: None,
+        focus: crate::focus::FocusState::default(),
         theme: ThemeSettings::default(),
         layout: LayoutSettings::default(),
         vim_mode_enabled: false,

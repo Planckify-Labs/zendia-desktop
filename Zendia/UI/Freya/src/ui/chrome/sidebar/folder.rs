@@ -13,10 +13,13 @@ use crate::ui::chrome::sidebar::state::try_use_sidebar_state;
 use crate::ui::chrome::sidebar::tab_row::{InlineRenameField, VerticalTabRow};
 use crate::ui::core_view::use_core;
 use crate::ui::theme::{ThemeRole, motion, use_theme};
+use crate::ui::vim::explorer::{apply_explorer_background, apply_explorer_border};
+use crate::ui::vim::hints::hint_badge_for_row;
 use freya::animation::*;
 use freya::prelude::*;
 use std::time::Duration;
 use zendia_browser_core::commands::Command;
+use zendia_browser_core::focus::FocusTarget;
 use zendia_browser_core::model::{Folder, Tab, TabId, TabMoveTarget};
 
 /// Folder expand/collapse duration matching Zen's `ZenFolders.mjs` (`0.18s`).
@@ -236,6 +239,15 @@ impl Component for FolderHeaderRow {
         } else {
             Border::new().width(0.0).fill(Color::TRANSPARENT)
         };
+        let focus_target = FocusTarget::Folder(folder_id);
+        let (bg, border, hint_badge) = {
+            let model = core.model().read();
+            (
+                apply_explorer_background(bg, &model, &focus_target, &theme),
+                apply_explorer_border(border, &model, &focus_target, &theme),
+                hint_badge_for_row(&model, &focus_target, TAB_ROW_HEIGHT, &theme),
+            )
+        };
 
         let tab_count = self.tab_count;
         let state_label = if self.folder.collapsed {
@@ -270,7 +282,8 @@ impl Component for FolderHeaderRow {
                         .on_pointer_leave(move |_| hovered.set_if_modified(false))
                         .on_press(on_press)
                         .on_mouse_down(on_mouse_down)
-                        .child(folder_icon),
+                        .child(folder_icon)
+                        .maybe_child(hint_badge),
                 )
                 .into_element();
         }
@@ -337,6 +350,7 @@ impl Component for FolderHeaderRow {
             .on_mouse_down(on_mouse_down)
             .child(folder_icon)
             .child(center_el)
+            .maybe_child(hint_badge)
             .into_element()
     }
 }

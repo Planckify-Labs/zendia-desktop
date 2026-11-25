@@ -16,6 +16,7 @@ use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
 use crate::ui::page::download_arc::try_use_download_arc;
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_theme};
+use crate::ui::vim::toolbar_focus::{apply_toolbar_cursor_bg, apply_toolbar_cursor_border, is_toolbar_cursor};
 use freya::prelude::*;
 use zendia_browser_core::address_bar::display_url_for_sidebar;
 use zendia_browser_core::commands::Command;
@@ -153,23 +154,28 @@ impl Component for ToolbarItemView {
             }
         };
 
-        let focus_border = if focus() == Focus::Keyboard {
-            Border::new()
-                .width(1.5)
-                .alignment(BorderAlignment::Inner)
-                .fill(theme.color(ThemeRole::FocusRing))
-        } else {
-            Border::new().width(0.0).fill(Color::TRANSPARENT)
+        let focus_border = {
+            let base = if focus() == Focus::Keyboard {
+                Border::new()
+                    .width(1.5)
+                    .alignment(BorderAlignment::Inner)
+                    .fill(theme.color(ThemeRole::FocusRing))
+            } else {
+                Border::new().width(0.0).fill(Color::TRANSPARENT)
+            };
+            let model = core.model().read();
+            apply_toolbar_cursor_border(base, &model, self.item.id.as_str(), &theme)
         };
 
         let a11y_label = self.item.tooltip.clone().unwrap_or_else(|| self.item.title.clone());
 
         if self.item.kind == ToolbarItemKind::PillButton {
-            let bg = if is_pressed || hovered() {
+            let base_bg = if is_pressed || hovered() {
                 palette.surface_pill_hover
             } else {
                 palette.surface_pill
             };
+            let bg = apply_toolbar_cursor_bg(base_bg, &core.model().read(), self.item.id.as_str(), &theme);
             let pill_h = if self.tight { 24.0 } else { 26.0 };
             let pill_pad = if self.tight {
                 Gaps::new(0.0, 7.0, 0.0, 6.0)
@@ -238,18 +244,21 @@ impl Component for ToolbarItemView {
         };
         let radius = if is_zendia_capsule { 999.0 } else { 6.0 };
 
-        let bg = if is_pressed {
-            palette.surface_pill_hover
-        } else if is_zendia_capsule {
-            if hovered() && effective_enabled {
+        let bg = {
+            let base = if is_pressed {
                 palette.surface_pill_hover
-            } else {
+            } else if is_zendia_capsule {
+                if hovered() && effective_enabled {
+                    palette.surface_pill_hover
+                } else {
+                    palette.surface_pill
+                }
+            } else if hovered() && effective_enabled {
                 palette.surface_pill
-            }
-        } else if hovered() && effective_enabled {
-            palette.surface_pill
-        } else {
-            Color::TRANSPARENT
+            } else {
+                Color::TRANSPARENT
+            };
+            apply_toolbar_cursor_bg(base, &core.model().read(), self.item.id.as_str(), &theme)
         };
 
         let icon_role = if effective_enabled {
@@ -367,14 +376,14 @@ impl Component for LocationBar {
         let focus = use_focus(self.location_a11y_id);
         let is_focused = focus() != Focus::Not;
 
-        let (active_url, site_info) = {
+        let (active_url, site_info, toolbar_cursor_on_urlbar) = {
             let model = core.model().read();
             let url = model
                 .active_tab()
                 .map(|tab| tab.url.clone())
                 .unwrap_or_else(|| self.location.read().clone());
             let info = model.active_site_info();
-            (url, info)
+            (url, info, is_toolbar_cursor(&model, "builtin.url_bar"))
         };
 
         let floating_open = addr_state.is_some_and(|s| *s.open.read());
@@ -406,7 +415,13 @@ impl Component for LocationBar {
         } else {
             URL_BAR_HEIGHT_TOP
         };
-        let radius = if self.compact_sidebar { 10.0 } else { 8.0 };
+        let radius = if toolbar_cursor_on_urlbar {
+            18.0
+        } else if self.compact_sidebar {
+            10.0
+        } else {
+            8.0
+        };
 
         let bg = if is_focused {
             palette.urlbar_focus_bg
@@ -415,10 +430,19 @@ impl Component for LocationBar {
         } else {
             palette.urlbar_bg
         };
-        let border_color = if focus() == Focus::Keyboard {
+        let border_color = if toolbar_cursor_on_urlbar {
+            theme.color(ThemeRole::ModeToolbar)
+        } else if focus() == Focus::Keyboard {
             theme.color(ThemeRole::FocusRing)
         } else {
             palette.urlbar_border
+        };
+        let border_width = if toolbar_cursor_on_urlbar {
+            2.0
+        } else if focus() == Focus::Keyboard {
+            1.5
+        } else {
+            1.0
         };
 
         let open_bar_core = core.clone();
@@ -540,7 +564,7 @@ impl Component for LocationBar {
             .background(bg)
             .border(
                 Border::new()
-                    .width(if focus() == Focus::Keyboard { 1.5 } else { 1.0 })
+                    .width(border_width)
                     .alignment(BorderAlignment::Inner)
                     .fill(border_color),
             )

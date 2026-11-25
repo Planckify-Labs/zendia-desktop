@@ -8,6 +8,7 @@
 
 use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, SidePanelId};
+use crate::focus::FocusState;
 use crate::model::{
     Bookmark, Conversation, Download, Essential, Folder, FolderId, InputMode, LayoutSettings, MediaSession,
     NotificationId, PinnedTab, ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId,
@@ -134,6 +135,9 @@ pub enum Event {
     },
     WhichKeyChanged {
         state: Option<WhichKeyState>,
+    },
+    FocusChanged {
+        focus: FocusState,
     },
     ConversationUpdated {
         conversation: Conversation,

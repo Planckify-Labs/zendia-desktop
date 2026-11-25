@@ -254,8 +254,12 @@ impl Component for PageSurface {
 
         let on_key_down = {
             let keymap = keymap.clone();
+            let core = core.clone();
             let tracker = Rc::clone(page_ctx.tracker());
             move |e: Event<KeyboardEventData>| {
+                if crate::ui::vim::focus_mode_captures_keys(&core.model().peek()) {
+                    return;
+                }
                 if keymap.will_consume_key_down(&e) {
                     return;
                 }

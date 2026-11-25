@@ -12,6 +12,7 @@
 use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, ToolbarArea, ToolbarPlacementRules};
 use crate::events::Event;
+use crate::focus::FocusState;
 use crate::site_info::{SiteExtension, SiteInfo, origin_for_url};
 use crate::split::Glance;
 use crate::toasts::Toast;
@@ -660,6 +661,7 @@ pub struct BrowserModel {
     pub input_mode: InputMode,
     pub pending_keys: Vec<String>,
     pub which_key: Option<WhichKeyState>,
+    pub focus: FocusState,
     pub theme: ThemeSettings,
     pub layout: LayoutSettings,
     pub vim_mode_enabled: bool,
@@ -1075,6 +1077,10 @@ impl BrowserModel {
             }
             Event::WhichKeyChanged { state } => {
                 self.which_key = state.clone();
+                true
+            }
+            Event::FocusChanged { focus } => {
+                self.focus = focus.clone();
                 true
             }
             Event::ConversationUpdated { conversation } => {

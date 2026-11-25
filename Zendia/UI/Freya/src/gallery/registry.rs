@@ -533,6 +533,65 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "vim-focus",
+        title: "Vim focus & window",
+        phase: 5,
+        icon: "compass",
+        summary: "Explorer cursor and selection over sidebar rows, jump hint labels, toolbar focus, and window mode over split panes.",
+        states: &[
+            GalleryStateSpec {
+                id: "explorer-tab",
+                label: "Explorer: Tab",
+                description: "EXPLORER blue cursor ring over a vertical tab row in the sidebar.",
+            },
+            GalleryStateSpec {
+                id: "explorer-selection",
+                label: "Explorer: Selection",
+                description: "EXPLORER cursor combined with VISUAL purple multi-row selection.",
+            },
+            GalleryStateSpec {
+                id: "explorer-folder",
+                label: "Explorer: Folder",
+                description: "EXPLORER blue cursor ring resting on a sidebar folder row.",
+            },
+            GalleryStateSpec {
+                id: "explorer-split-group",
+                label: "Explorer: Split Row",
+                description: "EXPLORER blue cursor ring over a split-group row in the sidebar.",
+            },
+            GalleryStateSpec {
+                id: "hints-sidebar",
+                label: "Hint Labels",
+                description: "Jump hint labels assigned across essentials, pinned tabs, folders, and normal tabs.",
+            },
+            GalleryStateSpec {
+                id: "hints-narrowed",
+                label: "Hints Narrowed",
+                description: "Two-letter hint labels narrowed after typing prefix \"a\".",
+            },
+            GalleryStateSpec {
+                id: "toolbar-button",
+                label: "Toolbar: Button",
+                description: "TOOLBAR yellow cursor ring over a toolbar icon button.",
+            },
+            GalleryStateSpec {
+                id: "toolbar-urlbar",
+                label: "Toolbar: URL Bar",
+                description: "TOOLBAR yellow pill cursor ring around the sidebar address bar.",
+            },
+            GalleryStateSpec {
+                id: "window-grid",
+                label: "Window: 3-Pane Grid",
+                description: "Numbered pane chips and WINDOW orange active ring over a three-pane split grid.",
+            },
+            GalleryStateSpec {
+                id: "window-landing",
+                label: "Window: Landing Labels",
+                description: "Window mode carry state showing pane-side and outer split-edge landing labels.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
@@ -805,6 +864,13 @@ fn format_command_detail(command: &Command) -> String {
         Command::SidebarSetSide { side } => format!("side={side:?}"),
         Command::SidebarSetWidth { width } => format!("width={width:.0}"),
         Command::VimSetEnabled { enabled } => format!("enabled={enabled}"),
+        Command::ExplorerMove { direction } | Command::ToolbarFocusMove { direction } => {
+            format!("direction={}", direction.as_str())
+        }
+        Command::ExplorerSelect { range } => format!("range={range}"),
+        Command::FocusHintInput { key } => format!("key={key:?}"),
+        Command::WindowModeFocusPane { pane } => format!("pane={pane}"),
+        Command::WindowModeMovePane { direction } => format!("direction={}", direction.as_str()),
         Command::PageCopyLink { url } => url.clone(),
         Command::PageOpenLinkInNewTab { url, activate, .. } => format!("{url} activate={activate}"),
         Command::PageReplaceMisspelling { replacement, .. } => replacement.clone(),
