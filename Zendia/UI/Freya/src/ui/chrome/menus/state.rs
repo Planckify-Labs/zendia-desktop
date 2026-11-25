@@ -70,6 +70,9 @@ pub struct OpenSelectDropdown {
 pub struct MenuViewState {
     pub app_menu_open: State<bool>,
     pub app_menu_anchor: State<AnchorRect>,
+    /// Whether the extensions menu (every installed extension, like Firefox's puzzle-piece panel) is open.
+    pub extensions_menu_open: State<bool>,
+    pub extensions_menu_anchor: State<AnchorRect>,
     pub about_open: State<bool>,
     pub context_menu: State<Option<OpenContextMenu>>,
     pub select_dropdown: State<Option<OpenSelectDropdown>>,
@@ -105,6 +108,24 @@ impl MenuViewState {
     /// Closes the application menu.
     pub fn close_app_menu(&self) {
         let mut open = self.app_menu_open;
+        open.set_if_modified(false);
+    }
+
+    /// Toggles the extensions menu, anchored where the extensions toolbar button last reported itself.
+    pub fn toggle_extensions_menu(&self) {
+        let mut open = self.extensions_menu_open;
+        let next = !*open.peek();
+        if next {
+            self.close_app_menu();
+            self.close_context_menu();
+            self.close_select_dropdown();
+        }
+        open.set(next);
+    }
+
+    /// Closes the extensions menu.
+    pub fn close_extensions_menu(&self) {
+        let mut open = self.extensions_menu_open;
         open.set_if_modified(false);
     }
 
@@ -159,6 +180,7 @@ impl MenuViewState {
     #[allow(dead_code)]
     pub fn close_all(&self) {
         self.close_app_menu();
+        self.close_extensions_menu();
         self.close_context_menu();
         self.close_select_dropdown();
         self.close_about();
@@ -168,6 +190,7 @@ impl MenuViewState {
     #[allow(dead_code)]
     pub fn has_open_overlay(&self) -> bool {
         *self.app_menu_open.read()
+            || *self.extensions_menu_open.read()
             || *self.about_open.read()
             || self.context_menu.read().is_some()
             || self.select_dropdown.read().is_some()
@@ -178,6 +201,8 @@ impl MenuViewState {
 pub fn use_provide_menu_state() -> MenuViewState {
     let app_menu_open = use_state(|| false);
     let app_menu_anchor = use_state(AnchorRect::default);
+    let extensions_menu_open = use_state(|| false);
+    let extensions_menu_anchor = use_state(AnchorRect::default);
     let about_open = use_state(|| false);
     let context_menu = use_state(|| None::<OpenContextMenu>);
     let select_dropdown = use_state(|| None::<OpenSelectDropdown>);
@@ -185,6 +210,8 @@ pub fn use_provide_menu_state() -> MenuViewState {
     use_provide_context(|| MenuViewState {
         app_menu_open,
         app_menu_anchor,
+        extensions_menu_open,
+        extensions_menu_anchor,
         about_open,
         context_menu,
         select_dropdown,
@@ -263,6 +290,26 @@ pub fn compute_app_menu_origin(anchor: AnchorRect, popup_size: (f32, f32), windo
     (desired_x.clamp(margin, max_x), desired_y.clamp(margin, max_y))
 }
 
+/// Places a popup under its anchor, or above it when there is no room below (a button at the sidebar's bottom edge),
+/// keeping it inside the window.
+pub fn compute_popup_origin_above_or_below(
+    anchor: AnchorRect,
+    popup_size: (f32, f32),
+    window_size: (f32, f32),
+) -> (f32, f32) {
+    let margin = 8.0;
+    let gap = 6.0;
+    let max_x = (window_size.0 - popup_size.0 - margin).max(margin);
+    let below = anchor.y + anchor.height + gap;
+    let above = anchor.y - gap - popup_size.1;
+    let y = if below + popup_size.1 + margin <= window_size.1 || above < margin {
+        below.min((window_size.1 - popup_size.1 - margin).max(margin))
+    } else {
+        above
+    };
+    (anchor.x.clamp(margin, max_x), y)
+}
+
 /// Computes the floating origin for a cascading submenu next to a parent menu row, flipping left if near the right edge.
 pub fn compute_submenu_origin(
     parent_origin: (f32, f32),
@@ -333,6 +380,31 @@ mod tests {
         assert_eq!(
             clamp_popup_origin((10.0, 10.0), (500.0, 400.0), (300.0, 200.0), 6.0),
             (6.0, 6.0)
+        );
+    }
+
+    #[test]
+    fn popup_opens_above_a_button_at_the_bottom_edge() {
+        let window = (1280.0, 860.0);
+        let top_button = AnchorRect {
+            x: 1200.0,
+            y: 8.0,
+            width: 28.0,
+            height: 28.0,
+        };
+        assert_eq!(
+            compute_popup_origin_above_or_below(top_button, (320.0, 300.0), window),
+            (952.0, 42.0)
+        );
+        let bottom_button = AnchorRect {
+            x: 40.0,
+            y: 820.0,
+            width: 28.0,
+            height: 28.0,
+        };
+        assert_eq!(
+            compute_popup_origin_above_or_below(bottom_button, (320.0, 300.0), window),
+            (40.0, 514.0)
         );
     }
 

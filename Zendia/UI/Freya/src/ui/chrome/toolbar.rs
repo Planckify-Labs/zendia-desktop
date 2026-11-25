@@ -81,6 +81,7 @@ impl ToolbarItemView {
 
 /// The library button, where downloads land.
 const LIBRARY_ITEM_ID: &str = "builtin.library";
+const EXTENSIONS_ITEM_ID: &str = "builtin.extensions";
 
 impl Component for ToolbarItemView {
     fn render(&self) -> impl IntoElement {
@@ -160,10 +161,12 @@ impl Component for ToolbarItemView {
         };
 
         let is_app_menu = self.item.kind == ToolbarItemKind::AppMenu;
+        let is_extensions_menu = self.item.id.as_str() == EXTENSIONS_ITEM_ID;
         let is_chat_button = self.item.id.as_str() == "zendia.chat";
         let is_agents_button = self.item.id.as_str() == "zendia.agents";
         let is_webchat_button = self.item.id.as_str() == "zendia.webchat";
         let is_pressed = (is_app_menu && menu_state.is_some_and(|state| *state.app_menu_open.read()))
+            || (is_extensions_menu && menu_state.is_some_and(|state| *state.extensions_menu_open.read()))
             || (is_chat_button && dock_state.is_some_and(|ds| ds.is_agent_open()))
             || (is_agents_button && dock_state.is_some_and(|ds| ds.is_agents_open()))
             || (is_webchat_button && dock_state.is_some_and(|ds| ds.is_webchat_open()));
@@ -395,6 +398,15 @@ impl Component for ToolbarItemView {
                 .on_sized(move |e: Event<SizedEventData>| {
                     if let Some(state) = menu_state {
                         let mut anchor = state.app_menu_anchor;
+                        anchor.set_if_modified(AnchorRect::from_area(e.area));
+                    }
+                })
+                .into_element()
+        } else if is_extensions_menu {
+            button
+                .on_sized(move |e: Event<SizedEventData>| {
+                    if let Some(state) = menu_state {
+                        let mut anchor = state.extensions_menu_anchor;
                         anchor.set_if_modified(AnchorRect::from_area(e.area));
                     }
                 })

@@ -109,6 +109,10 @@ pub(crate) fn parse_command(name: &str, args: &[(String, String)]) -> Result<Opt
         "extension.invoke_action" => Ok(Some(Command::ExtensionInvokeAction {
             extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
         })),
+        "extension.remove" => Ok(Some(Command::ExtensionRemove {
+            extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
+        })),
+        "extensions.menu.toggle" => Ok(Some(Command::ExtensionsMenuToggle)),
         "service.set_state" => {
             let raw_service = parse_required_string(name, args, "service")?;
             let service = parse_service_id(&raw_service).ok_or_else(|| CommandError::InvalidArgument {
@@ -281,6 +285,23 @@ pub(crate) fn command_descriptors() -> Vec<CommandDescriptor> {
                 ArgumentSchema::new("extension_id", ArgumentType::String, true, "Extension id"),
                 ArgumentSchema::new("pinned", ArgumentType::Bool, true, "Whether pinned to toolbar"),
             ],
+        },
+        CommandDescriptor {
+            name: "extension.remove".to_string(),
+            title: "Remove Extension".to_string(),
+            description: "Uninstall a WebExtension".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "extension_id",
+                ArgumentType::String,
+                true,
+                "Extension id",
+            )],
+        },
+        CommandDescriptor {
+            name: "extensions.menu.toggle".to_string(),
+            title: "Extensions Menu".to_string(),
+            description: "Open the menu listing every installed extension".to_string(),
+            arguments: Vec::new(),
         },
         CommandDescriptor {
             name: "extension.invoke_action".to_string(),
@@ -647,6 +668,29 @@ impl StubBackend {
                 self.show_toast(message, None, Some(2800));
                 Ok(())
             }
+            Command::ExtensionRemove { extension_id } => {
+                let (extensions, contributions) = {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let before = state.model.extensions.len();
+                    state.model.extensions.retain(|e| e.id != extension_id);
+                    if state.model.extensions.len() == before {
+                        return Err(CommandError::Failed(format!("unknown extension `{}`", extension_id.0)));
+                    }
+                    sync_module_contributions(&mut state.model);
+                    (state.model.extensions.clone(), state.model.contributions.clone())
+                };
+                eprintln!(
+                    "zendia: stub extension.remove `{}` — ExtensionServer not connected yet",
+                    extension_id.0
+                );
+                self.bus.publish(Event::ExtensionsChanged { extensions });
+                self.bus.publish(Event::ContributionsChanged { contributions });
+                Ok(())
+            }
+            Command::ExtensionsMenuToggle => {
+                self.request_view(ViewRequest::ExtensionsMenuToggle);
+                Ok(())
+            }
             Command::ServiceSetState { service, status } => {
                 self.apply_service_status(service, status);
                 Ok(())
@@ -789,6 +833,11 @@ mod tests {
         core.invoke(Command::ServiceSetState {
             service: ServiceId::ExtensionServer,
             status: ServiceStatus::Running,
+        })
+        .unwrap();
+        core.invoke(Command::ExtensionSetToolbarPinned {
+            extension_id: ExtensionId::new(SAMPLE_EXTENSION_ID),
+            pinned: true,
         })
         .unwrap();
         while let Ok(ev) = sub.try_recv() {

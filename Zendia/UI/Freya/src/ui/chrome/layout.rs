@@ -308,11 +308,23 @@ mod tests {
         assert_eq!(ids(&single_slots.sidebar_url_bar), vec!["builtin.url_bar"]);
         assert_eq!(
             ids(&single_slots.sidebar_bottom),
-            vec!["builtin.library", "zendia.agents", "zendia.chat", "builtin.new_tab"]
+            vec![
+                "builtin.library",
+                "zendia.agents",
+                "zendia.chat",
+                "builtin.extensions",
+                "builtin.new_tab"
+            ]
         );
         assert_eq!(
             ids(&single_slots.sidebar_bottom_for_side(SidebarSide::Right)),
-            vec!["builtin.new_tab", "zendia.chat", "zendia.agents", "builtin.library"]
+            vec![
+                "builtin.new_tab",
+                "builtin.extensions",
+                "zendia.chat",
+                "zendia.agents",
+                "builtin.library"
+            ]
         );
 
         let multiple = LayoutSettings {
@@ -333,7 +345,13 @@ mod tests {
         assert_eq!(ids(&multi_slots.top_bar_center), vec!["builtin.url_bar"]);
         assert_eq!(
             ids(&multi_slots.top_bar_end),
-            vec!["zendia.agents", "zendia.chat", "zendia.webchat", "builtin.app_menu"]
+            vec![
+                "zendia.agents",
+                "zendia.chat",
+                "zendia.webchat",
+                "builtin.extensions",
+                "builtin.app_menu"
+            ]
         );
         assert!(multi_slots.sidebar_top_start.is_empty());
         assert!(multi_slots.sidebar_url_bar.is_empty());

@@ -8,11 +8,13 @@
 
 pub mod app_menu;
 pub mod context_menu;
+pub mod extensions_menu;
 pub mod select_dropdown;
 pub mod state;
 
 pub use app_menu::{AppMenuInteractive, AppMenuOverlay};
 pub use context_menu::{ContextMenuCard, ContextMenuOverlay};
+pub use extensions_menu::{ExtensionsMenuOverlay, ExtensionsMenuPanel};
 pub use select_dropdown::{SelectDropdownCard, SelectDropdownOverlay};
 pub use state::{
     AnchorRect, MenuViewState, OpenContextMenu, OpenSelectDropdown, try_use_menu_state, use_menu_state,
@@ -42,6 +44,7 @@ impl Component for MenuLayer {
     fn render(&self) -> impl IntoElement {
         rect()
             .child(AppMenuOverlay)
+            .child(ExtensionsMenuOverlay)
             .child(ContextMenuOverlay)
             .child(SelectDropdownOverlay)
             .child(AboutDialogOverlay)

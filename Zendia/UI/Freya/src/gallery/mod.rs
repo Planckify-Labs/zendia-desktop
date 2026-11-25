@@ -101,6 +101,7 @@ impl App for GalleryApp {
                     vim_statusline_state.close_all_keymaps();
                 }
                 CoreEvent::ViewRequested { request, .. } => match request {
+                    ViewRequest::ExtensionsMenuToggle => menu_state.toggle_extensions_menu(),
                     ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
                         library_state.handle_view_request(request);
                         let _ = gallery_core.invoke(Command::LibraryFocusSet {

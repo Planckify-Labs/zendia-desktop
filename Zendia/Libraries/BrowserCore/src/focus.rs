@@ -959,6 +959,7 @@ mod tests {
                 "zendia.agents",
                 "zendia.chat",
                 "zendia.webchat",
+                "builtin.extensions",
                 "builtin.app_menu",
             ]
         );

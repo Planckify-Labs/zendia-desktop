@@ -326,6 +326,8 @@ pub enum ViewRequest {
     LibraryOpen { section: Option<LibrarySection> },
     /// Close the library.
     LibraryClose,
+    /// Open the extensions menu, or close it if it is open.
+    ExtensionsMenuToggle,
     /// Start renaming a space inline in the library's Spaces section.
     SpaceRename { space_id: SpaceId },
     /// Open the icon picker for a space in the library's Spaces section.

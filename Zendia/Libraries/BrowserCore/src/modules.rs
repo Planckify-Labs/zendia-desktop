@@ -359,7 +359,7 @@ pub fn sample_extensions() -> Vec<ExtensionInfo> {
             .to_string(),
         icon: "tracking-protection-fill".to_string(),
         enabled: true,
-        pinned_to_toolbar: true,
+        pinned_to_toolbar: false,
         has_site_access: true,
         permissions: vec!["webRequest".to_string(), "storage".to_string(), "tabs".to_string()],
         badge_text: Some("4".to_string()),
@@ -474,8 +474,18 @@ mod tests {
     }
 
     #[test]
-    fn extension_toolbar_item_reflects_running_and_paused_states() {
+    fn sample_extension_starts_in_the_extensions_menu_only() {
         let ext = &sample_extensions()[0];
+        assert!(!ext.pinned_to_toolbar);
+        assert!(!extension_to_toolbar_item(ext, &ServiceStatus::Running).visible);
+    }
+
+    #[test]
+    fn extension_toolbar_item_reflects_running_and_paused_states() {
+        let ext = &ExtensionInfo {
+            pinned_to_toolbar: true,
+            ..sample_extensions()[0].clone()
+        };
         let running = extension_to_toolbar_item(ext, &ServiceStatus::Running);
         assert!(running.visible);
         assert!(running.enabled);

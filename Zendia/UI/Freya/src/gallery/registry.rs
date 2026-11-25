@@ -1138,6 +1138,45 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
         ],
     },
     GallerySectionSpec {
+        id: "extensions-menu",
+        title: "Extensions Menu",
+        phase: 13,
+        icon: "extension",
+        summary: "The extensions button and its menu listing every installed extension, uBlock Origin among them.",
+        states: &[
+            GalleryStateSpec {
+                id: "menu",
+                label: "Menu",
+                description: "Extensions menu open with uBlock Origin in it, not pinned to the toolbar.",
+            },
+            GalleryStateSpec {
+                id: "pinned",
+                label: "Pinned",
+                description: "uBlock Origin pinned, so its own button shows in the toolbar beside the extensions button.",
+            },
+            GalleryStateSpec {
+                id: "row-menu",
+                label: "Row Menu",
+                description: "uBlock Origin's options: pin to the toolbar, manage, remove.",
+            },
+            GalleryStateSpec {
+                id: "paused",
+                label: "Paused",
+                description: "ExtensionServer is stopped, so extensions show as paused.",
+            },
+            GalleryStateSpec {
+                id: "empty",
+                label: "No Extensions",
+                description: "The menu with no extensions installed.",
+            },
+            GalleryStateSpec {
+                id: "button",
+                label: "Button Only",
+                description: "The toolbar with the extensions button and no uBlock button, menu closed.",
+            },
+        ],
+    },
+    GallerySectionSpec {
         id: "share",
         title: "Share",
         phase: 12,

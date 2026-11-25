@@ -3395,6 +3395,8 @@ impl BrowserCore for StubBackend {
             | Command::ExtensionSetEnabled { .. }
             | Command::ExtensionSetToolbarPinned { .. }
             | Command::ExtensionInvokeAction { .. }
+            | Command::ExtensionRemove { .. }
+            | Command::ExtensionsMenuToggle
             | Command::ServiceSetState { .. }
             | Command::ServiceCycleState { .. }
             | Command::ServiceRestart { .. }) => self.handle_settings_or_module_command(command),
@@ -3486,6 +3488,26 @@ fn sample_contributions() -> Contributions {
                     collapsed_toolbar: Some(ToolbarArea::SidebarBottom),
                 },
                 order: -50,
+                badge: None,
+                visible: true,
+                enabled: true,
+                source: ContributionSource::BuiltIn,
+            },
+            ToolbarItem {
+                id: ContributionId::new("builtin.extensions"),
+                title: "Extensions".to_string(),
+                tooltip: Some("Extensions".to_string()),
+                icon: "extension".to_string(),
+                command: "extensions.menu.toggle".to_string(),
+                command_args: Vec::new(),
+                kind: ToolbarItemKind::Button,
+                placement: ToolbarPlacement::NavigationEnd,
+                placement_rules: ToolbarPlacementRules {
+                    single_toolbar: Some(ToolbarArea::SidebarBottom),
+                    multiple_toolbars: Some(ToolbarArea::TopBarEnd),
+                    collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
+                },
+                order: -4,
                 badge: None,
                 visible: true,
                 enabled: true,

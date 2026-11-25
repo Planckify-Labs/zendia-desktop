@@ -388,6 +388,7 @@ pub fn app() -> impl IntoElement {
                 }
             }
             CoreEvent::ViewRequested { request, .. } => match request {
+                ViewRequest::ExtensionsMenuToggle => menu_state.toggle_extensions_menu(),
                 ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
                     library_state.handle_view_request(request);
                     let _ = stub_core.invoke(zendia_browser_core::commands::Command::LibraryFocusSet {

@@ -10,6 +10,7 @@ pub mod address_bar;
 pub mod agent_panel;
 pub mod agents_panel;
 pub mod declared;
+pub mod extensions_menu;
 pub mod icons;
 pub mod keymap;
 pub mod kit;
@@ -137,6 +138,9 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
             .key(state_id)
             .into_element(),
         "spaces-editing" => spaces_editing::SpacesEditingSection::new(state_id, Arc::clone(gallery_core))
+            .key(state_id)
+            .into_element(),
+        "extensions-menu" => extensions_menu::ExtensionsMenuSection::new(state_id, Arc::clone(gallery_core))
             .key(state_id)
             .into_element(),
         "share" => share::ShareSection::new(state_id, Arc::clone(gallery_core))

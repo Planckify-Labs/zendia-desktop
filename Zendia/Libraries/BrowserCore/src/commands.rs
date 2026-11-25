@@ -962,6 +962,12 @@ pub enum Command {
     ExtensionInvokeAction {
         extension_id: ExtensionId,
     },
+    /// Removes an installed WebExtension.
+    ExtensionRemove {
+        extension_id: ExtensionId,
+    },
+    /// Opens or closes the extensions menu, which lists every installed extension.
+    ExtensionsMenuToggle,
     /// Sets a background service's health state.
     ServiceSetState {
         service: ServiceId,
@@ -1327,6 +1333,8 @@ impl Command {
             Self::ExtensionSetEnabled { .. } => "extension.set_enabled",
             Self::ExtensionSetToolbarPinned { .. } => "extension.set_toolbar_pinned",
             Self::ExtensionInvokeAction { .. } => "extension.invoke_action",
+            Self::ExtensionRemove { .. } => "extension.remove",
+            Self::ExtensionsMenuToggle => "extensions.menu.toggle",
             Self::ServiceSetState { .. } => "service.set_state",
             Self::ServiceCycleState { .. } => "service.cycle_state",
             Self::ServiceRestart { .. } => "service.restart",
