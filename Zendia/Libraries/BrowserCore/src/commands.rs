@@ -12,6 +12,8 @@ use crate::model::{
     AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, MediaSessionId, NotificationId, SidebarSide, SpaceId,
     SplitDirection, SplitGroupId, TabId, TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
 };
+use crate::picker::PickerRequestId;
+use crate::region::RegionRect;
 use crate::site_info::{PermissionState, SitePermissionKind};
 use crate::split::{DropZone, parse_direction};
 use crate::toasts::ToastId;
@@ -382,6 +384,32 @@ pub enum Command {
     DebugSampleDownload,
     /// Starts sample media in a background tab so the media controls can be seen without the engine reporting media.
     DebugSampleMedia,
+    /// Opens a Zendia picker modal by built-in name (e.g. `"tabs"`, `"agents"`) or registered request id.
+    PickerOpen {
+        name: Option<String>,
+        request_id: Option<PickerRequestId>,
+    },
+    /// Chooses an item in the active picker and runs its associated command.
+    PickerChoose {
+        request_id: Option<PickerRequestId>,
+        item_id: String,
+    },
+    /// Dismisses the active picker modal without choosing an item.
+    PickerClose {
+        request_id: Option<PickerRequestId>,
+    },
+    /// Starts the page region picker overlay on the active or specified tab.
+    RegionPick {
+        tab_id: Option<TabId>,
+    },
+    /// Captures a chosen rectangle in page coordinates or the whole page.
+    RegionCapture {
+        tab_id: Option<TabId>,
+        rect: Option<RegionRect>,
+        whole_page: bool,
+    },
+    /// Cancels an active region pick without capturing.
+    RegionCancel,
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -559,6 +587,12 @@ impl Command {
             Self::LayoutSetTabSwitchMotion { .. } => "layout.set_tab_switch_motion",
             Self::DebugSampleDownload => "debug.sample_download",
             Self::DebugSampleMedia => "debug.sample_media",
+            Self::PickerOpen { .. } => "picker.open",
+            Self::PickerChoose { .. } => "picker.choose",
+            Self::PickerClose { .. } => "picker.close",
+            Self::RegionPick { .. } => "region.pick",
+            Self::RegionCapture { .. } => "region.capture",
+            Self::RegionCancel => "region.cancel",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -1061,6 +1095,44 @@ impl Command {
             }),
             "debug.sample_download" => Ok(Self::DebugSampleDownload),
             "debug.sample_media" => Ok(Self::DebugSampleMedia),
+            "picker.open" => Ok(Self::PickerOpen {
+                name: find_arg(args, "name").map(str::to_string),
+                request_id: find_arg(args, "request_id").map(PickerRequestId::new),
+            }),
+            "picker.choose" => Ok(Self::PickerChoose {
+                request_id: find_arg(args, "request_id").map(PickerRequestId::new),
+                item_id: parse_required_string_arg(name, args, "item_id")?,
+            }),
+            "picker.close" => Ok(Self::PickerClose {
+                request_id: find_arg(args, "request_id").map(PickerRequestId::new),
+            }),
+            "region.pick" => Ok(Self::RegionPick {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "region.capture" => {
+                let x = parse_optional_f32_arg(name, args, "x")?;
+                let y = parse_optional_f32_arg(name, args, "y")?;
+                let width = parse_optional_f32_arg(name, args, "width")?;
+                let height = parse_optional_f32_arg(name, args, "height")?;
+                let rect = match (x, y, width, height) {
+                    (Some(x), Some(y), Some(width), Some(height)) => Some(RegionRect::new(x, y, width, height)),
+                    (None, None, None, None) => None,
+                    _ => {
+                        return Err(CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: "region.capture requires all of x, y, width, height when specifying a rect"
+                                .to_string(),
+                        });
+                    }
+                };
+                let whole_page = parse_bool_arg(name, args, "whole_page", rect.is_none())?;
+                Ok(Self::RegionCapture {
+                    tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                    rect,
+                    whole_page,
+                })
+            }
+            "region.cancel" => Ok(Self::RegionCancel),
             _ => Ok(Self::Custom {
                 name: name.to_string(),
                 args: args.to_vec(),
@@ -2203,6 +2275,70 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             name: "debug.sample_media".to_string(),
             title: "Play Sample Media (Debug)".to_string(),
             description: "Play sample media in a background tab to show the media controls".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "picker.open".to_string(),
+            title: "Open Picker".to_string(),
+            description: "Open a built-in (tabs, agents) or registered Zendia picker modal".to_string(),
+            arguments: vec![
+                ArgumentSchema::new(
+                    "name",
+                    ArgumentType::String,
+                    false,
+                    "Built-in picker name (tabs or agents)",
+                ),
+                ArgumentSchema::new(
+                    "request_id",
+                    ArgumentType::String,
+                    false,
+                    "Registered custom picker request id",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "picker.choose".to_string(),
+            title: "Choose Picker Item".to_string(),
+            description: "Select an item from the active picker and invoke its command".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("request_id", ArgumentType::String, false, "Picker request id"),
+                ArgumentSchema::new("item_id", ArgumentType::String, true, "Item id to choose"),
+            ],
+        },
+        CommandDescriptor {
+            name: "picker.close".to_string(),
+            title: "Close Picker".to_string(),
+            description: "Dismiss the active Zendia picker modal".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "request_id",
+                ArgumentType::String,
+                false,
+                "Picker request id",
+            )],
+        },
+        CommandDescriptor {
+            name: "region.pick".to_string(),
+            title: "Pick Page Region".to_string(),
+            description: "Start the page region selection overlay".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "region.capture".to_string(),
+            title: "Capture Page Region".to_string(),
+            description: "Capture a page rectangle or the whole page view".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab"),
+                ArgumentSchema::new("x", ArgumentType::Float, false, "Left edge in page CSS pixels"),
+                ArgumentSchema::new("y", ArgumentType::Float, false, "Top edge in page CSS pixels"),
+                ArgumentSchema::new("width", ArgumentType::Float, false, "Width in page CSS pixels"),
+                ArgumentSchema::new("height", ArgumentType::Float, false, "Height in page CSS pixels"),
+                ArgumentSchema::new("whole_page", ArgumentType::Bool, false, "Capture the whole page view"),
+            ],
+        },
+        CommandDescriptor {
+            name: "region.cancel".to_string(),
+            title: "Cancel Page Region Pick".to_string(),
+            description: "Cancel an active page region selection".to_string(),
             arguments: Vec::new(),
         },
     ]

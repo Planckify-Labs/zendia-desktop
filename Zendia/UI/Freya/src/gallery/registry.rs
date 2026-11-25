@@ -533,6 +533,50 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "vim-pickers",
+        title: "Vim Pickers & Region",
+        phase: 5,
+        icon: "screenshot",
+        summary: "Zendia Vim picker modal (list with sections, filtered, grid with dimmed tiles, empty) and full-page crosshair region picker.",
+        states: &[
+            GalleryStateSpec {
+                id: "tabs-list",
+                label: "Tabs List",
+                description: "Tabs picker in list layout with Open Tabs, Pinned, and Essentials sections, key badges, and active cursor.",
+            },
+            GalleryStateSpec {
+                id: "tabs-filtered",
+                label: "List Filtered",
+                description: "Tabs list picker filtered by typed text showing only matching items.",
+            },
+            GalleryStateSpec {
+                id: "agents-grid",
+                label: "Agents Grid",
+                description: "Agents picker in 3-column grid layout with icon plates and dimmed uninstalled items.",
+            },
+            GalleryStateSpec {
+                id: "empty-filter",
+                label: "Empty Filter",
+                description: "Picker empty state when no items match the typed filter query.",
+            },
+            GalleryStateSpec {
+                id: "region-idle",
+                label: "Region Idle",
+                description: "Full-page crosshair region picker overlay with instruction banner.",
+            },
+            GalleryStateSpec {
+                id: "region-dragging",
+                label: "Region Dragging",
+                description: "Active accent-bordered region selection cutout over the dimmed page.",
+            },
+            GalleryStateSpec {
+                id: "vim-disabled",
+                label: "Vim Mode Off",
+                description: "Vim mode disabled — picker and region picker surfaces stay hidden and gated.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
@@ -811,6 +855,16 @@ fn format_command_detail(command: &Command) -> String {
         Command::PageIgnoreMisspelling { word, .. } | Command::PageLearnMisspelling { word, .. } => word.clone(),
         Command::MediaContextAction { action, .. } => action.as_str().to_string(),
         Command::PageSelectDropdownChoose { item_id, .. } => format!("item_id={item_id:?}"),
+        Command::PickerOpen { name, request_id } => format!("name={name:?} request_id={request_id:?}"),
+        Command::PickerChoose { request_id, item_id } => format!("request_id={request_id:?} item={item_id}"),
+        Command::PickerClose { request_id } => format!("request_id={request_id:?}"),
+        Command::RegionPick { tab_id } => format!("tab={tab_id:?}"),
+        Command::RegionCapture {
+            tab_id,
+            rect,
+            whole_page,
+        } => format!("tab={tab_id:?} whole_page={whole_page} rect={rect:?}"),
+        Command::RegionCancel => "cancelled".to_string(),
         Command::Custom { args, .. } => {
             if args.is_empty() {
                 "no args".to_string()

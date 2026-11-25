@@ -202,3 +202,21 @@ description = "Unsplit tabs"
 keys = ["<C-A-s>", "<D-A-s>"]
 command = "layout.compact_reveal_sidebar"
 description = "Show the sidebar in compact mode"
+
+# Vim pickers and page region capture (active when vim mode is on).
+[[bindings]]
+keys = ["<C-A-p>", "<D-A-p>"]
+command = "picker.open"
+description = "Open tabs picker"
+args = { name = "tabs" }
+
+[[bindings]]
+keys = ["<C-A-a>", "<D-A-a>"]
+command = "picker.open"
+description = "Open agents picker"
+args = { name = "agents" }
+
+[[bindings]]
+keys = ["<C-A-r>", "<D-A-r>"]
+command = "region.pick"
+description = "Pick page region"

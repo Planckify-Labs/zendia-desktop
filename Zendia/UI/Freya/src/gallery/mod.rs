@@ -23,6 +23,7 @@ use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
 use crate::ui::page::download_arc::use_provide_download_arc;
 use crate::ui::page::use_provide_keymap;
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_provide_theme, use_theme};
+use crate::ui::vim::{VimPickerOverlay, use_provide_region_picker_state, use_provide_vim_picker_state};
 use freya::prelude::*;
 use std::sync::Arc;
 use zendia_browser_core::BrowserCore;
@@ -59,6 +60,8 @@ impl App for GalleryApp {
         let sidebar_state = use_provide_sidebar_state();
         let address_bar_state = use_provide_address_bar_state();
         let download_arc = use_provide_download_arc();
+        let vim_picker_state = use_provide_vim_picker_state();
+        let region_picker_state = use_provide_region_picker_state();
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
@@ -110,6 +113,34 @@ impl App for GalleryApp {
                         sidebar_state.start_folder_rename(*folder_id, folder.name.clone());
                     }
                 }
+                CoreEvent::PickerOpenRequested { request } => {
+                    if gallery_core.model().vim_mode_enabled {
+                        menu_state.close_all();
+                        address_bar_state.close();
+                        address_bar_state.close_site_panel();
+                        region_picker_state.stop();
+                        vim_picker_state.open(request.clone());
+                    }
+                }
+                CoreEvent::PickerClosed { .. } => {
+                    vim_picker_state.close();
+                }
+                CoreEvent::RegionPickRequested { tab_id } => {
+                    if gallery_core.model().vim_mode_enabled {
+                        menu_state.close_all();
+                        address_bar_state.close();
+                        address_bar_state.close_site_panel();
+                        vim_picker_state.close();
+                        region_picker_state.start(*tab_id);
+                    }
+                }
+                CoreEvent::RegionCaptured { .. } | CoreEvent::RegionPickCancelled => {
+                    region_picker_state.stop();
+                }
+                CoreEvent::VimModeChanged { enabled: false } => {
+                    vim_picker_state.close();
+                    region_picker_state.stop();
+                }
                 _ => {}
             }
         });
@@ -150,6 +181,9 @@ impl App for GalleryApp {
                     && e.modifiers == Modifiers::CONTROL
                     && matches!(e.code, Code::KeyN | Code::KeyP)
                 {
+                    return;
+                }
+                if vim_picker_state.is_open() || region_picker_state.is_active() {
                     return;
                 }
                 let _ = keymap.handle_global_key_down(&e, &core);
@@ -235,6 +269,8 @@ impl App for GalleryApp {
                                 .on_press(move |_| {
                                     address_bar_state.close();
                                     address_bar_state.close_site_panel();
+                                    vim_picker_state.close();
+                                    region_picker_state.stop();
                                     active_section_id.set(section_id.to_string());
                                     active_state_id.set(default_state.to_string());
                                 })
@@ -330,6 +366,7 @@ impl App for GalleryApp {
             )
             .child(MenuLayer)
             .child(AddressBarLayer)
+            .child(VimPickerOverlay)
     }
 }
 

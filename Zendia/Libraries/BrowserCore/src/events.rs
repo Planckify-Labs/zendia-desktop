@@ -13,6 +13,8 @@ use crate::model::{
     NotificationId, PinnedTab, ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId,
     ThemeSettings, WhichKeyState,
 };
+use crate::picker::{PickerRequest, PickerRequestId};
+use crate::region::RegionCapture;
 use crate::site_info::SiteInfo;
 use crate::split::Glance;
 use crate::toasts::{Toast, ToastId};
@@ -162,6 +164,29 @@ pub enum Event {
     ClipboardCopyRequested {
         text: String,
     },
+    /// View-level request to show a Zendia picker modal in the window.
+    PickerOpenRequested {
+        request: PickerRequest,
+    },
+    /// Published when a user or caller chooses an item in an open picker.
+    PickerChosen {
+        request_id: PickerRequestId,
+        item_id: String,
+    },
+    /// View-level notification that a picker modal closed.
+    PickerClosed {
+        request_id: Option<PickerRequestId>,
+    },
+    /// View-level request to enter the page region picker overlay.
+    RegionPickRequested {
+        tab_id: Option<TabId>,
+    },
+    /// Published when a page region (or the whole page) is captured for an agent or caller.
+    RegionCaptured {
+        capture: RegionCapture,
+    },
+    /// View-level notification that region picking was cancelled.
+    RegionPickCancelled,
     /// Signals subscribers to reload a fresh snapshot from `BrowserCore::model`.
     ModelReplaced,
 }

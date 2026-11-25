@@ -16,6 +16,7 @@ use crate::ui::core_view::use_core;
 use crate::ui::page::glance::{GLANCE_BACKGROUND_OPACITY, GLANCE_BACKGROUND_SCALE, GlanceLayer, glance_spring};
 use crate::ui::page::surface::PageSurface;
 use crate::ui::theme::{ThemeRole, motion, use_theme};
+use crate::ui::vim::RegionPickerOverlay;
 use freya::animation::*;
 use freya::prelude::*;
 use std::time::Instant;
@@ -373,6 +374,7 @@ impl Component for PageArea {
             .child(content)
             .maybe_child(drop_overlay)
             .maybe_child(glance_layer)
+            .child(RegionPickerOverlay)
     }
 
     fn render_key(&self) -> DiffKey {

@@ -1145,6 +1145,12 @@ impl BrowserModel {
             | Event::TabRenameRequested { .. }
             | Event::FolderRenameRequested { .. }
             | Event::CompactSidebarRevealRequested
+            | Event::PickerOpenRequested { .. }
+            | Event::PickerChosen { .. }
+            | Event::PickerClosed { .. }
+            | Event::RegionPickRequested { .. }
+            | Event::RegionCaptured { .. }
+            | Event::RegionPickCancelled
             | Event::ModelReplaced => false,
         }
     }

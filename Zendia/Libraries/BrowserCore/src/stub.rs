@@ -28,6 +28,8 @@ use crate::model::{
     Tab, TabId, TabKind, TabMoveTarget, ThemeOverrides, ThemeScheme, ThemeSettings, ToolbarLayout, WhichKeyEntry,
     WhichKeyState, Window, WindowId,
 };
+use crate::picker::{PickerRequest, PickerRequestId};
+use crate::region::RegionCapture;
 use crate::site_info::{
     PermissionState, SiteDataSummary, SiteExtension, SiteInfo, SitePermission, SitePermissionKind, origin_for_url,
 };
@@ -36,6 +38,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 mod page_layouts;
+mod pickers;
 
 const MAX_ESSENTIALS: usize = 12;
 
@@ -50,6 +53,9 @@ struct StubState {
     /// The last tab opened, so a command that opens a tab through the engine can find it.
     last_opened_tab: Option<TabId>,
     last_toast_id: u64,
+    registered_pickers: BTreeMap<PickerRequestId, PickerRequest>,
+    active_picker: Option<PickerRequest>,
+    last_region_capture: Option<RegionCapture>,
 }
 
 /// Stub [`BrowserCore`] backend used during the Freya UI port until the real command registry lands.
@@ -103,6 +109,9 @@ impl StubBackend {
                 debug_input_step: 0,
                 last_opened_tab: None,
                 last_toast_id: 0,
+                registered_pickers: BTreeMap::new(),
+                active_picker: None,
+                last_region_capture: None,
             }),
             tab_source: Mutex::new(None),
             bus: EventBus::new(),
@@ -1968,6 +1977,9 @@ impl StubBackend {
         self.bus.publish(Event::ContributionsChanged {
             contributions: updated_contributions,
         });
+        if !enabled {
+            self.on_vim_mode_disabled();
+        }
         Ok(())
     }
 
@@ -2457,6 +2469,12 @@ impl BrowserCore for StubBackend {
             | Command::LayoutSetTabSwitchMotion { .. }
             | Command::DebugSampleDownload
             | Command::DebugSampleMedia) => self.handle_page_layout_command(command, tab_source),
+            command @ (Command::PickerOpen { .. }
+            | Command::PickerChoose { .. }
+            | Command::PickerClose { .. }
+            | Command::RegionPick { .. }
+            | Command::RegionCapture { .. }
+            | Command::RegionCancel) => self.handle_picker_or_region_command(command),
             Command::Custom { name, args } => {
                 eprintln!("zendia: stub backend does not handle command `{name}` (args: {args:?})");
                 Err(CommandError::UnknownCommand(name))

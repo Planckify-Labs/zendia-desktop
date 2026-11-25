@@ -17,6 +17,7 @@ pub mod page;
 pub mod sidebar;
 pub mod split_glance;
 pub mod theme;
+pub mod vim_pickers;
 pub mod window_shell;
 
 use crate::gallery::registry::GalleryCore;
@@ -81,6 +82,11 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
         }
         .into_element(),
         "layouts" => layouts::LayoutsSection {
+            state_id: state_id.to_string(),
+            gallery_core: Arc::clone(gallery_core),
+        }
+        .into_element(),
+        "vim-pickers" => vim_pickers::VimPickersSection {
             state_id: state_id.to_string(),
             gallery_core: Arc::clone(gallery_core),
         }
