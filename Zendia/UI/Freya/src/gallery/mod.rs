@@ -22,6 +22,7 @@ use crate::ui::core_view::{use_core, use_provide_core_with_observer};
 use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
 use crate::ui::page::download_arc::use_provide_download_arc;
 use crate::ui::page::use_provide_keymap;
+use crate::ui::panels::use_provide_dock_state;
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_provide_theme, use_theme};
 use crate::ui::vim::use_provide_vim_statusline_state;
 use crate::ui::vim::{VimPickerOverlay, use_provide_region_picker_state, use_provide_vim_picker_state};
@@ -64,6 +65,7 @@ impl App for GalleryApp {
         let vim_statusline_state = use_provide_vim_statusline_state();
         let vim_picker_state = use_provide_vim_picker_state();
         let region_picker_state = use_provide_region_picker_state();
+        let mut dock_state = use_provide_dock_state();
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
@@ -152,6 +154,13 @@ impl App for GalleryApp {
                 | CoreEvent::VimModeChanged { .. } => {
                     vim_statusline_state.close_all_keymaps();
                 }
+                CoreEvent::PanelOpenRequested { .. }
+                | CoreEvent::PanelCloseRequested { .. }
+                | CoreEvent::PanelToggled { .. }
+                | CoreEvent::AgentModelCardRequested
+                | CoreEvent::AgentInstructionsRequested => {
+                    dock_state.apply_event(event);
+                }
                 _ => {}
             }
         });
@@ -197,8 +206,16 @@ impl App for GalleryApp {
                 if vim_picker_state.is_open() || region_picker_state.is_active() {
                     return;
                 }
+                if dock_state.captures_text_input()
+                    && !e
+                        .modifiers
+                        .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
+                {
+                    return;
+                }
                 if !address_bar_state.is_open()
                     && !sidebar_state.is_renaming()
+                    && !dock_state.captures_text_input()
                     && crate::ui::vim::handle_focus_key_down(&e, &core)
                 {
                     return;
@@ -288,6 +305,12 @@ impl App for GalleryApp {
                                     address_bar_state.close_site_panel();
                                     vim_picker_state.close();
                                     region_picker_state.stop();
+                                    if section_id != "agent-panel" {
+                                        dock_state.open_panels.set(Vec::new());
+                                        dock_state.focused_panel.set(None);
+                                        dock_state.model_card_open.set(false);
+                                        dock_state.instructions_open.set(false);
+                                    }
                                     active_section_id.set(section_id.to_string());
                                     active_state_id.set(default_state.to_string());
                                 })

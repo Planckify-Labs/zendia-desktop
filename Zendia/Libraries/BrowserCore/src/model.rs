@@ -10,7 +10,10 @@
 //! toolkit so headless runners and background services can share the crate.
 
 use crate::address_bar::SearchEngine;
-use crate::contributions::{Contributions, ToolbarArea, ToolbarPlacementRules};
+use crate::agent::{
+    AgentDeclaredPage, AgentInstruction, AgentSelection, AgentTable, ContextChoice, SidePanelPrefs, SteerStatus,
+};
+use crate::contributions::{Contributions, SidePanelId, ToolbarArea, ToolbarPlacementRules};
 use crate::events::Event;
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
@@ -330,13 +333,17 @@ pub struct Agent {
 }
 
 /// What kind of work a conversation step represents.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum StepKind {
     UserPrompt,
     Thinking,
     ToolCall { tool: String },
     Response,
     Confirmation { prompt: String, resolved: Option<bool> },
+    AgentTable(AgentTable),
+    DeclaredPage(AgentDeclaredPage),
+    Note,
+    Error,
 }
 
 /// Execution state of a conversation step.
@@ -350,13 +357,34 @@ pub enum StepStatus {
 }
 
 /// One entry in an agent conversation's trace.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConversationStep {
     pub id: StepId,
     pub kind: StepKind,
     pub summary: String,
     pub detail: Option<String>,
     pub status: StepStatus,
+    /// Filenames attached to a user prompt step.
+    pub files: Vec<String>,
+    /// Delivery state when a user message was sent while the agent was still working.
+    pub steer: Option<SteerStatus>,
+    /// True while a response step is actively streaming in (enables partial Markdown and veil fade).
+    pub streaming: bool,
+}
+
+impl ConversationStep {
+    pub fn simple(id: StepId, kind: StepKind, summary: impl Into<String>, status: StepStatus) -> Self {
+        Self {
+            id,
+            kind,
+            summary: summary.into(),
+            detail: None,
+            status,
+            files: Vec::new(),
+            steer: None,
+            streaming: false,
+        }
+    }
 }
 
 /// Aggregate state of an agent conversation.
@@ -370,7 +398,7 @@ pub enum ConversationStatus {
 }
 
 /// A single conversation with an AI agent, optionally scoped to a tab.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Conversation {
     pub id: ConversationId,
     pub agent_id: AgentId,
@@ -379,14 +407,65 @@ pub struct Conversation {
     pub model_id: ModelId,
     pub status: ConversationStatus,
     pub steps: Vec<ConversationStep>,
+    /// True when the agent finished or updated while the panel was closed.
+    pub unseen: bool,
+    /// Elapsed working time in seconds for the current turn (drives the working clock and pill).
+    pub elapsed_secs: u64,
 }
 
 /// Reasoning effort setting exposed by the model card.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ModelEffort {
+    None,
+    Minimal,
     Low,
     Medium,
     High,
+    XHigh,
+    Max,
+    Ultra,
+}
+
+impl ModelEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Minimal => "Minimal",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::XHigh => "X-High",
+            Self::Max => "Max",
+            Self::Ultra => "Ultra",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" | "x-high" => Some(Self::XHigh),
+            "max" => Some(Self::Max),
+            "ultra" => Some(Self::Ultra),
+            _ => None,
+        }
+    }
 }
 
 /// Public metadata for a selectable language model (API keys never leave AgentServer).
@@ -397,6 +476,38 @@ pub struct ModelInfo {
     pub provider: String,
     pub context_window: u32,
     pub effort: ModelEffort,
+    pub section: Option<String>,
+    pub detail: Option<String>,
+    pub efforts: Vec<ModelEffort>,
+    pub context_choices: Vec<ContextChoice>,
+    pub supports_images: bool,
+    pub supports_video: bool,
+    pub supports_pdf: bool,
+}
+
+impl ModelInfo {
+    pub fn simple(
+        id: ModelId,
+        name: impl Into<String>,
+        provider: impl Into<String>,
+        context_window: u32,
+        effort: ModelEffort,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            provider: provider.into(),
+            context_window,
+            effort,
+            section: None,
+            detail: None,
+            efforts: vec![ModelEffort::Low, ModelEffort::Medium, ModelEffort::High],
+            context_choices: Vec::new(),
+            supports_images: true,
+            supports_video: false,
+            supports_pdf: true,
+        }
+    }
 }
 
 /// A web chat website loaded inside the web chat side panel.
@@ -406,6 +517,8 @@ pub struct ChatSite {
     pub name: String,
     pub url: String,
     pub icon: String,
+    pub accent_hex: String,
+    pub is_custom: bool,
 }
 
 /// Health state of one of Zendia's background service processes.
@@ -654,10 +767,19 @@ pub struct BrowserModel {
     pub glance: Option<Glance>,
     pub toasts: Vec<Toast>,
     pub contributions: Contributions,
+    pub side_panel_prefs: BTreeMap<SidePanelId, SidePanelPrefs>,
     pub agents: Vec<Agent>,
+    pub default_agent_id: Option<AgentId>,
+    pub agent_selections: BTreeMap<AgentId, AgentSelection>,
     pub conversations: Vec<Conversation>,
+    pub active_conversations: BTreeMap<TabId, ConversationId>,
+    pub agent_instructions: Vec<AgentInstruction>,
+    pub tab_captcha_findings: BTreeMap<TabId, String>,
     pub models: Vec<ModelInfo>,
     pub chat_sites: Vec<ChatSite>,
+    pub active_chat_site_id: Option<ChatSiteId>,
+    pub webchat_pending_prompt: Option<(ChatSiteId, String)>,
+    pub webchat_dictating: bool,
     pub services: Vec<ServiceState>,
     pub input_mode: InputMode,
     pub pending_keys: Vec<String>,
@@ -843,6 +965,83 @@ impl BrowserModel {
 
     pub fn service_state(&self, service: ServiceId) -> Option<&ServiceState> {
         self.services.iter().find(|state| state.service == service)
+    }
+
+    /// Returns profile settings for `panel_id`, falling back to its contribution's defaults.
+    pub fn panel_prefs(&self, panel_id: &SidePanelId) -> SidePanelPrefs {
+        if let Some(prefs) = self.side_panel_prefs.get(panel_id) {
+            return *prefs;
+        }
+        if let Some(entry) = self
+            .contributions
+            .side_panels
+            .iter()
+            .find(|panel| &panel.id == panel_id)
+        {
+            return SidePanelPrefs {
+                layout: entry.default_layout,
+                side: entry.default_side,
+                width: SidePanelPrefs::clamp_width_for(panel_id.as_str(), entry.default_width),
+                split_fallback: crate::contributions::SidePanelLayout::Float,
+            };
+        }
+        SidePanelPrefs::default()
+    }
+
+    /// Returns the agent entry matching `agent_id`.
+    pub fn agent(&self, agent_id: &AgentId) -> Option<&Agent> {
+        self.agents.iter().find(|agent| &agent.id == agent_id)
+    }
+
+    /// Returns the default available agent for new conversations.
+    pub fn default_agent(&self) -> Option<&Agent> {
+        self.default_agent_id
+            .as_ref()
+            .and_then(|id| self.agent(id))
+            .filter(|agent| agent.available)
+            .or_else(|| self.agents.iter().find(|agent| agent.available))
+    }
+
+    /// Returns all conversations scoped to `tab_id`.
+    pub fn conversations_for_tab(&self, tab_id: TabId) -> Vec<&Conversation> {
+        self.conversations
+            .iter()
+            .filter(|conv| conv.tab_id == Some(tab_id))
+            .collect()
+    }
+
+    /// Returns the conversation currently shown on `tab_id`, if any.
+    pub fn active_conversation_for_tab(&self, tab_id: TabId) -> Option<&Conversation> {
+        if let Some(conv_id) = self.active_conversations.get(&tab_id)
+            && let Some(conv) = self.conversations.iter().find(|c| c.id == *conv_id)
+        {
+            return Some(conv);
+        }
+        self.conversations.iter().rev().find(|conv| conv.tab_id == Some(tab_id))
+    }
+
+    /// Returns the selected model metadata for `agent_id` (or the default model).
+    pub fn effective_model_for_agent(&self, agent_id: &AgentId) -> Option<&ModelInfo> {
+        if let Some(sel) = self.agent_selections.get(agent_id)
+            && let Some(model_id) = &sel.model_id
+            && let Some(model) = self.models.iter().find(|m| &m.id == model_id)
+        {
+            return Some(model);
+        }
+        self.models.first()
+    }
+
+    /// Count of enabled agent instruction guidelines.
+    pub fn active_instruction_count(&self) -> usize {
+        self.agent_instructions.iter().filter(|item| item.enabled).count()
+    }
+
+    /// Returns the currently active web chat site (falling back to the first configured site).
+    pub fn active_chat_site(&self) -> Option<&ChatSite> {
+        self.active_chat_site_id
+            .as_ref()
+            .and_then(|id| self.chat_sites.iter().find(|site| &site.id == id))
+            .or_else(|| self.chat_sites.first())
     }
 
     /// Returns whether `url` matches an existing bookmark in the core model.
@@ -1107,6 +1306,39 @@ impl BrowserModel {
                 }
                 true
             }
+            Event::ConversationRemoved { conversation_id } => {
+                let before = self.conversations.len();
+                self.conversations.retain(|conv| conv.id != *conversation_id);
+                self.active_conversations.retain(|_, id| id != conversation_id);
+                self.conversations.len() != before
+            }
+            Event::ActiveConversationChanged {
+                tab_id,
+                conversation_id,
+            } => {
+                if let Some(id) = conversation_id {
+                    self.active_conversations.insert(*tab_id, *id);
+                } else {
+                    self.active_conversations.remove(tab_id);
+                }
+                true
+            }
+            Event::PanelPrefsChanged { panel_id, prefs } => {
+                self.side_panel_prefs.insert(panel_id.clone(), *prefs);
+                true
+            }
+            Event::AgentSettingsChanged {
+                default_agent_id,
+                selections,
+            } => {
+                self.default_agent_id = default_agent_id.clone();
+                self.agent_selections = selections.clone();
+                true
+            }
+            Event::AgentInstructionsChanged { instructions } => {
+                self.agent_instructions = instructions.clone();
+                true
+            }
             Event::ServiceStateChanged { state } => {
                 if let Some(existing) = self.services.iter_mut().find(|item| item.service == state.service) {
                     *existing = state.clone();
@@ -1155,7 +1387,26 @@ impl BrowserModel {
                     false
                 }
             }
+            Event::WebChatChanged {
+                sites,
+                active_site_id,
+                pending_prompt,
+                dictating,
+            } => {
+                self.chat_sites = sites.clone();
+                self.active_chat_site_id = active_site_id.clone();
+                self.webchat_pending_prompt = pending_prompt.clone();
+                self.webchat_dictating = *dictating;
+                true
+            }
             Event::PanelToggled { .. }
+            | Event::PanelOpenRequested { .. }
+            | Event::PanelCloseRequested { .. }
+            | Event::AgentModelCardRequested
+            | Event::AgentInstructionsRequested
+            | Event::AgentRosterChanged
+            | Event::WebChatReloadRequested { .. }
+            | Event::WebChatNavigateHomeRequested { .. }
             | Event::LocationFocusRequested
             | Event::AddressBarOpenRequested { .. }
             | Event::PaletteOpenRequested { .. }

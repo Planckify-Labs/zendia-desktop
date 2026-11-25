@@ -6,13 +6,15 @@
 
 //! Named, typed browser commands and their descriptors for keymaps and the command palette.
 
-use crate::contributions::SidePanelId;
+use crate::agent::{InstructionAttachment, InstructionId};
+use crate::contributions::{SidePanelId, SidePanelLayout, SidePanelSide};
 use crate::focus::{FocusDirection, PaneDirection};
 use crate::input_state::StatuslineShow;
 use crate::media::MediaControl;
 use crate::model::{
-    AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, MediaSessionId, NotificationId, SidebarSide, SpaceId,
-    SplitDirection, SplitGroupId, TabId, TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
+    AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, MediaSessionId, ModelEffort, ModelId, NotificationId,
+    SidebarSide, SpaceId, SplitDirection, SplitGroupId, StepId, TabId, TabMoveTarget, ThemeOverrides, ThemeScheme,
+    ToolbarLayout,
 };
 use crate::picker::PickerRequestId;
 use crate::region::RegionRect;
@@ -225,10 +227,128 @@ pub enum Command {
     PanelToggle {
         panel_id: SidePanelId,
     },
+    PanelOpen {
+        panel_id: SidePanelId,
+        focus: bool,
+    },
+    PanelClose {
+        panel_id: SidePanelId,
+    },
+    PanelSetLayout {
+        panel_id: SidePanelId,
+        layout: SidePanelLayout,
+    },
+    PanelSetSide {
+        panel_id: SidePanelId,
+        side: SidePanelSide,
+    },
+    PanelSetWidth {
+        panel_id: SidePanelId,
+        width: f32,
+    },
+    PanelResetWidth {
+        panel_id: SidePanelId,
+    },
+    AgentToggle,
+    AgentAsk,
     AgentSend {
         conversation_id: Option<ConversationId>,
         agent_id: Option<AgentId>,
         prompt: String,
+    },
+    AgentSendWithFiles {
+        conversation_id: Option<ConversationId>,
+        agent_id: Option<AgentId>,
+        prompt: String,
+        files: Vec<String>,
+    },
+    AgentStop {
+        conversation_id: Option<ConversationId>,
+    },
+    AgentNew {
+        tab_id: Option<TabId>,
+    },
+    AgentSelect {
+        agent_id: Option<AgentId>,
+    },
+    AgentCycle {
+        direction: i8,
+    },
+    AgentModel {
+        agent_id: Option<AgentId>,
+        model_id: Option<ModelId>,
+    },
+    AgentSetEffort {
+        agent_id: Option<AgentId>,
+        effort: Option<ModelEffort>,
+    },
+    AgentSetContext {
+        agent_id: Option<AgentId>,
+        context_id: String,
+    },
+    AgentConfirm {
+        conversation_id: ConversationId,
+        step_id: StepId,
+        allow: bool,
+    },
+    AgentSwitchConversation {
+        conversation_id: ConversationId,
+    },
+    AgentMarkSeen {
+        conversation_id: ConversationId,
+    },
+    AgentOpenInstructions,
+    AgentInstructionAdd,
+    AgentInstructionUpdate {
+        id: InstructionId,
+        enabled: Option<bool>,
+        title: Option<String>,
+        text: Option<String>,
+    },
+    AgentInstructionRemove {
+        id: InstructionId,
+    },
+    AgentInstructionSetFile {
+        id: InstructionId,
+        file: Option<InstructionAttachment>,
+    },
+    AgentSummarizeCaptcha {
+        tab_id: Option<TabId>,
+    },
+    AgentLog {
+        tab_id: Option<TabId>,
+    },
+    AgentList,
+    /// Dismisses a conversation from the cross-window Agents roster.
+    AgentDismiss {
+        conversation_id: ConversationId,
+    },
+    /// Populates a rich sample agent conversation on the active tab for UI inspection.
+    DebugSampleAgent,
+    /// Toggles AgentServer between Running and Stopped so the service-down state can be inspected.
+    DebugToggleAgentService,
+    WebChatToggle,
+    WebChatSelectSite {
+        site_id: ChatSiteId,
+    },
+    WebChatAddSite {
+        name: Option<String>,
+        url: String,
+    },
+    WebChatRemoveSite {
+        site_id: ChatSiteId,
+    },
+    WebChatReload {
+        site_id: Option<ChatSiteId>,
+    },
+    WebChatNewChat {
+        site_id: Option<ChatSiteId>,
+    },
+    WebChatOpenInTab {
+        site_id: Option<ChatSiteId>,
+    },
+    WebChatSetDictating {
+        listening: bool,
     },
     WebChatAsk {
         site_id: ChatSiteId,
@@ -574,7 +694,45 @@ impl Command {
             Self::NotificationDismiss { .. } => "notification.dismiss",
             Self::SplitAdd { .. } => "split.add",
             Self::PanelToggle { .. } => "panel.toggle",
+            Self::PanelOpen { .. } => "panel.open",
+            Self::PanelClose { .. } => "panel.close",
+            Self::PanelSetLayout { .. } => "panel.set_layout",
+            Self::PanelSetSide { .. } => "panel.set_side",
+            Self::PanelSetWidth { .. } => "panel.set_width",
+            Self::PanelResetWidth { .. } => "panel.reset_width",
+            Self::AgentToggle => "agent.toggle",
+            Self::AgentAsk => "agent.ask",
             Self::AgentSend { .. } => "agent.send",
+            Self::AgentSendWithFiles { .. } => "agent.send_with_files",
+            Self::AgentStop { .. } => "agent.stop",
+            Self::AgentNew { .. } => "agent.new",
+            Self::AgentSelect { .. } => "agent.select",
+            Self::AgentCycle { .. } => "agent.cycle",
+            Self::AgentModel { .. } => "agent.model",
+            Self::AgentSetEffort { .. } => "agent.set_effort",
+            Self::AgentSetContext { .. } => "agent.set_context",
+            Self::AgentConfirm { .. } => "agent.confirm",
+            Self::AgentSwitchConversation { .. } => "agent.switch_conversation",
+            Self::AgentMarkSeen { .. } => "agent.mark_seen",
+            Self::AgentOpenInstructions => "agent.instructions.open",
+            Self::AgentInstructionAdd => "agent.instructions.add",
+            Self::AgentInstructionUpdate { .. } => "agent.instructions.update",
+            Self::AgentInstructionRemove { .. } => "agent.instructions.remove",
+            Self::AgentInstructionSetFile { .. } => "agent.instructions.set_file",
+            Self::AgentSummarizeCaptcha { .. } => "agent.summarize_captcha",
+            Self::AgentLog { .. } => "agent.log",
+            Self::AgentList => "agent.list",
+            Self::AgentDismiss { .. } => "agent.dismiss",
+            Self::DebugSampleAgent => "debug.sample_agent",
+            Self::DebugToggleAgentService => "debug.toggle_agent_service",
+            Self::WebChatToggle => "webchat.toggle",
+            Self::WebChatSelectSite { .. } => "webchat.select_site",
+            Self::WebChatAddSite { .. } => "webchat.add_site",
+            Self::WebChatRemoveSite { .. } => "webchat.remove_site",
+            Self::WebChatReload { .. } => "webchat.reload",
+            Self::WebChatNewChat { .. } => "webchat.new_chat",
+            Self::WebChatOpenInTab { .. } => "webchat.open_in_tab",
+            Self::WebChatSetDictating { .. } => "webchat.set_dictating",
             Self::WebChatAsk { .. } => "webchat.ask",
             Self::ThemeSet { .. } => "theme.set",
             Self::LayoutSetToolbarLayout { .. } => "layout.set_toolbar_layout",
@@ -884,10 +1042,191 @@ impl Command {
             "panel.toggle" => Ok(Self::PanelToggle {
                 panel_id: SidePanelId::new(parse_required_string_arg(name, args, "panel_id")?),
             }),
+            "panel.open" => Ok(Self::PanelOpen {
+                panel_id: SidePanelId::new(parse_required_string_arg(name, args, "panel_id")?),
+                focus: parse_bool_arg(name, args, "focus", true)?,
+            }),
+            "panel.close" => Ok(Self::PanelClose {
+                panel_id: SidePanelId::new(parse_required_string_arg(name, args, "panel_id")?),
+            }),
+            "panel.set_layout" => {
+                let raw = parse_required_string_arg(name, args, "layout")?;
+                let layout = match raw.trim().to_ascii_lowercase().as_str() {
+                    "float" => SidePanelLayout::Float,
+                    "slide" => SidePanelLayout::Slide,
+                    "split" => SidePanelLayout::Split,
+                    other => {
+                        return Err(CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: format!("unknown side panel layout `{other}`"),
+                        });
+                    }
+                };
+                Ok(Self::PanelSetLayout {
+                    panel_id: SidePanelId::new(parse_required_string_arg(name, args, "panel_id")?),
+                    layout,
+                })
+            }
+            "panel.set_side" => {
+                let raw = parse_required_string_arg(name, args, "side")?;
+                let side = match raw.trim().to_ascii_lowercase().as_str() {
+                    "left" => SidePanelSide::Left,
+                    "right" => SidePanelSide::Right,
+                    other => {
+                        return Err(CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: format!("unknown side panel side `{other}`"),
+                        });
+                    }
+                };
+                Ok(Self::PanelSetSide {
+                    panel_id: SidePanelId::new(parse_required_string_arg(name, args, "panel_id")?),
+                    side,
+                })
+            }
+            "panel.set_width" => {
+                let raw = parse_required_string_arg(name, args, "width")?;
+                let width = raw.parse::<f32>().map_err(|_| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("argument `width` expected number, got `{raw}`"),
+                })?;
+                Ok(Self::PanelSetWidth {
+                    panel_id: SidePanelId::new(parse_required_string_arg(name, args, "panel_id")?),
+                    width,
+                })
+            }
+            "panel.reset_width" => Ok(Self::PanelResetWidth {
+                panel_id: SidePanelId::new(parse_required_string_arg(name, args, "panel_id")?),
+            }),
+            "agent.toggle" | "zendia.chat.toggle" => Ok(Self::AgentToggle),
+            "agent.ask" => Ok(Self::AgentAsk),
             "agent.send" => Ok(Self::AgentSend {
                 conversation_id: parse_optional_u64_arg(name, args, "conversation_id")?.map(ConversationId),
                 agent_id: find_arg(args, "agent_id").map(AgentId::new),
                 prompt: parse_required_string_arg(name, args, "prompt")?,
+            }),
+            "agent.send_with_files" => {
+                let files = find_arg(args, "files")
+                    .map(|raw| {
+                        raw.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(Self::AgentSendWithFiles {
+                    conversation_id: parse_optional_u64_arg(name, args, "conversation_id")?.map(ConversationId),
+                    agent_id: find_arg(args, "agent_id").map(AgentId::new),
+                    prompt: find_arg(args, "prompt").unwrap_or("").to_string(),
+                    files,
+                })
+            }
+            "agent.stop" => Ok(Self::AgentStop {
+                conversation_id: parse_optional_u64_arg(name, args, "conversation_id")?.map(ConversationId),
+            }),
+            "agent.new" => Ok(Self::AgentNew {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "agent.select" => Ok(Self::AgentSelect {
+                agent_id: find_arg(args, "agent_id").map(AgentId::new),
+            }),
+            "agent.cycle" => {
+                let direction = match find_arg(args, "direction") {
+                    Some("previous") | Some("-1") => -1,
+                    _ => 1,
+                };
+                Ok(Self::AgentCycle { direction })
+            }
+            "agent.model" | "agent.set_model" => Ok(Self::AgentModel {
+                agent_id: find_arg(args, "agent_id").map(AgentId::new),
+                model_id: find_arg(args, "model_id").filter(|s| !s.is_empty()).map(ModelId::new),
+            }),
+            "agent.set_effort" => {
+                let effort = match find_arg(args, "effort") {
+                    None | Some("") | Some("default") => None,
+                    Some(raw) => Some(ModelEffort::parse(raw).ok_or_else(|| CommandError::InvalidArgument {
+                        command: name.to_string(),
+                        message: format!("unknown effort level `{raw}`"),
+                    })?),
+                };
+                Ok(Self::AgentSetEffort {
+                    agent_id: find_arg(args, "agent_id").map(AgentId::new),
+                    effort,
+                })
+            }
+            "agent.set_context" => Ok(Self::AgentSetContext {
+                agent_id: find_arg(args, "agent_id").map(AgentId::new),
+                context_id: parse_required_string_arg(name, args, "context_id")?,
+            }),
+            "agent.confirm" => Ok(Self::AgentConfirm {
+                conversation_id: ConversationId(parse_required_u64_arg(name, args, "conversation_id")?),
+                step_id: StepId(parse_required_u64_arg(name, args, "step_id")?),
+                allow: parse_bool_arg(name, args, "allow", false)?,
+            }),
+            "agent.switch_conversation" => Ok(Self::AgentSwitchConversation {
+                conversation_id: ConversationId(parse_required_u64_arg(name, args, "conversation_id")?),
+            }),
+            "agent.mark_seen" => Ok(Self::AgentMarkSeen {
+                conversation_id: ConversationId(parse_required_u64_arg(name, args, "conversation_id")?),
+            }),
+            "agent.instructions.open" => Ok(Self::AgentOpenInstructions),
+            "agent.instructions.add" => Ok(Self::AgentInstructionAdd),
+            "agent.instructions.update" => Ok(Self::AgentInstructionUpdate {
+                id: InstructionId(parse_required_u64_arg(name, args, "id")?),
+                enabled: find_arg(args, "enabled").map(|v| v == "true"),
+                title: find_arg(args, "title").map(str::to_string),
+                text: find_arg(args, "text").map(str::to_string),
+            }),
+            "agent.instructions.remove" => Ok(Self::AgentInstructionRemove {
+                id: InstructionId(parse_required_u64_arg(name, args, "id")?),
+            }),
+            "agent.instructions.set_file" => Ok(Self::AgentInstructionSetFile {
+                id: InstructionId(parse_required_u64_arg(name, args, "id")?),
+                file: find_arg(args, "name").map(|file_name| InstructionAttachment {
+                    name: file_name.to_string(),
+                    path: find_arg(args, "path").unwrap_or(file_name).to_string(),
+                    size_bytes: find_arg(args, "size_bytes")
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0),
+                    kind: crate::agent::AttachmentKind::from_filename(file_name),
+                }),
+            }),
+            "agent.summarize_captcha" => Ok(Self::AgentSummarizeCaptcha {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "agent.log" => Ok(Self::AgentLog {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "agent.list" | "zendia.agents.toggle" => Ok(Self::AgentList),
+            "agent.dismiss" => Ok(Self::AgentDismiss {
+                conversation_id: ConversationId(parse_required_u64_arg(name, args, "conversation_id")?),
+            }),
+            "debug.sample_agent" => Ok(Self::DebugSampleAgent),
+            "debug.toggle_agent_service" => Ok(Self::DebugToggleAgentService),
+            "webchat.toggle" | "zendia.webchat.toggle" => Ok(Self::WebChatToggle),
+            "webchat.select_site" => Ok(Self::WebChatSelectSite {
+                site_id: ChatSiteId::new(parse_required_string_arg(name, args, "site_id")?),
+            }),
+            "webchat.add_site" => Ok(Self::WebChatAddSite {
+                name: find_arg(args, "name").map(ToOwned::to_owned),
+                url: parse_required_string_arg(name, args, "url")?,
+            }),
+            "webchat.remove_site" => Ok(Self::WebChatRemoveSite {
+                site_id: ChatSiteId::new(parse_required_string_arg(name, args, "site_id")?),
+            }),
+            "webchat.reload" => Ok(Self::WebChatReload {
+                site_id: find_arg(args, "site_id").map(ChatSiteId::new),
+            }),
+            "webchat.new_chat" => Ok(Self::WebChatNewChat {
+                site_id: find_arg(args, "site_id").map(ChatSiteId::new),
+            }),
+            "webchat.open_in_tab" => Ok(Self::WebChatOpenInTab {
+                site_id: find_arg(args, "site_id").map(ChatSiteId::new),
+            }),
+            "webchat.set_dictating" => Ok(Self::WebChatSetDictating {
+                listening: find_arg(args, "listening")
+                    .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")),
             }),
             "webchat.ask" => Ok(Self::WebChatAsk {
                 site_id: ChatSiteId::new(parse_required_string_arg(name, args, "site_id")?),
@@ -1968,6 +2307,98 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             ],
         },
         CommandDescriptor {
+            name: "agent.dismiss".to_string(),
+            title: "Dismiss Agent Run".to_string(),
+            description: "Remove a conversation from the Agents roster".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "conversation_id",
+                ArgumentType::ConversationId,
+                true,
+                "Conversation to dismiss",
+            )],
+        },
+        CommandDescriptor {
+            name: "webchat.toggle".to_string(),
+            title: "Toggle Web Chat Panel".to_string(),
+            description: "Open or close the web chat side panel".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "webchat.select_site".to_string(),
+            title: "Select Web Chat Site".to_string(),
+            description: "Switch the active chat site in the web chat panel".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "site_id",
+                ArgumentType::ChatSiteId,
+                true,
+                "Chat site to activate",
+            )],
+        },
+        CommandDescriptor {
+            name: "webchat.add_site".to_string(),
+            title: "Add Web Chat Site".to_string(),
+            description: "Add a custom web chat URL to the site strip".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("url", ArgumentType::String, true, "Site URL"),
+                ArgumentSchema::new("name", ArgumentType::String, false, "Optional display name"),
+            ],
+        },
+        CommandDescriptor {
+            name: "webchat.remove_site".to_string(),
+            title: "Remove Web Chat Site".to_string(),
+            description: "Remove a custom chat site from the web chat strip".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "site_id",
+                ArgumentType::ChatSiteId,
+                true,
+                "Chat site to remove",
+            )],
+        },
+        CommandDescriptor {
+            name: "webchat.reload".to_string(),
+            title: "Reload Web Chat Site".to_string(),
+            description: "Reload the active web chat site view".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "site_id",
+                ArgumentType::ChatSiteId,
+                false,
+                "Optional site to reload (defaults to active)",
+            )],
+        },
+        CommandDescriptor {
+            name: "webchat.new_chat".to_string(),
+            title: "New Web Chat".to_string(),
+            description: "Navigate the active web chat site back to its home URL".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "site_id",
+                ArgumentType::ChatSiteId,
+                false,
+                "Optional site to reset (defaults to active)",
+            )],
+        },
+        CommandDescriptor {
+            name: "webchat.open_in_tab".to_string(),
+            title: "Open Web Chat in Tab".to_string(),
+            description: "Open the active web chat site in a regular browser tab".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "site_id",
+                ArgumentType::ChatSiteId,
+                false,
+                "Optional site to open (defaults to active)",
+            )],
+        },
+        CommandDescriptor {
+            name: "webchat.set_dictating".to_string(),
+            title: "Set Web Chat Dictation State".to_string(),
+            description: "Toggle the web chat voice dictation listening indicator".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "listening",
+                ArgumentType::Bool,
+                true,
+                "Whether dictation is listening",
+            )],
+        },
+        CommandDescriptor {
             name: "webchat.ask".to_string(),
             title: "Ask Web Chat".to_string(),
             description: "Send a prompt to a configured web chat site".to_string(),
@@ -2688,6 +3119,249 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             description: "Cancel an active page region selection".to_string(),
             arguments: Vec::new(),
         },
+        CommandDescriptor {
+            name: "panel.open".to_string(),
+            title: "Open Side Panel".to_string(),
+            description: "Open a registered side panel in the dock host".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("panel_id", ArgumentType::String, true, "Side panel identifier"),
+                ArgumentSchema::new("focus", ArgumentType::Bool, false, "Focus the panel input"),
+            ],
+        },
+        CommandDescriptor {
+            name: "panel.close".to_string(),
+            title: "Close Side Panel".to_string(),
+            description: "Close a registered side panel in the dock host".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "panel_id",
+                ArgumentType::String,
+                true,
+                "Side panel identifier",
+            )],
+        },
+        CommandDescriptor {
+            name: "panel.set_layout".to_string(),
+            title: "Set Side Panel Layout".to_string(),
+            description: "Switch a side panel between float, slide, and split layouts".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("panel_id", ArgumentType::String, true, "Side panel identifier"),
+                ArgumentSchema::new("layout", ArgumentType::String, true, "float, slide, or split"),
+            ],
+        },
+        CommandDescriptor {
+            name: "panel.set_side".to_string(),
+            title: "Move Side Panel Edge".to_string(),
+            description: "Dock a side panel on the left or right edge".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("panel_id", ArgumentType::String, true, "Side panel identifier"),
+                ArgumentSchema::new("side", ArgumentType::String, true, "left or right"),
+            ],
+        },
+        CommandDescriptor {
+            name: "panel.set_width".to_string(),
+            title: "Resize Side Panel".to_string(),
+            description: "Set a side panel's logical width in pixels".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("panel_id", ArgumentType::String, true, "Side panel identifier"),
+                ArgumentSchema::new("width", ArgumentType::Float, true, "Width in logical pixels"),
+            ],
+        },
+        CommandDescriptor {
+            name: "panel.reset_width".to_string(),
+            title: "Reset Side Panel Width".to_string(),
+            description: "Reset a side panel to its default narrowest width".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "panel_id",
+                ArgumentType::String,
+                true,
+                "Side panel identifier",
+            )],
+        },
+        CommandDescriptor {
+            name: "agent.toggle".to_string(),
+            title: "Toggle Agent Panel".to_string(),
+            description: "Open or close the AI agent side panel".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "agent.ask".to_string(),
+            title: "Ask Agent About This Tab".to_string(),
+            description: "Open the agent side panel and focus its composer".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "agent.send_with_files".to_string(),
+            title: "Send Agent Prompt with Files".to_string(),
+            description: "Send a prompt and attached filenames to the active agent conversation".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("conversation_id", ArgumentType::Integer, false, "Target conversation"),
+                ArgumentSchema::new("agent_id", ArgumentType::String, false, "Target agent"),
+                ArgumentSchema::new("prompt", ArgumentType::String, false, "Prompt text"),
+                ArgumentSchema::new("files", ArgumentType::String, false, "Comma-separated filenames"),
+            ],
+        },
+        CommandDescriptor {
+            name: "agent.stop".to_string(),
+            title: "Stop Agent Run".to_string(),
+            description: "Stop the active agent turn while keeping its trace".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "conversation_id",
+                ArgumentType::Integer,
+                false,
+                "Target conversation",
+            )],
+        },
+        CommandDescriptor {
+            name: "agent.new".to_string(),
+            title: "New Agent Chat".to_string(),
+            description: "Start a fresh agent conversation for the active tab".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "agent.select".to_string(),
+            title: "Select Agent".to_string(),
+            description: "Switch to a specific agent or open the agents picker".to_string(),
+            arguments: vec![ArgumentSchema::new("agent_id", ArgumentType::String, false, "Agent id")],
+        },
+        CommandDescriptor {
+            name: "agent.cycle".to_string(),
+            title: "Cycle Agent".to_string(),
+            description: "Cycle to the next or previous available agent".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "direction",
+                ArgumentType::String,
+                false,
+                "next or previous",
+            )],
+        },
+        CommandDescriptor {
+            name: "agent.model".to_string(),
+            title: "Choose Agent Model".to_string(),
+            description: "Open the model card or select a model for the active agent".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("agent_id", ArgumentType::String, false, "Target agent"),
+                ArgumentSchema::new("model_id", ArgumentType::String, false, "Model id (empty for Default)"),
+            ],
+        },
+        CommandDescriptor {
+            name: "agent.set_effort".to_string(),
+            title: "Set Model Reasoning Effort".to_string(),
+            description: "Set reasoning effort for the active agent (or default)".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("agent_id", ArgumentType::String, false, "Target agent"),
+                ArgumentSchema::new("effort", ArgumentType::String, false, "Effort level or default"),
+            ],
+        },
+        CommandDescriptor {
+            name: "agent.set_context".to_string(),
+            title: "Set Model Context Window".to_string(),
+            description: "Choose a context window size for the active agent".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("agent_id", ArgumentType::String, false, "Target agent"),
+                ArgumentSchema::new("context_id", ArgumentType::String, true, "Context choice id"),
+            ],
+        },
+        CommandDescriptor {
+            name: "agent.confirm".to_string(),
+            title: "Answer Agent Permission Prompt".to_string(),
+            description: "Allow or deny a pending agent confirmation card".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("conversation_id", ArgumentType::Integer, true, "Conversation id"),
+                ArgumentSchema::new("step_id", ArgumentType::Integer, true, "Confirmation step id"),
+                ArgumentSchema::new("allow", ArgumentType::Bool, true, "Whether to allow the action"),
+            ],
+        },
+        CommandDescriptor {
+            name: "agent.switch_conversation".to_string(),
+            title: "Switch Tab Agent Chat".to_string(),
+            description: "Switch to another agent conversation on the active tab".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "conversation_id",
+                ArgumentType::Integer,
+                true,
+                "Conversation id",
+            )],
+        },
+        CommandDescriptor {
+            name: "agent.mark_seen".to_string(),
+            title: "Mark Agent Chat Seen".to_string(),
+            description: "Clear the unseen indicator for an agent conversation".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "conversation_id",
+                ArgumentType::Integer,
+                true,
+                "Conversation id",
+            )],
+        },
+        CommandDescriptor {
+            name: "agent.instructions.open".to_string(),
+            title: "Open Agent Instructions".to_string(),
+            description: "Open the agent guidelines page over the agent panel".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "agent.instructions.add".to_string(),
+            title: "Add Agent Instruction".to_string(),
+            description: "Create a new agent instruction card".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "agent.instructions.update".to_string(),
+            title: "Update Agent Instruction".to_string(),
+            description: "Edit an agent instruction card's enabled state, title, or text".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("id", ArgumentType::Integer, true, "Instruction id"),
+                ArgumentSchema::new("enabled", ArgumentType::Bool, false, "Enabled state"),
+                ArgumentSchema::new("title", ArgumentType::String, false, "Instruction title"),
+                ArgumentSchema::new("text", ArgumentType::String, false, "Instruction text"),
+            ],
+        },
+        CommandDescriptor {
+            name: "agent.instructions.remove".to_string(),
+            title: "Delete Agent Instruction".to_string(),
+            description: "Delete a saved agent instruction card".to_string(),
+            arguments: vec![ArgumentSchema::new("id", ArgumentType::Integer, true, "Instruction id")],
+        },
+        CommandDescriptor {
+            name: "agent.instructions.set_file".to_string(),
+            title: "Attach File to Instruction".to_string(),
+            description: "Attach or remove the file on an instruction card".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("id", ArgumentType::Integer, true, "Instruction id"),
+                ArgumentSchema::new("name", ArgumentType::String, false, "Filename (omit to clear)"),
+            ],
+        },
+        CommandDescriptor {
+            name: "agent.summarize_captcha".to_string(),
+            title: "Summarize CAPTCHA Finding".to_string(),
+            description: "Summarize the CAPTCHA detected on the active tab".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "agent.log".to_string(),
+            title: "Open Agent Trace Log".to_string(),
+            description: "Open the conversation log for the active tab".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "agent.list".to_string(),
+            title: "Toggle Agents Roster Panel".to_string(),
+            description: "Open or close the cross-window agents panel".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "debug.sample_agent".to_string(),
+            title: "Load Sample Agent Conversation".to_string(),
+            description: "Populate the active tab with a sample Markdown, table, and confirmation agent run"
+                .to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "debug.toggle_agent_service".to_string(),
+            title: "Toggle AgentServer Health (Debug)".to_string(),
+            description: "Toggle AgentServer between Running and Stopped to preview the service-down state".to_string(),
+            arguments: Vec::new(),
+        },
     ]
 }
 
@@ -2748,6 +3422,7 @@ mod tests {
             "region.",
             "statusline.",
             "which_key.",
+            "agent.",
         ];
         let mut missing = Vec::new();
         for line in VIM_PROFILE.lines() {

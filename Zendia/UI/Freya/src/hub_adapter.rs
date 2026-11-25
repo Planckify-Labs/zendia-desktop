@@ -9,7 +9,7 @@
 use crate::hub::{self, startup};
 use hub_protocol::ipc_types::hub_server::messages as server;
 use hub_protocol::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use zendia_browser_core::BrowserCore;
@@ -39,6 +39,8 @@ pub struct HubTabAdapter {
     core: Arc<StubBackend>,
     viewport: Mutex<ViewportState>,
     capabilities: Mutex<HashMap<u64, ViewCapabilities>>,
+    auxiliary_views: Mutex<HashSet<u64>>,
+    auxiliary_loading: Mutex<HashMap<u64, bool>>,
     next_request_id: AtomicU64,
 }
 
@@ -55,6 +57,8 @@ impl HubTabAdapter {
                 device_pixel_ratio,
             }),
             capabilities: Mutex::new(HashMap::new()),
+            auxiliary_views: Mutex::new(HashSet::new()),
+            auxiliary_loading: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
         }
     }
@@ -98,6 +102,105 @@ impl HubTabAdapter {
 
     pub fn has_view(&self, view_id: u64) -> bool {
         self.core.model().tab_by_view_id(view_id).is_some()
+            || self
+                .auxiliary_views
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains(&view_id)
+    }
+
+    /// Creates a persistent non-tab Hub view (used by Web chat sites) and navigates it to `url`.
+    ///
+    /// Auxiliary views share the browser's cookies like any tab without appearing in the tab sidebar.
+    pub fn create_auxiliary_view(&self, url: &str) -> Option<u64> {
+        let (_, device_pixel_ratio) = self.viewport();
+        let hub = hub::connection();
+        let created = match hub.send_sync(server::CreateView {
+            request: Hub_NewViewRequest {
+                is_private: WebView_IsPrivate::No,
+                device_pixel_ratio,
+                maximum_frames_per_second: 60.0,
+                display_id: None,
+                screen_shows_high_dynamic_range: false,
+                system_theme: Core_AnonymousBuffer::default(),
+                screen_rects: None,
+                owner_view_id: None,
+                websites_prefer_dark: false,
+                is_tab: false,
+            },
+        }) {
+            Ok(created) => created,
+            Err(error) => {
+                eprintln!("zendia: Unable to create web chat view for `{url}`: {error}");
+                return None;
+            }
+        };
+
+        let view_id = created.view_id;
+        self.auxiliary_views
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(view_id);
+        self.auxiliary_loading
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(view_id, true);
+        self.set_up_view(view_id);
+        self.record_capabilities(view_id, &created.state);
+        load_in_hub(view_id, URL_URL::from_serialization(url.to_string()));
+        Some(view_id)
+    }
+
+    /// Reloads an auxiliary Hub view (e.g. an active Web chat site).
+    pub fn reload_auxiliary_view(&self, view_id: u64) {
+        if !self.has_view(view_id) {
+            return;
+        }
+        self.auxiliary_loading
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(view_id, true);
+        hub::connection().post_or_log(server::ViewReload {
+            view_id,
+            bypass_cache: WebView_BypassCache::No,
+        });
+    }
+
+    /// Navigates an auxiliary Hub view to `url` (e.g. starting a new chat at the site's home URL).
+    pub fn navigate_auxiliary_view(&self, view_id: u64, url: &str) {
+        if !self.has_view(view_id) {
+            return;
+        }
+        self.auxiliary_loading
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(view_id, true);
+        load_in_hub(view_id, URL_URL::from_serialization(url.to_string()));
+    }
+
+    /// Records loading state changes for auxiliary views so the web chat progress bar settles on load finish.
+    pub fn note_auxiliary_loading(&self, view_id: u64, is_loading: bool) {
+        let is_aux = self
+            .auxiliary_views
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&view_id);
+        if is_aux {
+            self.auxiliary_loading
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(view_id, is_loading);
+        }
+    }
+
+    /// Returns whether an auxiliary Hub view is currently loading.
+    pub fn is_auxiliary_loading(&self, view_id: u64) -> bool {
+        self.auxiliary_loading
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&view_id)
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn viewport(&self) -> ((i32, i32), f64) {

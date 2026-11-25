@@ -14,10 +14,12 @@
 //! See `Zendia/Documentation/Architecture.md`, "The command layer".
 
 pub mod address_bar;
+pub mod agent;
 pub mod commands;
 pub mod events;
 pub mod focus;
 pub mod input_state;
+pub mod markdown;
 pub mod media;
 pub mod menus;
 pub mod model;
@@ -28,6 +30,7 @@ pub mod split;
 pub mod stub;
 pub mod tab_source;
 pub mod toasts;
+pub mod webchat;
 
 pub use zendia_module_api::contributions;
 pub use zendia_module_api::ui;

@@ -15,13 +15,14 @@ use crate::ui::chrome::menus::{AnchorRect, try_use_menu_state};
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
 use crate::ui::page::download_arc::try_use_download_arc;
+use crate::ui::panels::{active_agent_accent, try_use_dock_state};
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_theme};
 use crate::ui::vim::toolbar_focus::{apply_toolbar_cursor_bg, apply_toolbar_cursor_border, is_toolbar_cursor};
 use freya::prelude::*;
 use zendia_browser_core::address_bar::display_url_for_sidebar;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::contributions::{BadgeTone, ToolbarItem, ToolbarItemKind};
-use zendia_browser_core::model::SidebarSide;
+use zendia_browser_core::model::{ConversationStatus, SidebarSide};
 
 const ICON_MINIMIZE_SVG: &[u8] =
     br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M2.5 6.5h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>"#;
@@ -87,6 +88,7 @@ impl Component for ToolbarItemView {
         let palette = ChromePalette::for_scheme(theme.scheme);
         let menu_state = try_use_menu_state();
         let download_arc = try_use_download_arc();
+        let dock_state = try_use_dock_state();
         let mut hovered = use_state(|| false);
 
         if self.item.kind == ToolbarItemKind::UrlBar {
@@ -98,15 +100,35 @@ impl Component for ToolbarItemView {
             .into_element();
         }
 
-        let (active_tab_id, can_back, can_forward, is_loading, sidebar_side) = {
+        let (active_tab_id, can_back, can_forward, is_loading, sidebar_side, chat_status_dot) = {
             let model = core.model().read();
             let active = model.active_tab();
+            let chat_dot = if self.item.id.as_str() == "zendia.chat" {
+                let is_open = dock_state.is_some_and(|ds| ds.is_agent_open());
+                let server_running = model.services.iter().any(|s| {
+                    s.service == zendia_browser_core::model::ServiceId::AgentServer
+                        && matches!(s.status, zendia_browser_core::model::ServiceStatus::Running)
+                });
+                if is_open || !server_running {
+                    None
+                } else {
+                    let has_activity = model.conversations.iter().any(|c| {
+                        c.status == ConversationStatus::Working
+                            || c.status == ConversationStatus::WaitingForUser
+                            || c.unseen
+                    });
+                    has_activity.then(|| active_agent_accent(&model, &theme))
+                }
+            } else {
+                None
+            };
             (
                 active.map(|tab| tab.id),
                 active.is_some_and(|tab| tab.can_navigate_back),
                 active.is_some_and(|tab| tab.can_navigate_forward),
                 active.is_some_and(|tab| tab.is_loading),
                 model.layout.sidebar_side,
+                chat_dot,
             )
         };
 
@@ -128,7 +150,13 @@ impl Component for ToolbarItemView {
         };
 
         let is_app_menu = self.item.kind == ToolbarItemKind::AppMenu;
-        let is_pressed = is_app_menu && menu_state.is_some_and(|state| *state.app_menu_open.read());
+        let is_chat_button = self.item.id.as_str() == "zendia.chat";
+        let is_agents_button = self.item.id.as_str() == "zendia.agents";
+        let is_webchat_button = self.item.id.as_str() == "zendia.webchat";
+        let is_pressed = (is_app_menu && menu_state.is_some_and(|state| *state.app_menu_open.read()))
+            || (is_chat_button && dock_state.is_some_and(|ds| ds.is_agent_open()))
+            || (is_agents_button && dock_state.is_some_and(|ds| ds.is_agents_open()))
+            || (is_webchat_button && dock_state.is_some_and(|ds| ds.is_webchat_open()));
         let is_zendia_capsule = self.item.id.as_str().starts_with("zendia.");
 
         let a11y_id = use_a11y();
@@ -218,6 +246,13 @@ impl Component for ToolbarItemView {
                         .color(palette.text)
                         .max_lines(1),
                 )
+                .maybe_child(chat_status_dot.map(|dot_col| {
+                    rect()
+                        .width(Size::px(7.0))
+                        .height(Size::px(7.0))
+                        .corner_radius(CornerRadius::new_all(999.0))
+                        .background(dot_col)
+                }))
                 .into_element();
         }
 
@@ -271,7 +306,13 @@ impl Component for ToolbarItemView {
             ThemeRole::TextMuted
         };
 
-        let badge = self.item.badge.clone().map(|badge| {
+        let effective_badge = if is_agents_button {
+            zendia_browser_core::agent::agents_button_badge(&core.model().read()).or_else(|| self.item.badge.clone())
+        } else {
+            self.item.badge.clone()
+        };
+
+        let badge = effective_badge.map(|badge| {
             let (badge_bg, badge_fg) = match badge.tone {
                 BadgeTone::Neutral => (theme.color(ThemeRole::SurfaceRaised), theme.color(ThemeRole::Text)),
                 BadgeTone::Accent => (theme.color(ThemeRole::Accent), theme.color(ThemeRole::TextOnAccent)),

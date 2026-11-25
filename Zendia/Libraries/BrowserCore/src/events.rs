@@ -7,19 +7,21 @@
 //! Event bus for notifying views and services when browser state changes.
 
 use crate::address_bar::SearchEngine;
+use crate::agent::{AgentInstruction, AgentSelection, SidePanelPrefs};
 use crate::contributions::{Contributions, SidePanelId};
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::model::{
-    Bookmark, Conversation, Download, Essential, Folder, FolderId, InputMode, LayoutSettings, MediaSession,
-    NotificationId, PinnedTab, ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId,
-    ThemeSettings, WhichKeyState,
+    AgentId, Bookmark, ChatSite, ChatSiteId, Conversation, ConversationId, Download, Essential, Folder, FolderId,
+    InputMode, LayoutSettings, MediaSession, NotificationId, PinnedTab, ServiceState, SidebarNotification, Space,
+    SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings, WhichKeyState,
 };
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
 use crate::site_info::SiteInfo;
 use crate::split::Glance;
 use crate::toasts::{Toast, ToastId};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
@@ -108,6 +110,59 @@ pub enum Event {
     CompactSidebarRevealRequested,
     PanelToggled {
         panel_id: SidePanelId,
+    },
+    /// View-level request to open a side panel (optionally focusing its primary input).
+    PanelOpenRequested {
+        panel_id: SidePanelId,
+        focus: bool,
+    },
+    /// View-level request to close a side panel.
+    PanelCloseRequested {
+        panel_id: SidePanelId,
+    },
+    /// Profile settings for a side panel changed (layout, side, width, or fallback).
+    PanelPrefsChanged {
+        panel_id: SidePanelId,
+        prefs: SidePanelPrefs,
+    },
+    /// Default agent or per-agent model/effort/context selection changed.
+    AgentSettingsChanged {
+        default_agent_id: Option<AgentId>,
+        selections: BTreeMap<AgentId, AgentSelection>,
+    },
+    /// Saved agent instruction guidelines changed.
+    AgentInstructionsChanged {
+        instructions: Vec<AgentInstruction>,
+    },
+    /// Active conversation selection per tab changed.
+    ActiveConversationChanged {
+        tab_id: TabId,
+        conversation_id: Option<ConversationId>,
+    },
+    /// A conversation was removed or reset.
+    ConversationRemoved {
+        conversation_id: ConversationId,
+    },
+    /// View-level request to open the model card anchored on the agent panel's model chip.
+    AgentModelCardRequested,
+    /// View-level request to open the instructions overlay inside the agent panel.
+    AgentInstructionsRequested,
+    /// Published whenever the cross-window agents roster changes (status, confirmation, or dismissal).
+    AgentRosterChanged,
+    /// Published when the web chat site list, active site, pending prompt, or dictation state changes.
+    WebChatChanged {
+        sites: Vec<ChatSite>,
+        active_site_id: Option<ChatSiteId>,
+        pending_prompt: Option<(ChatSiteId, String)>,
+        dictating: bool,
+    },
+    /// View-level request to reload the Hub view backing a web chat site.
+    WebChatReloadRequested {
+        site_id: ChatSiteId,
+    },
+    /// View-level request to navigate a web chat site's Hub view back to its home URL for a fresh chat.
+    WebChatNavigateHomeRequested {
+        site_id: ChatSiteId,
     },
     LocationFocusRequested,
     AddressBarOpenRequested {

@@ -21,9 +21,11 @@ use crate::ui::page::download_arc::{DownloadArcLayer, use_provide_download_arc};
 use crate::ui::page::{
     PageArea, PageStage, PageSurfaceContext, PaneMode, VimOverlayLayer, use_provide_keymap, use_provide_page_surfaces,
 };
+use crate::ui::panels::use_provide_dock_state;
 use crate::ui::theme::{ThemeRole, use_provide_theme, use_theme};
 use crate::ui::vim::use_provide_vim_statusline_state;
 use crate::ui::vim::{VimPickerOverlay, use_provide_region_picker_state, use_provide_vim_picker_state};
+use crate::ui::webchat::use_provide_webchat_views;
 use freya::prelude::*;
 use hub_protocol::ipc_types::hub_client::messages as client;
 use hub_protocol::ipc_types::hub_server::messages as server;
@@ -149,6 +151,7 @@ fn handle_message(
             adapter.on_url_changed(view_id, url.as_str().to_string());
         }
         HubMessage::ViewLoadingStateChange(client::ViewLoadingStateChange { view_id, is_loading }) => {
+            adapter.note_auxiliary_loading(view_id, is_loading);
             adapter.on_loading_state_changed(view_id, is_loading);
         }
         HubMessage::ViewLoadStart(_) | HubMessage::ViewLoadFinish(_) => {}
@@ -317,6 +320,8 @@ pub fn app() -> impl IntoElement {
     let vim_statusline_state = use_provide_vim_statusline_state();
     let vim_picker_state = use_provide_vim_picker_state();
     let region_picker_state = use_provide_region_picker_state();
+    let mut dock_state = use_provide_dock_state();
+    let webchat_views = use_provide_webchat_views(Some(Arc::clone(&hub_adapter)));
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -420,6 +425,21 @@ pub fn app() -> impl IntoElement {
             CoreEvent::ModeChanged { .. } | CoreEvent::WhichKeyChanged { .. } | CoreEvent::VimModeChanged { .. } => {
                 vim_statusline_state.close_all_keymaps();
             }
+            CoreEvent::PanelOpenRequested { .. }
+            | CoreEvent::PanelCloseRequested { .. }
+            | CoreEvent::PanelToggled { .. }
+            | CoreEvent::AgentModelCardRequested
+            | CoreEvent::AgentInstructionsRequested => {
+                dock_state.apply_event(event);
+            }
+            CoreEvent::WebChatReloadRequested { site_id } => {
+                webchat_views.reload_site(site_id);
+            }
+            CoreEvent::WebChatNavigateHomeRequested { site_id } => {
+                if let Some(site) = stub_core.model().chat_sites.iter().find(|site| &site.id == site_id) {
+                    webchat_views.navigate_home(site);
+                }
+            }
             _ => {}
         }
     });
@@ -500,8 +520,16 @@ pub fn app() -> impl IntoElement {
             if vim_picker_state.is_open() || region_picker_state.is_active() {
                 return;
             }
+            if dock_state.captures_text_input()
+                && !e
+                    .modifiers
+                    .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
+            {
+                return;
+            }
             if !address_bar_state.is_open()
                 && !sidebar_state.is_renaming()
+                && !dock_state.captures_text_input()
                 && crate::ui::vim::handle_focus_key_down(&e, &core)
             {
                 return;

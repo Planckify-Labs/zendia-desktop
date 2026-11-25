@@ -7,6 +7,8 @@
 //! Gallery section renderers and shared visual framing helpers.
 
 pub mod address_bar;
+pub mod agent_panel;
+pub mod agents_panel;
 pub mod declared;
 pub mod icons;
 pub mod keymap;
@@ -20,6 +22,7 @@ pub mod theme;
 pub mod vim_focus;
 pub mod vim_pickers;
 pub mod vim_statusline;
+pub mod webchat_panel;
 pub mod window_shell;
 
 use crate::gallery::registry::GalleryCore;
@@ -103,6 +106,15 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
             gallery_core: Arc::clone(gallery_core),
         }
         .into_element(),
+        "agent-panel" => agent_panel::AgentPanelSection::new(state_id, Arc::clone(gallery_core))
+            .key(state_id)
+            .into_element(),
+        "agents-panel" => agents_panel::AgentsPanelSection::new(state_id, Arc::clone(gallery_core))
+            .key(state_id)
+            .into_element(),
+        "webchat" => webchat_panel::WebChatSection::new(state_id, Arc::clone(gallery_core))
+            .key(state_id)
+            .into_element(),
         other => rect()
             .padding(Gaps::new_all(24.0))
             .child(label().text(format!("Unknown gallery section: {other}")))

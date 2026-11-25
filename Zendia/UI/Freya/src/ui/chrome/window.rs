@@ -11,6 +11,7 @@
 //! window edge where they live slides them out over the page with Zen's 0.25 s spring; they slide back once the pointer
 //! leaves them, unless the user pinned the sidebar out with `layout.compact_reveal_sidebar`.
 
+use crate::ui::agent::{AgentPanel, AgentsPanel};
 use crate::ui::chrome::layout::{
     BackdropEndpoints, ChromePalette, ELEMENT_SEPARATION, PAGE_CARD_RADIUS, SPACE_GRADIENT_CROSSFADE,
     TOP_TOOLBAR_HEIGHT, ToolbarSlots, page_card_margins, window_backdrop_endpoints,
@@ -19,13 +20,22 @@ use crate::ui::chrome::sidebar::{SidebarFrame, SidebarResizeHandle, try_use_side
 use crate::ui::chrome::toasts::ToastHost;
 use crate::ui::chrome::toolbar::TopToolbar;
 use crate::ui::core_view::use_core;
+use crate::ui::panels::{
+    DockClosedPill, DockFrame, DockSlideHandle, SPLIT_GAP, active_agent_accent, resolve_active_dock_panel,
+    try_use_dock_state,
+};
 use crate::ui::theme::CHROME_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedScheme, motion, use_theme};
+use crate::ui::vim::statusline::try_use_vim_statusline_state;
 use crate::ui::vim::vim_mode_backdrop_endpoints;
+use crate::ui::webchat::WebChatPanel;
 use freya::animation::*;
 use freya::prelude::*;
 use std::time::Duration;
+use zendia_browser_core::agent::{AGENT_PANEL_ID, AGENTS_PANEL_ID};
+use zendia_browser_core::contributions::{SidePanelLayout, SidePanelSide};
 use zendia_browser_core::model::{InputMode, SidebarSide, SpaceId};
+use zendia_browser_core::webchat::WEBCHAT_PANEL_ID;
 
 /// How close to the window edge the pointer must come to slide hidden chrome out.
 const COMPACT_EDGE: f32 = 8.0;
@@ -77,19 +87,40 @@ impl Component for WindowShell {
         let palette = ChromePalette::for_scheme(theme.scheme);
         let is_resizing = use_state(|| false);
         let sidebar_state = try_use_sidebar_state();
+        let dock_state = try_use_dock_state();
+        let statusline_state = try_use_vim_statusline_state();
         let mut shell_area = use_state(|| (0.0f32, 0.0f32, 0.0f32, 0.0f32));
+        let mut stage_width = use_state(|| 1120.0f32);
         let mut toolbar_revealed = use_state(|| false);
 
-        let (layout, active_space, toolbar_items, vim_mode_enabled, input_mode) = {
+        let (layout, active_space, toolbar_items, vim_mode_enabled, input_mode, resolved_panel, agent_accent) = {
             let model = core.model().read();
+            let resolved_panel = dock_state.and_then(|ds| resolve_active_dock_panel(&model, ds, *stage_width.read()));
+            let accent = active_agent_accent(&model, &theme);
             (
                 model.layout.clone(),
                 model.active_space().cloned(),
                 model.contributions.toolbar_items.clone(),
                 model.vim_mode_enabled,
                 model.input_mode,
+                resolved_panel,
+                accent,
             )
         };
+
+        // Keep the vim statusline clear of any floating/sliding side panel on its resting corner edge.
+        if let Some(sl) = statusline_state {
+            let statusline_on_right = layout.sidebar_side == SidebarSide::Left;
+            let clearance = resolved_panel
+                .as_ref()
+                .filter(|p| {
+                    let panel_on_right = p.prefs.side == SidePanelSide::Right;
+                    panel_on_right == statusline_on_right
+                })
+                .map(|p| p.overlay_clearance())
+                .unwrap_or(0.0);
+            sl.set_side_panel_clearance(clearance);
+        }
 
         let target_endpoints = if vim_mode_enabled {
             vim_mode_backdrop_endpoints(input_mode, theme.scheme, &theme)
@@ -208,24 +239,100 @@ impl Component for WindowShell {
                 .color(Color::from_argb(36, 0, 0, 0)),
         };
 
+        let build_panel_content = |resolved: &crate::ui::panels::ResolvedDockPanel| -> Element {
+            match resolved.panel_id.0.as_str() {
+                AGENT_PANEL_ID => AgentPanel::new(resolved.clone()).into_element(),
+                AGENTS_PANEL_ID => AgentsPanel::new(resolved.clone()).into_element(),
+                WEBCHAT_PANEL_ID => WebChatPanel::new(resolved.clone()).into_element(),
+                _ => crate::ui::panels::GenericSidePanel::new(resolved.clone(), agent_accent).into_element(),
+            }
+        };
+
+        let split_panel = resolved_panel
+            .as_ref()
+            .filter(|p| p.effective_layout == SidePanelLayout::Split)
+            .cloned();
+        let overlay_panel = resolved_panel
+            .as_ref()
+            .filter(|p| p.effective_layout != SidePanelLayout::Split)
+            .cloned();
+
+        let split_panel_el = split_panel.as_ref().map(|p| {
+            DockFrame::new(p.clone(), agent_accent, build_panel_content(p))
+                .key(format!("split:{}", p.panel_id.0))
+                .into_element()
+        });
+        let overlay_panel_el = overlay_panel.as_ref().map(|p| {
+            DockFrame::new(p.clone(), agent_accent, build_panel_content(p))
+                .key(format!("overlay:{}", p.panel_id.0))
+                .into_element()
+        });
+
+        let page_card_inner = rect()
+            .width(Size::flex(1.0))
+            .height(Size::fill())
+            .corner_radius(CornerRadius::new_all(PAGE_CARD_RADIUS))
+            .overflow(Overflow::Clip)
+            .border(
+                Border::new()
+                    .width(1.0)
+                    .alignment(BorderAlignment::Inner)
+                    .fill(palette.page_card_border),
+            )
+            .shadow(card_shadow)
+            .on_pointer_down(move |_| {
+                if let Some(mut ds) = dock_state {
+                    ds.set_focus(None);
+                    ds.model_card_open.set_if_modified(false);
+                }
+            })
+            .child(self.page.clone());
+
+        let stage_inner = match (split_panel.as_ref().map(|p| p.prefs.side), split_panel_el) {
+            (Some(SidePanelSide::Left), Some(panel_el)) => rect()
+                .width(Size::fill())
+                .height(Size::fill())
+                .direction(Direction::Horizontal)
+                .content(Content::Flex)
+                .spacing(SPLIT_GAP)
+                .child(panel_el)
+                .child(page_card_inner),
+            (Some(SidePanelSide::Right), Some(panel_el)) => rect()
+                .width(Size::fill())
+                .height(Size::fill())
+                .direction(Direction::Horizontal)
+                .content(Content::Flex)
+                .spacing(SPLIT_GAP)
+                .child(page_card_inner)
+                .child(panel_el),
+            _ => rect()
+                .width(Size::fill())
+                .height(Size::fill())
+                .content(Content::Flex)
+                .child(page_card_inner),
+        };
+
         let page_card = rect()
             .width(Size::flex(1.0))
             .height(Size::fill())
             .padding(Gaps::new(card_top, card_right, card_bottom, card_left))
+            .on_sized(move |e: Event<SizedEventData>| {
+                let w = e.area.width();
+                if (*stage_width.peek() - w).abs() > 1.0 {
+                    stage_width.set(w);
+                    if let Some(mut ds) = dock_state {
+                        ds.stage_width.set(w);
+                    }
+                }
+            })
             .child(
                 rect()
                     .width(Size::fill())
                     .height(Size::fill())
-                    .corner_radius(CornerRadius::new_all(PAGE_CARD_RADIUS))
-                    .overflow(Overflow::Clip)
-                    .border(
-                        Border::new()
-                            .width(1.0)
-                            .alignment(BorderAlignment::Inner)
-                            .fill(palette.page_card_border),
-                    )
-                    .shadow(card_shadow)
-                    .child(self.page.clone()),
+                    .child(stage_inner)
+                    .maybe_child(overlay_panel_el)
+                    .maybe_child(dock_state.is_some().then_some(DockClosedPill))
+                    .maybe_child(dock_state.is_some().then_some(DockSlideHandle)),
             );
 
         let sidebar_side = layout.sidebar_side;

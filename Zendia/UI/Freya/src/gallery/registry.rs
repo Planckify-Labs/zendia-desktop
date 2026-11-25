@@ -710,6 +710,143 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "agent-panel",
+        title: "Side Panels & Agent",
+        phase: 6,
+        icon: "chat",
+        summary: "Float/Slide/Split dock host, Markdown & tables, working ring, model card, instructions, and confirmations.",
+        states: &[
+            GalleryStateSpec {
+                id: "conversation-float",
+                label: "Conversation · Float",
+                description: "Floating glass agent panel with folded steps, Markdown, code block, interactive table, and confirmation.",
+            },
+            GalleryStateSpec {
+                id: "empty-float",
+                label: "Empty · Float",
+                description: "Empty floating panel with Claude Code emblem, prompt suggestions, and composer.",
+            },
+            GalleryStateSpec {
+                id: "split-layout",
+                label: "Split Layout",
+                description: "Side panel docked in-flow beside the narrowed page card with 8px gap.",
+            },
+            GalleryStateSpec {
+                id: "slide-handle",
+                label: "Slide · Edge Handle",
+                description: "Closed Slide-mode panel showing the agent-colored edge handle and Chat button dot.",
+            },
+            GalleryStateSpec {
+                id: "working-state",
+                label: "Working & Streaming",
+                description: "Active streaming reply with 8-dash Skia working ring, rolling status text, and Stop button.",
+            },
+            GalleryStateSpec {
+                id: "closed-pill",
+                label: "Closed · Working Pill",
+                description: "Panel closed while the agent works, showing the floating bottom pill and Chat button dot.",
+            },
+            GalleryStateSpec {
+                id: "model-card",
+                label: "Model & Effort Card",
+                description: "Floating glass popover with color-coded effort slider and context window selector.",
+            },
+            GalleryStateSpec {
+                id: "model-card-list",
+                label: "Model Card · List",
+                description: "Searchable grouped model list sub-view with capability badges and detail bar.",
+            },
+            GalleryStateSpec {
+                id: "instructions-empty",
+                label: "Instructions · Empty",
+                description: "Full-panel Agent instructions overlay in its empty state.",
+            },
+            GalleryStateSpec {
+                id: "instructions-populated",
+                label: "Instructions · Cards",
+                description: "Agent instructions overlay with switchable cards, file tile, and guideline editor.",
+            },
+            GalleryStateSpec {
+                id: "declared-page-and-media",
+                label: "Declared UI & Media",
+                description: "Native DeclaredUi card, CAPTCHA button, staged attachment, and media compatibility warning.",
+            },
+            GalleryStateSpec {
+                id: "service-down",
+                label: "AgentServer Down",
+                description: "AgentServer stopped callout with Retry button while preserving the conversation trace.",
+            },
+        ],
+    },
+    GallerySectionSpec {
+        id: "agents-panel",
+        title: "Agents Panel",
+        phase: 7,
+        icon: "agents",
+        summary: "Cross-window agent roster grouped by urgency, inline permission cards, stop/peek/dismiss, and Agents badge.",
+        states: &[
+            GalleryStateSpec {
+                id: "populated-float",
+                label: "Populated · Float",
+                description: "Left floating Agents panel with NEEDS YOU, WORKING, FINISHED, IDLE groups and amber badge.",
+            },
+            GalleryStateSpec {
+                id: "split-layout",
+                label: "Split Layout",
+                description: "Agents roster docked in Split mode beside the narrowed page card.",
+            },
+            GalleryStateSpec {
+                id: "empty",
+                label: "Empty Roster",
+                description: "Agents panel empty state ('No agents at work') with quick New chat trigger.",
+            },
+            GalleryStateSpec {
+                id: "service-down",
+                label: "AgentServer Down",
+                description: "AgentServer unavailable banner in the Agents panel while preserving the roster.",
+            },
+        ],
+    },
+    GallerySectionSpec {
+        id: "webchat",
+        title: "Web Chat",
+        phase: 8,
+        icon: "webchat",
+        summary: "Native web chat dock with 8-site strip, custom site bar, accounts menu, Ask submenu, and dictation state.",
+        states: &[
+            GalleryStateSpec {
+                id: "panel-float",
+                label: "Float · Site Strip",
+                description: "Floating Web chat panel with header actions, 8-site brand strip, loading bar, and waiting emblem.",
+            },
+            GalleryStateSpec {
+                id: "panel-split",
+                label: "Split Layout",
+                description: "Web chat panel docked in Split mode beside the narrowed page card.",
+            },
+            GalleryStateSpec {
+                id: "account-menu",
+                label: "Accounts Menu",
+                description: "Accounts dropdown showing Account 1, shared browser cookie note, and login refresh.",
+            },
+            GalleryStateSpec {
+                id: "add-site",
+                label: "Add Custom Site",
+                description: "Inline custom chat site URL entry bar toggled from the site strip's + button.",
+            },
+            GalleryStateSpec {
+                id: "ask-submenu",
+                label: "Ask Context Menu",
+                description: "Tab context menu with the 'Ask ChatGPT About This Tab' prompts submenu.",
+            },
+            GalleryStateSpec {
+                id: "dictation",
+                label: "Dictation Listening",
+                description: "Voice dictation listening indicator and pending Ask prompt notice inside the Web chat panel.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
@@ -974,6 +1111,10 @@ fn format_command_detail(command: &Command) -> String {
         Command::SplitAdd { tab_id, direction } => format!("tab={} {direction:?}", tab_id.0),
         Command::PanelToggle { panel_id } => panel_id.as_str().to_string(),
         Command::AgentSend { prompt, .. } => prompt.clone(),
+        Command::AgentDismiss { conversation_id } => format!("conversation={}", conversation_id.0),
+        Command::WebChatSelectSite { site_id } | Command::WebChatRemoveSite { site_id } => site_id.0.clone(),
+        Command::WebChatAddSite { url, .. } => url.clone(),
+        Command::WebChatSetDictating { listening } => format!("listening={listening}"),
         Command::WebChatAsk { site_id, prompt } => format!("{}: {prompt}", site_id.0),
         Command::ThemeSet { scheme, .. } => format!("scheme={scheme:?}"),
         Command::LayoutSetToolbarLayout { layout } => format!("layout={layout:?}"),

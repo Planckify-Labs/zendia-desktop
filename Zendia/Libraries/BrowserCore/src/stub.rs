@@ -38,10 +38,13 @@ use crate::tab_source::{TabSource, TabUpdate};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+mod agent;
 mod focus;
 mod input_state;
 mod page_layouts;
 mod pickers;
+
+pub use agent::{AGENT_PANEL_ID, AGENTS_PANEL_ID, build_rich_sample_conversation, sample_declared_agent_page};
 
 const MAX_ESSENTIALS: usize = 12;
 
@@ -1688,101 +1691,211 @@ impl StubBackend {
         Ok(())
     }
 
-    fn handle_agent_send(
-        &self,
-        conversation_id: Option<ConversationId>,
-        agent_id: Option<AgentId>,
-        prompt: String,
-    ) -> CommandResult {
-        if prompt.trim().is_empty() {
-            return Err(CommandError::InvalidArgument {
-                command: "agent.send".to_string(),
-                message: "prompt must not be empty".to_string(),
-            });
-        }
-
-        let updated = {
+    fn publish_webchat_state(&self) {
+        let (sites, active_site_id, pending_prompt, dictating, contributions) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let user_step_id = StepId(state.next_step_id);
-            state.next_step_id += 1;
-            let reply_step_id = StepId(state.next_step_id);
-            state.next_step_id += 1;
+            let active_site = state.model.active_chat_site().cloned();
+            let site_id_str = active_site
+                .as_ref()
+                .map(|s| s.id.0.clone())
+                .unwrap_or_else(|| "chatgpt".to_string());
+            let site_name = active_site
+                .as_ref()
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "ChatGPT".to_string());
+            let essentials_count = state.model.essentials.len();
+            let vim_enabled = state.model.vim_mode_enabled;
+            state.model.contributions.menu_entries =
+                crate::menus::builtin_menu_entries_for_site(vim_enabled, &site_id_str, &site_name, essentials_count);
+            (
+                state.model.chat_sites.clone(),
+                state.model.active_chat_site_id.clone(),
+                state.model.webchat_pending_prompt.clone(),
+                state.model.webchat_dictating,
+                state.model.contributions.clone(),
+            )
+        };
+        self.bus.publish(Event::WebChatChanged {
+            sites,
+            active_site_id,
+            pending_prompt,
+            dictating,
+        });
+        self.bus.publish(Event::ContributionsChanged { contributions });
+    }
 
-            let user_step = ConversationStep {
-                id: user_step_id,
-                kind: StepKind::UserPrompt,
-                summary: prompt.clone(),
-                detail: None,
-                status: StepStatus::Completed,
-            };
-            let reply_step = ConversationStep {
-                id: reply_step_id,
-                kind: StepKind::Response,
-                summary: format!("Stub response for: {prompt}"),
-                detail: Some("AgentServer is not running yet; this response came from the stub backend.".to_string()),
-                status: StepStatus::Completed,
-            };
+    fn handle_webchat_toggle(&self) -> CommandResult {
+        self.handle_panel_toggle(SidePanelId::new(crate::webchat::WEBCHAT_PANEL_ID))
+    }
 
-            if let Some(conv_id) = conversation_id {
-                let Some(conversation) = state.model.conversations.iter_mut().find(|conv| conv.id == conv_id) else {
-                    return Err(CommandError::TargetNotFound {
-                        command: "agent.send".to_string(),
-                        target: format!("conversation {}", conv_id.0),
-                    });
-                };
-                conversation.steps.push(user_step);
-                conversation.steps.push(reply_step);
-                conversation.status = ConversationStatus::Finished;
-                conversation.clone()
+    fn handle_webchat_select_site(&self, site_id: ChatSiteId) -> CommandResult {
+        let known = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.model.chat_sites.iter().any(|site| site.id == site_id) {
+                state.model.active_chat_site_id = Some(site_id.clone());
+                true
             } else {
-                let chosen_agent = agent_id
-                    .or_else(|| state.model.agents.first().map(|agent| agent.id.clone()))
-                    .unwrap_or_else(|| AgentId::new("zendia.assistant"));
-                let chosen_model = state
-                    .model
-                    .models
-                    .first()
-                    .map(|model| model.id.clone())
-                    .unwrap_or_else(|| ModelId::new("stub-model"));
-                let id = ConversationId(state.next_conversation_id);
-                state.next_conversation_id += 1;
-                let conversation = Conversation {
-                    id,
-                    agent_id: chosen_agent,
-                    tab_id: state.model.active_tab,
-                    title: prompt,
-                    model_id: chosen_model,
-                    status: ConversationStatus::Finished,
-                    steps: vec![user_step, reply_step],
-                };
-                state.model.conversations.push(conversation.clone());
-                conversation
+                false
             }
         };
+        if !known {
+            return Err(CommandError::TargetNotFound {
+                command: "webchat.select_site".to_string(),
+                target: format!("chat site {}", site_id.0),
+            });
+        }
+        self.publish_webchat_state();
+        Ok(())
+    }
 
-        self.bus.publish(Event::ConversationUpdated { conversation: updated });
+    fn handle_webchat_add_site(&self, name: Option<String>, url: String) -> CommandResult {
+        let normalized =
+            crate::webchat::normalize_chat_site_url(&url).ok_or_else(|| CommandError::InvalidArgument {
+                command: "webchat.add_site".to_string(),
+                message: format!("invalid web chat URL `{url}`"),
+            })?;
+        let (mut id, display_name) = crate::webchat::derive_custom_site_identity(&normalized, name.as_deref());
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let base = id.0.clone();
+            let mut suffix = 2usize;
+            while state.model.chat_sites.iter().any(|site| site.id == id) {
+                id = ChatSiteId::new(format!("{base}-{suffix}"));
+                suffix += 1;
+            }
+            state.model.chat_sites.push(ChatSite {
+                id: id.clone(),
+                name: display_name,
+                url: normalized,
+                icon: "webchat".to_string(),
+                accent_hex: "#7aa2f7".to_string(),
+                is_custom: true,
+            });
+            state.model.active_chat_site_id = Some(id);
+        }
+        self.publish_webchat_state();
+        Ok(())
+    }
+
+    fn handle_webchat_remove_site(&self, site_id: ChatSiteId) -> CommandResult {
+        let removed = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let before = state.model.chat_sites.len();
+            state.model.chat_sites.retain(|site| site.id != site_id);
+            if state.model.active_chat_site_id.as_ref() == Some(&site_id) {
+                state.model.active_chat_site_id = state.model.chat_sites.first().map(|s| s.id.clone());
+            }
+            state.model.chat_sites.len() != before
+        };
+        if !removed {
+            return Err(CommandError::TargetNotFound {
+                command: "webchat.remove_site".to_string(),
+                target: format!("chat site {}", site_id.0),
+            });
+        }
+        self.publish_webchat_state();
+        Ok(())
+    }
+
+    fn resolve_chat_site_id(&self, site_id: Option<ChatSiteId>, command: &str) -> Result<ChatSiteId, CommandError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let target = site_id
+            .or_else(|| state.model.active_chat_site().map(|s| s.id.clone()))
+            .ok_or_else(|| CommandError::TargetNotFound {
+                command: command.to_string(),
+                target: "active chat site".to_string(),
+            })?;
+        if !state.model.chat_sites.iter().any(|s| s.id == target) {
+            return Err(CommandError::TargetNotFound {
+                command: command.to_string(),
+                target: format!("chat site {}", target.0),
+            });
+        }
+        Ok(target)
+    }
+
+    fn handle_webchat_reload(&self, site_id: Option<ChatSiteId>) -> CommandResult {
+        let target = self.resolve_chat_site_id(site_id, "webchat.reload")?;
+        self.bus.publish(Event::WebChatReloadRequested { site_id: target });
+        Ok(())
+    }
+
+    fn handle_webchat_new_chat(&self, site_id: Option<ChatSiteId>) -> CommandResult {
+        let target = self.resolve_chat_site_id(site_id, "webchat.new_chat")?;
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.webchat_pending_prompt = None;
+        }
+        self.bus
+            .publish(Event::WebChatNavigateHomeRequested { site_id: target });
+        self.publish_webchat_state();
+        Ok(())
+    }
+
+    fn handle_webchat_open_in_tab(&self, site_id: Option<ChatSiteId>) -> CommandResult {
+        let target = self.resolve_chat_site_id(site_id, "webchat.open_in_tab")?;
+        let url = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .model
+                .chat_sites
+                .iter()
+                .find(|s| s.id == target)
+                .map(|s| s.url.clone())
+        };
+        if let Some(url) = url {
+            self.invoke(Command::TabNew {
+                url: Some(url),
+                after: None,
+                activate: true,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn handle_webchat_set_dictating(&self, listening: bool) -> CommandResult {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.webchat_dictating = listening;
+        }
+        self.publish_webchat_state();
         Ok(())
     }
 
     fn handle_webchat_ask(&self, site_id: ChatSiteId, prompt: String) -> CommandResult {
-        let known = {
-            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            state.model.chat_sites.iter().any(|site| site.id == site_id)
+        let site_name = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(site) = state.model.chat_sites.iter().find(|site| site.id == site_id).cloned() else {
+                return Err(CommandError::TargetNotFound {
+                    command: "webchat.ask".to_string(),
+                    target: format!("chat site {}", site_id.0),
+                });
+            };
+            state.model.active_chat_site_id = Some(site_id.clone());
+            state.model.webchat_pending_prompt = Some((site_id.clone(), prompt.clone()));
+            site.name
         };
-        if !known {
-            return Err(CommandError::TargetNotFound {
-                command: "webchat.ask".to_string(),
-                target: format!("chat site {}", site_id.0),
-            });
-        }
         eprintln!(
             "zendia: stub webchat.ask for `{}` ({} chars) — Automation World not connected yet",
             site_id.0,
             prompt.len()
         );
-        self.bus.publish(Event::PanelToggled {
-            panel_id: SidePanelId::new("zendia.webchat"),
+        self.publish_webchat_state();
+        self.bus.publish(Event::PanelOpenRequested {
+            panel_id: SidePanelId::new(crate::webchat::WEBCHAT_PANEL_ID),
+            focus: true,
         });
+        let toast = crate::toasts::Toast {
+            id: crate::toasts::ToastId(9020),
+            message: format!("Opened {site_name}: {prompt}"),
+            timeout_ms: 3000,
+            action: None,
+        };
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            crate::toasts::push_toast(&mut state.model.toasts, toast.clone());
+        }
+        self.bus.publish(Event::ToastShown { toast });
         Ok(())
     }
 
@@ -2238,7 +2351,45 @@ impl BrowserCore for StubBackend {
                 conversation_id,
                 agent_id,
                 prompt,
-            } => self.handle_agent_send(conversation_id, agent_id, prompt),
+            } => self.handle_agent_send_with_files(conversation_id, agent_id, prompt, Vec::new()),
+            command @ (Command::PanelOpen { .. }
+            | Command::PanelClose { .. }
+            | Command::PanelSetLayout { .. }
+            | Command::PanelSetSide { .. }
+            | Command::PanelSetWidth { .. }
+            | Command::PanelResetWidth { .. }
+            | Command::AgentToggle
+            | Command::AgentAsk
+            | Command::AgentSendWithFiles { .. }
+            | Command::AgentStop { .. }
+            | Command::AgentNew { .. }
+            | Command::AgentSelect { .. }
+            | Command::AgentCycle { .. }
+            | Command::AgentModel { .. }
+            | Command::AgentSetEffort { .. }
+            | Command::AgentSetContext { .. }
+            | Command::AgentConfirm { .. }
+            | Command::AgentSwitchConversation { .. }
+            | Command::AgentMarkSeen { .. }
+            | Command::AgentOpenInstructions
+            | Command::AgentInstructionAdd
+            | Command::AgentInstructionUpdate { .. }
+            | Command::AgentInstructionRemove { .. }
+            | Command::AgentInstructionSetFile { .. }
+            | Command::AgentSummarizeCaptcha { .. }
+            | Command::AgentLog { .. }
+            | Command::AgentList
+            | Command::AgentDismiss { .. }
+            | Command::DebugSampleAgent
+            | Command::DebugToggleAgentService) => self.handle_panel_or_agent_command(command),
+            Command::WebChatToggle => self.handle_webchat_toggle(),
+            Command::WebChatSelectSite { site_id } => self.handle_webchat_select_site(site_id),
+            Command::WebChatAddSite { name, url } => self.handle_webchat_add_site(name, url),
+            Command::WebChatRemoveSite { site_id } => self.handle_webchat_remove_site(site_id),
+            Command::WebChatReload { site_id } => self.handle_webchat_reload(site_id),
+            Command::WebChatNewChat { site_id } => self.handle_webchat_new_chat(site_id),
+            Command::WebChatOpenInTab { site_id } => self.handle_webchat_open_in_tab(site_id),
+            Command::WebChatSetDictating { listening } => self.handle_webchat_set_dictating(listening),
             Command::WebChatAsk { site_id, prompt } => self.handle_webchat_ask(site_id, prompt),
             Command::ThemeSet { scheme, overrides } => self.handle_theme_set(scheme, overrides),
             Command::LayoutSetToolbarLayout { layout } => self.handle_layout_set_toolbar_layout(layout),
@@ -2743,15 +2894,15 @@ fn sample_contributions() -> Contributions {
                 title: "Agents".to_string(),
                 icon: "agents".to_string(),
                 default_layout: SidePanelLayout::Float,
-                default_side: SidePanelSide::Right,
-                default_width: 400.0,
+                default_side: SidePanelSide::Left,
+                default_width: 340.0,
                 source: ContributionSource::BuiltIn,
             },
             SidePanelEntry {
                 id: SidePanelId::new("zendia.webchat"),
                 title: "Web chat".to_string(),
                 icon: "webchat".to_string(),
-                default_layout: SidePanelLayout::Split,
+                default_layout: SidePanelLayout::Float,
                 default_side: SidePanelSide::Right,
                 default_width: 460.0,
                 source: ContributionSource::BuiltIn,
@@ -3299,10 +3450,81 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
     let models = vec![
         ModelInfo {
             id: primary_model.clone(),
-            name: "Claude Sonnet 4".to_string(),
+            name: "Claude Sonnet 4.6".to_string(),
+            provider: "Anthropic".to_string(),
+            context_window: 1_000_000,
+            effort: ModelEffort::High,
+            section: Some("Recommended".to_string()),
+            detail: Some("Balanced speed & reasoning".to_string()),
+            efforts: vec![
+                ModelEffort::Low,
+                ModelEffort::Medium,
+                ModelEffort::High,
+                ModelEffort::Max,
+            ],
+            context_choices: vec![
+                crate::agent::ContextChoice {
+                    id: "200k".to_string(),
+                    label: "200K".to_string(),
+                    tokens: 200_000,
+                    is_default: false,
+                },
+                crate::agent::ContextChoice {
+                    id: "1m".to_string(),
+                    label: "1M".to_string(),
+                    tokens: 1_000_000,
+                    is_default: true,
+                },
+            ],
+            supports_images: true,
+            supports_video: false,
+            supports_pdf: true,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-opus-4-6"),
+            name: "Claude Opus 4.6".to_string(),
+            provider: "Anthropic".to_string(),
+            context_window: 1_000_000,
+            effort: ModelEffort::High,
+            section: Some("Recommended".to_string()),
+            detail: Some("Deepest reasoning for complex tasks".to_string()),
+            efforts: vec![
+                ModelEffort::Low,
+                ModelEffort::Medium,
+                ModelEffort::High,
+                ModelEffort::Max,
+            ],
+            context_choices: vec![
+                crate::agent::ContextChoice {
+                    id: "200k".to_string(),
+                    label: "200K".to_string(),
+                    tokens: 200_000,
+                    is_default: false,
+                },
+                crate::agent::ContextChoice {
+                    id: "1m".to_string(),
+                    label: "1M".to_string(),
+                    tokens: 1_000_000,
+                    is_default: true,
+                },
+            ],
+            supports_images: true,
+            supports_video: false,
+            supports_pdf: true,
+        },
+        ModelInfo {
+            id: ModelId::new("claude-haiku-4-5"),
+            name: "Claude Haiku 4.5".to_string(),
             provider: "Anthropic".to_string(),
             context_window: 200_000,
-            effort: ModelEffort::Medium,
+            effort: ModelEffort::Low,
+            section: Some("Fast".to_string()),
+            detail: Some("Fast, lightweight answers".to_string()),
+            efforts: vec![ModelEffort::Low, ModelEffort::Medium],
+            context_choices: Vec::new(),
+            supports_images: false,
+            supports_video: false,
+            supports_pdf: false,
         },
         ModelInfo {
             id: ModelId::new("gpt-5"),
@@ -3310,6 +3532,13 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
             provider: "OpenAI".to_string(),
             context_window: 256_000,
             effort: ModelEffort::High,
+            section: Some("Other".to_string()),
+            detail: Some("General-purpose coding & browsing".to_string()),
+            efforts: vec![ModelEffort::Low, ModelEffort::Medium, ModelEffort::High],
+            context_choices: Vec::new(),
+            supports_images: true,
+            supports_video: false,
+            supports_pdf: true,
         },
         ModelInfo {
             id: ModelId::new("gemini-2.5-pro"),
@@ -3317,66 +3546,57 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
             provider: "Google".to_string(),
             context_window: 1_000_000,
             effort: ModelEffort::Medium,
+            section: Some("Other".to_string()),
+            detail: Some("Multimodal with 1M context".to_string()),
+            efforts: vec![ModelEffort::Low, ModelEffort::Medium, ModelEffort::High],
+            context_choices: Vec::new(),
+            supports_images: true,
+            supports_video: true,
+            supports_pdf: true,
         },
     ];
 
     let conversations = vec![Conversation {
         id: ConversationId(1),
-        agent_id: claude_agent,
+        agent_id: claude_agent.clone(),
         tab_id: active_tab,
         title: "Summarize release notes".to_string(),
         model_id: primary_model,
         status: ConversationStatus::WaitingForUser,
         steps: vec![
+            ConversationStep::simple(
+                StepId(1),
+                StepKind::UserPrompt,
+                "Summarize the main changes on this page",
+                StepStatus::Completed,
+            ),
             ConversationStep {
-                id: StepId(1),
-                kind: StepKind::UserPrompt,
-                summary: "Summarize the main changes on this page".to_string(),
-                detail: None,
-                status: StepStatus::Completed,
-            },
-            ConversationStep {
-                id: StepId(2),
-                kind: StepKind::ToolCall {
-                    tool: "page.snapshot".to_string(),
-                },
-                summary: "Read accessibility tree".to_string(),
                 detail: Some("Captured 42 landmarks and headings".to_string()),
-                status: StepStatus::Completed,
+                ..ConversationStep::simple(
+                    StepId(2),
+                    StepKind::ToolCall {
+                        tool: "page.snapshot".to_string(),
+                    },
+                    "Read accessibility tree",
+                    StepStatus::Completed,
+                )
             },
-            ConversationStep {
-                id: StepId(3),
-                kind: StepKind::Confirmation {
+            ConversationStep::simple(
+                StepId(3),
+                StepKind::Confirmation {
                     prompt: "Open three linked RFC tabs in the background?".to_string(),
                     resolved: None,
                 },
-                summary: "Waiting for permission to open tabs".to_string(),
-                detail: None,
-                status: StepStatus::WaitingForUser,
-            },
+                "Waiting for permission to open tabs",
+                StepStatus::WaitingForUser,
+            ),
         ],
+        unseen: false,
+        elapsed_secs: 0,
     }];
 
-    let chat_sites = vec![
-        ChatSite {
-            id: ChatSiteId::new("chatgpt"),
-            name: "ChatGPT".to_string(),
-            url: "https://chatgpt.com/".to_string(),
-            icon: "chatgpt".to_string(),
-        },
-        ChatSite {
-            id: ChatSiteId::new("gemini"),
-            name: "Gemini".to_string(),
-            url: "https://gemini.google.com/".to_string(),
-            icon: "gemini".to_string(),
-        },
-        ChatSite {
-            id: ChatSiteId::new("claude"),
-            name: "Claude".to_string(),
-            url: "https://claude.ai/".to_string(),
-            icon: "claude".to_string(),
-        },
-    ];
+    let chat_sites = crate::webchat::builtin_chat_sites();
+    let active_chat_site_id = chat_sites.first().map(|site| site.id.clone());
 
     let services = vec![
         ServiceState {
@@ -3438,10 +3658,19 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         glance: None,
         toasts: Vec::new(),
         contributions: sample_contributions(),
+        side_panel_prefs: BTreeMap::new(),
         agents,
+        default_agent_id: Some(claude_agent),
+        agent_selections: BTreeMap::new(),
         conversations,
+        active_conversations: BTreeMap::new(),
+        agent_instructions: Vec::new(),
+        tab_captcha_findings: BTreeMap::new(),
         models,
         chat_sites,
+        active_chat_site_id,
+        webchat_pending_prompt: None,
+        webchat_dictating: false,
         services,
         input_mode: InputMode::Normal,
         pending_keys: Vec::new(),

@@ -734,6 +734,15 @@ pub fn builtin_app_menu_entries(vim_mode_enabled: bool) -> Vec<MenuEntry> {
 
 /// Built-in tab context menu contributions matching Zendia's tab menu.
 pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize) -> Vec<MenuEntry> {
+    builtin_tab_context_entries_for_site("chatgpt", chat_site_name, essentials_count)
+}
+
+/// Built-in tab context menu contributions targeting a specific active web chat site.
+pub fn builtin_tab_context_entries_for_site(
+    chat_site_id: &str,
+    chat_site_name: &str,
+    essentials_count: usize,
+) -> Vec<MenuEntry> {
     let loc = MenuLocation::TabContext;
     let ask_label = format!("Ask {chat_site_name} About This Tab");
 
@@ -742,7 +751,7 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
         submenu_entry("zendia.tab.ask", loc, &ask_label, Some("sparkles"), "zendia_ask", 10),
         MenuEntry {
             command_args: vec![
-                ("site_id".to_string(), "chatgpt".to_string()),
+                ("site_id".to_string(), chat_site_id.to_string()),
                 ("prompt".to_string(), "Summarize this page in English".to_string()),
             ],
             ..child_entry(
@@ -758,7 +767,7 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
         },
         MenuEntry {
             command_args: vec![
-                ("site_id".to_string(), "chatgpt".to_string()),
+                ("site_id".to_string(), chat_site_id.to_string()),
                 (
                     "prompt".to_string(),
                     "List the key points and action items in English".to_string(),
@@ -777,7 +786,7 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
         },
         MenuEntry {
             command_args: vec![
-                ("site_id".to_string(), "chatgpt".to_string()),
+                ("site_id".to_string(), chat_site_id.to_string()),
                 ("prompt".to_string(), "Translate this page to English".to_string()),
             ],
             ..child_entry(
@@ -793,7 +802,7 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
         },
         MenuEntry {
             command_args: vec![
-                ("site_id".to_string(), "chatgpt".to_string()),
+                ("site_id".to_string(), chat_site_id.to_string()),
                 ("prompt".to_string(), "Ask about this tab".to_string()),
             ],
             ..child_entry(
@@ -809,7 +818,7 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
         },
         MenuEntry {
             command_args: vec![
-                ("site_id".to_string(), "chatgpt".to_string()),
+                ("site_id".to_string(), chat_site_id.to_string()),
                 ("prompt".to_string(), "Summarize this page on every site".to_string()),
             ],
             ..child_entry(
@@ -1019,6 +1028,11 @@ pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize
 
 /// Built-in Zendia contributions injected into Ladybird's page context menus (Ask, Split View, Glance).
 pub fn builtin_page_context_entries(chat_site_name: &str) -> Vec<MenuEntry> {
+    builtin_page_context_entries_for_site("chatgpt", chat_site_name)
+}
+
+/// Built-in Zendia page context menu contributions targeting a specific active web chat site.
+pub fn builtin_page_context_entries_for_site(chat_site_id: &str, chat_site_name: &str) -> Vec<MenuEntry> {
     let loc = MenuLocation::PageContext;
     let ask_label = format!("Ask {chat_site_name}");
 
@@ -1026,7 +1040,7 @@ pub fn builtin_page_context_entries(chat_site_name: &str) -> Vec<MenuEntry> {
         submenu_entry("zendia.page.ask", loc, &ask_label, Some("sparkles"), "zendia", 10),
         MenuEntry {
             command_args: vec![
-                ("site_id".to_string(), "chatgpt".to_string()),
+                ("site_id".to_string(), chat_site_id.to_string()),
                 ("prompt".to_string(), "Summarize this page".to_string()),
             ],
             ..child_entry(
@@ -1042,7 +1056,7 @@ pub fn builtin_page_context_entries(chat_site_name: &str) -> Vec<MenuEntry> {
         },
         MenuEntry {
             command_args: vec![
-                ("site_id".to_string(), "chatgpt".to_string()),
+                ("site_id".to_string(), chat_site_id.to_string()),
                 ("prompt".to_string(), "Explain this".to_string()),
             ],
             ..child_entry(
@@ -1058,7 +1072,7 @@ pub fn builtin_page_context_entries(chat_site_name: &str) -> Vec<MenuEntry> {
         },
         MenuEntry {
             command_args: vec![
-                ("site_id".to_string(), "chatgpt".to_string()),
+                ("site_id".to_string(), chat_site_id.to_string()),
                 ("prompt".to_string(), "Translate to English".to_string()),
             ],
             ..child_entry(
@@ -1074,7 +1088,7 @@ pub fn builtin_page_context_entries(chat_site_name: &str) -> Vec<MenuEntry> {
         },
         MenuEntry {
             command_args: vec![
-                ("site_id".to_string(), "chatgpt".to_string()),
+                ("site_id".to_string(), chat_site_id.to_string()),
                 ("prompt".to_string(), "Ask about this page".to_string()),
             ],
             ..child_entry(
@@ -1199,11 +1213,25 @@ pub fn builtin_space_context_entries() -> Vec<MenuEntry> {
 
 /// All built-in menu contributions registered by the browser core at startup.
 pub fn builtin_menu_entries(vim_mode_enabled: bool, chat_site_name: &str, essentials_count: usize) -> Vec<MenuEntry> {
+    builtin_menu_entries_for_site(vim_mode_enabled, "chatgpt", chat_site_name, essentials_count)
+}
+
+/// All built-in menu contributions targeting a specific active web chat site.
+pub fn builtin_menu_entries_for_site(
+    vim_mode_enabled: bool,
+    chat_site_id: &str,
+    chat_site_name: &str,
+    essentials_count: usize,
+) -> Vec<MenuEntry> {
     let mut entries = builtin_app_menu_entries(vim_mode_enabled);
-    entries.extend(builtin_tab_context_entries(chat_site_name, essentials_count));
+    entries.extend(builtin_tab_context_entries_for_site(
+        chat_site_id,
+        chat_site_name,
+        essentials_count,
+    ));
     entries.extend(builtin_folder_context_entries());
     entries.extend(builtin_space_context_entries());
-    entries.extend(builtin_page_context_entries(chat_site_name));
+    entries.extend(builtin_page_context_entries_for_site(chat_site_id, chat_site_name));
     entries
 }
 

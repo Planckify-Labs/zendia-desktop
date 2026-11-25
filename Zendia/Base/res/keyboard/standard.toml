@@ -242,3 +242,9 @@ args = { name = "agents" }
 keys = ["<C-A-r>", "<D-A-r>"]
 command = "region.pick"
 description = "Pick page region"
+
+# Side panels and agent.
+[[bindings]]
+keys = ["<C-S-a>", "<D-S-a>"]
+command = "agent.toggle"
+description = "Toggle agent side panel"
