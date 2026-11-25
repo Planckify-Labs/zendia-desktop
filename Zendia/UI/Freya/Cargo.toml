@@ -24,6 +24,7 @@ path = "src/bin/gallery.rs"
 
 [dependencies]
 async-channel = "2.3"
+cpal = "0.15"
 freya = { version = "0.5.4", features = ["engine"] }
 hub-protocol = { workspace = true }
 libc = "0.2"

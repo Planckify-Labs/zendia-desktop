@@ -774,6 +774,66 @@ pub enum Command {
     },
     /// Cancels an active region pick without capturing.
     RegionCancel,
+    /// Opens the first-run onboarding overlay in the invoking window.
+    OnboardingOpen,
+    /// Restarts the first-run onboarding flow from the Start page (used for testing and the palette).
+    OnboardingRestart,
+    /// Jumps directly to an onboarding page.
+    OnboardingGoto {
+        page: crate::onboarding::OnboardingPage,
+    },
+    /// Commits the active onboarding page's choices and advances to the next page.
+    OnboardingNext,
+    /// Steps backward to the previous onboarding chapter.
+    OnboardingBack,
+    /// Applies all onboarding choices, marks first-run setup as seen, and closes onboarding.
+    OnboardingFinish,
+    /// Dismisses onboarding and marks first-run setup as seen.
+    OnboardingSkip,
+    /// Clears selected essential apps and advances from Apps to Go.
+    OnboardingSkipApps,
+    /// Stages whether Vim mode should be enabled during onboarding.
+    OnboardingSetVim {
+        enabled: bool,
+    },
+    /// Stages the selected coding agent during onboarding.
+    OnboardingSetAgent {
+        agent_id: String,
+    },
+    /// Stages whether uBlock Origin ad blocking should stay enabled during onboarding.
+    OnboardingSetShield {
+        enabled: bool,
+    },
+    /// Stages the browser import source and optional profile during onboarding (`None` to start fresh).
+    OnboardingSetImport {
+        source_key: Option<String>,
+        profile_id: Option<String>,
+    },
+    /// Stages and applies the default search engine choice during onboarding.
+    OnboardingSetSearchEngine {
+        name: String,
+    },
+    /// Stages whether Zendia should become the system default browser during onboarding.
+    OnboardingSetDefaultBrowser {
+        enabled: bool,
+    },
+    /// Toggles a preset essential app URL during onboarding.
+    OnboardingToggleEssential {
+        url: String,
+    },
+    /// Enables or disables Zendia's built-in uBlock Origin ad shield (stub until the network hook lands).
+    ShieldSetEnabled {
+        enabled: bool,
+    },
+    /// Starts importing bookmarks, history, and passwords from another browser (stub-logged).
+    ImportStart {
+        source_key: String,
+        profile_id: Option<String>,
+    },
+    /// Requests the OS to make Zendia the default browser (stub-logged).
+    ImportSetDefaultBrowser {
+        enabled: bool,
+    },
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -1079,6 +1139,24 @@ impl Command {
             Self::RegionPick { .. } => "region.pick",
             Self::RegionCapture { .. } => "region.capture",
             Self::RegionCancel => "region.cancel",
+            Self::OnboardingOpen => "onboarding.open",
+            Self::OnboardingRestart => "onboarding.restart",
+            Self::OnboardingGoto { .. } => "onboarding.goto",
+            Self::OnboardingNext => "onboarding.next",
+            Self::OnboardingBack => "onboarding.back",
+            Self::OnboardingFinish => "onboarding.finish",
+            Self::OnboardingSkip => "onboarding.skip",
+            Self::OnboardingSkipApps => "onboarding.skip_apps",
+            Self::OnboardingSetVim { .. } => "onboarding.set_vim",
+            Self::OnboardingSetAgent { .. } => "onboarding.set_agent",
+            Self::OnboardingSetShield { .. } => "onboarding.set_shield",
+            Self::OnboardingSetImport { .. } => "onboarding.set_import",
+            Self::OnboardingSetSearchEngine { .. } => "onboarding.set_search_engine",
+            Self::OnboardingSetDefaultBrowser { .. } => "onboarding.set_default_browser",
+            Self::OnboardingToggleEssential { .. } => "onboarding.toggle_essential",
+            Self::ShieldSetEnabled { .. } => "shield.set_enabled",
+            Self::ImportStart { .. } => "import.start",
+            Self::ImportSetDefaultBrowser { .. } => "import.set_default_browser",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -1943,6 +2021,66 @@ impl Command {
             }),
             "library.media.copy" => Ok(Self::LibraryMediaCopy {
                 media_id: LibraryMediaId(parse_required_u64_arg(name, args, "media_id")?),
+            }),
+            "onboarding.open" => Ok(Self::OnboardingOpen),
+            "onboarding.restart" => Ok(Self::OnboardingRestart),
+            "onboarding.goto" => {
+                let raw = parse_required_string_arg(name, args, "page")?;
+                let page =
+                    crate::onboarding::OnboardingPage::parse(&raw).ok_or_else(|| CommandError::InvalidArgument {
+                        command: name.to_string(),
+                        message: format!("unknown onboarding page `{raw}`"),
+                    })?;
+                Ok(Self::OnboardingGoto { page })
+            }
+            "onboarding.next" => Ok(Self::OnboardingNext),
+            "onboarding.back" => Ok(Self::OnboardingBack),
+            "onboarding.finish" => Ok(Self::OnboardingFinish),
+            "onboarding.skip" => Ok(Self::OnboardingSkip),
+            "onboarding.skip_apps" => Ok(Self::OnboardingSkipApps),
+            "onboarding.set_vim" => Ok(Self::OnboardingSetVim {
+                enabled: parse_bool_arg(name, args, "enabled", true)?,
+            }),
+            "onboarding.set_agent" => Ok(Self::OnboardingSetAgent {
+                agent_id: parse_required_string_arg(name, args, "agent_id")?,
+            }),
+            "onboarding.set_shield" => Ok(Self::OnboardingSetShield {
+                enabled: parse_bool_arg(name, args, "enabled", true)?,
+            }),
+            "onboarding.set_import" => Ok(Self::OnboardingSetImport {
+                source_key: args
+                    .iter()
+                    .find(|(k, _)| k == "source_key")
+                    .map(|(_, v)| v.clone())
+                    .filter(|v| !v.trim().is_empty()),
+                profile_id: args
+                    .iter()
+                    .find(|(k, _)| k == "profile_id")
+                    .map(|(_, v)| v.clone())
+                    .filter(|v| !v.trim().is_empty()),
+            }),
+            "onboarding.set_search_engine" => Ok(Self::OnboardingSetSearchEngine {
+                name: parse_required_string_arg(name, args, "name")?,
+            }),
+            "onboarding.set_default_browser" => Ok(Self::OnboardingSetDefaultBrowser {
+                enabled: parse_bool_arg(name, args, "enabled", false)?,
+            }),
+            "onboarding.toggle_essential" => Ok(Self::OnboardingToggleEssential {
+                url: parse_required_string_arg(name, args, "url")?,
+            }),
+            "shield.set_enabled" => Ok(Self::ShieldSetEnabled {
+                enabled: parse_bool_arg(name, args, "enabled", true)?,
+            }),
+            "import.start" => Ok(Self::ImportStart {
+                source_key: parse_required_string_arg(name, args, "source_key")?,
+                profile_id: args
+                    .iter()
+                    .find(|(k, _)| k == "profile_id")
+                    .map(|(_, v)| v.clone())
+                    .filter(|v| !v.trim().is_empty()),
+            }),
+            "import.set_default_browser" => Ok(Self::ImportSetDefaultBrowser {
+                enabled: parse_bool_arg(name, args, "enabled", false)?,
             }),
             "region.pick" => Ok(Self::RegionPick {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
@@ -4033,6 +4171,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
         },
     ];
     descriptors.extend(crate::space_routing::command_descriptors());
+    descriptors.extend(crate::onboarding::command_descriptors());
     descriptors
 }
 

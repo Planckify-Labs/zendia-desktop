@@ -43,6 +43,7 @@ mod agent;
 mod focus;
 mod input_state;
 mod library_media;
+mod onboarding;
 mod page_layouts;
 mod pickers;
 
@@ -2651,6 +2652,24 @@ impl BrowserCore for StubBackend {
             | Command::LibraryMediaOpen { .. }
             | Command::LibraryMediaShowInFolder { .. }
             | Command::LibraryMediaCopy { .. }) => self.handle_library_media_command(command),
+            command @ (Command::OnboardingOpen
+            | Command::OnboardingRestart
+            | Command::OnboardingGoto { .. }
+            | Command::OnboardingNext
+            | Command::OnboardingBack
+            | Command::OnboardingFinish
+            | Command::OnboardingSkip
+            | Command::OnboardingSkipApps
+            | Command::OnboardingSetVim { .. }
+            | Command::OnboardingSetAgent { .. }
+            | Command::OnboardingSetShield { .. }
+            | Command::OnboardingSetImport { .. }
+            | Command::OnboardingSetSearchEngine { .. }
+            | Command::OnboardingSetDefaultBrowser { .. }
+            | Command::OnboardingToggleEssential { .. }
+            | Command::ShieldSetEnabled { .. }
+            | Command::ImportStart { .. }
+            | Command::ImportSetDefaultBrowser { .. }) => self.handle_onboarding_command(command),
             Command::SitePermissionSet {
                 origin,
                 permission,
@@ -4215,6 +4234,8 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         theme: ThemeSettings::default(),
         layout: LayoutSettings::default(),
         vim_mode_enabled: false,
+        shield_enabled: true,
+        onboarding: crate::onboarding::OnboardingState::default_seen(),
         zoom_level: 1.0,
     }
 }

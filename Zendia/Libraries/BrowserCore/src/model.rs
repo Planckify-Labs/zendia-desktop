@@ -17,6 +17,7 @@ use crate::contributions::{Contributions, SidePanelId, ToolbarArea, ToolbarPlace
 use crate::events::Event;
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
+use crate::onboarding::OnboardingState;
 use crate::site_info::{SiteExtension, SiteInfo, origin_for_url};
 use crate::space_routing::SpaceRoutingSettings;
 use crate::split::Glance;
@@ -807,6 +808,8 @@ pub struct BrowserModel {
     pub theme: ThemeSettings,
     pub layout: LayoutSettings,
     pub vim_mode_enabled: bool,
+    pub shield_enabled: bool,
+    pub onboarding: OnboardingState,
     pub zoom_level: f32,
 }
 
@@ -1423,6 +1426,16 @@ impl BrowserModel {
                 self.vim_mode_enabled = *enabled;
                 true
             }
+            Event::OnboardingChanged { state } => {
+                self.onboarding = state.clone();
+                true
+            }
+            Event::ShieldChanged { enabled } => {
+                self.shield_enabled = *enabled;
+                self.onboarding.choices.shield_enabled = *enabled;
+                true
+            }
+            Event::ImportStarted { .. } => false,
             Event::ZoomChanged { zoom_level } => {
                 self.zoom_level = *zoom_level;
                 true

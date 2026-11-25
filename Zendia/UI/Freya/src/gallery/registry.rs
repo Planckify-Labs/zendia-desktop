@@ -989,6 +989,100 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "onboarding",
+        title: "Onboarding",
+        phase: 10,
+        icon: "sparkles",
+        summary: "Full-window native onboarding across all seven pages, Living Emblem mascot, 2D scenes, mid-transition motion, and procedural audio.",
+        states: &[
+            GalleryStateSpec {
+                id: "start",
+                label: "Start",
+                description: "Living Emblem start page with Voronoi mascot in NORMAL pose and six interactive mode pills.",
+            },
+            GalleryStateSpec {
+                id: "start-explorer",
+                label: "Start · Blue",
+                description: "Start page with the EXPLORER mode pill picked and the Living Emblem morphed into blue.",
+            },
+            GalleryStateSpec {
+                id: "keys",
+                label: "01 Keys",
+                description: "Keys chapter with standard shortcuts selected and dimmed keycap bar.",
+            },
+            GalleryStateSpec {
+                id: "keys-vim-on",
+                label: "01 Vim On",
+                description: "Keys chapter with Vim mode enabled, active Which-Key popup, mascot statusline, and tactile keycap bar.",
+            },
+            GalleryStateSpec {
+                id: "agents",
+                label: "02 Agent",
+                description: "Agent chapter with Claude Code selected, installed list, Cursor CLI install hint, and live agent dock preview.",
+            },
+            GalleryStateSpec {
+                id: "agents-codex",
+                label: "02 Codex",
+                description: "Agent chapter switched to Codex with teal agent dock, tab ring, and cursor preview.",
+            },
+            GalleryStateSpec {
+                id: "shield-off",
+                label: "03 Shield Off",
+                description: "Shield chapter with ad blocking turned off showing banner and popup ads landing over the page.",
+            },
+            GalleryStateSpec {
+                id: "shield-on",
+                label: "03 Shield On",
+                description: "Shield chapter with uBlock Origin enabled showing the yellow visor shield and barrier deflecting ads.",
+            },
+            GalleryStateSpec {
+                id: "move-in",
+                label: "04 Move in",
+                description: "Move in chapter with Start fresh, Google search, and Leave links as they are.",
+            },
+            GalleryStateSpec {
+                id: "move-in-import",
+                label: "04 Import",
+                description: "Move in chapter importing Chrome's Work profile with the curved transfer arc and bookmark/history/key tokens.",
+            },
+            GalleryStateSpec {
+                id: "move-in-search",
+                label: "04 Search",
+                description: "Move in chapter focused on DuckDuckGo with the floating Zen pill address bar preview.",
+            },
+            GalleryStateSpec {
+                id: "move-in-default",
+                label: "04 Default",
+                description: "Move in chapter set to Open in Zendia with a link flying from another app into Zendia.",
+            },
+            GalleryStateSpec {
+                id: "apps",
+                label: "05 Apps",
+                description: "Apps chapter with the 3x3 Essential app picker grid and empty sidebar preview slots.",
+            },
+            GalleryStateSpec {
+                id: "apps-selected",
+                label: "05 Pinned",
+                description: "Apps chapter with Obsidian, Discord, GitHub, and Figma pinned into the sidebar preview.",
+            },
+            GalleryStateSpec {
+                id: "go",
+                label: "06 Go",
+                description: "Go finale with standard shortcuts, Claude Code, and Ads allowed summary chips.",
+            },
+            GalleryStateSpec {
+                id: "go-configured",
+                label: "06 Full",
+                description: "Go finale reflecting Vim keys on, Codex, uBlock shield on, 4 pinned apps, and the Vim shortcut hint card.",
+            },
+            GalleryStateSpec {
+                id: "transition",
+                label: "Transition",
+                description: "Chapter step mid-transition (45% directional slide) with the companion mascot mid-jelly morph.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.
@@ -1289,6 +1383,19 @@ fn format_command_detail(command: &Command) -> String {
             whole_page,
         } => format!("tab={tab_id:?} whole_page={whole_page} rect={rect:?}"),
         Command::RegionCancel => "cancelled".to_string(),
+        Command::OnboardingGoto { page } => format!("page={}", page.as_str()),
+        Command::OnboardingSetVim { enabled }
+        | Command::OnboardingSetShield { enabled }
+        | Command::OnboardingSetDefaultBrowser { enabled }
+        | Command::ShieldSetEnabled { enabled }
+        | Command::ImportSetDefaultBrowser { enabled } => format!("enabled={enabled}"),
+        Command::OnboardingSetAgent { agent_id } => format!("agent={agent_id}"),
+        Command::OnboardingSetImport { source_key, profile_id } => {
+            format!("source={source_key:?} profile={profile_id:?}")
+        }
+        Command::OnboardingSetSearchEngine { name } => format!("engine={name}"),
+        Command::OnboardingToggleEssential { url } => url.clone(),
+        Command::ImportStart { source_key, profile_id } => format!("source={source_key} profile={profile_id:?}"),
         Command::Custom { args, .. } => {
             if args.is_empty() {
                 "no args".to_string()

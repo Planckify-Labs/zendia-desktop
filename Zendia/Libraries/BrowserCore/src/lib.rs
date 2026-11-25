@@ -27,6 +27,7 @@ pub mod markdown;
 pub mod media;
 pub mod menus;
 pub mod model;
+pub mod onboarding;
 pub mod picker;
 pub mod region;
 pub mod site_info;

@@ -1104,6 +1104,15 @@ pub fn builtin_palette_entries() -> Vec<PaletteEntry> {
             "webchat.toggle",
             Vec::new(),
         ),
+        palette_entry(
+            "zendia.palette.show_onboarding",
+            "Show onboarding",
+            "Open the first-run onboarding walkthrough",
+            "General",
+            "sparkles",
+            "onboarding.restart",
+            Vec::new(),
+        ),
     ]
 }
 

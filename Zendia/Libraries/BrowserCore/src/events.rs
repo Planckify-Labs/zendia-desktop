@@ -19,6 +19,7 @@ use crate::model::{
     ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings,
     WhichKeyState, WindowId,
 };
+use crate::onboarding::OnboardingState;
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
 use crate::site_info::SiteInfo;
@@ -209,6 +210,19 @@ pub enum Event {
     VimModeChanged {
         enabled: bool,
     },
+    /// First-run onboarding state or staged choices changed.
+    OnboardingChanged {
+        state: OnboardingState,
+    },
+    /// Built-in uBlock Origin ad shield was enabled or disabled.
+    ShieldChanged {
+        enabled: bool,
+    },
+    /// A browser data import was requested (stub-logged until migrators land).
+    ImportStarted {
+        source_key: String,
+        profile_id: Option<String>,
+    },
     ZoomChanged {
         zoom_level: f32,
     },
@@ -303,6 +317,10 @@ pub enum ViewRequest {
     LibraryMediaPreviewClose,
     /// Move the open media preview by `delta` items (`-1` previous, `+1` next).
     LibraryMediaPreviewStep { delta: i32 },
+    /// Open the full-window onboarding overlay in this window.
+    OnboardingOpen,
+    /// Close the onboarding overlay in this window.
+    OnboardingClose,
 }
 
 /// Returned when the core's event bus has been dropped.

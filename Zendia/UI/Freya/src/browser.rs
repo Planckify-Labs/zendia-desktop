@@ -21,6 +21,7 @@ use crate::ui::library::media_preview::{MediaPreviewOverlay, use_provide_media_p
 use crate::ui::library::sections::space_routing::use_provide_space_routing_view_state;
 use crate::ui::library::sections::spaces::use_provide_spaces_view_state;
 use crate::ui::library::use_provide_library_state;
+use crate::ui::onboarding::{OnboardingOverlay, handle_onboarding_key_down, use_provide_onboarding_state};
 use crate::ui::page::download_arc::{DownloadArcLayer, use_provide_download_arc};
 use crate::ui::page::{
     PageArea, PageStage, PageSurfaceContext, PaneMode, VimOverlayLayer, use_provide_keymap, use_provide_page_surfaces,
@@ -308,6 +309,9 @@ pub fn app() -> impl IntoElement {
         let stub = Arc::new(StubBackend::new_for_external_tabs());
         let adapter = Arc::new(HubTabAdapter::new(Arc::clone(&stub), device_pixel_ratio));
         stub.attach_tab_source(Arc::clone(&adapter) as Arc<dyn TabSource>);
+        let onboarding_profile = zendia_browser_core::onboarding::onboarding_profile_path()
+            .and_then(|path| zendia_browser_core::onboarding::load_profile_record_from(&path));
+        stub.apply_onboarding_profile(onboarding_profile);
         (stub, adapter)
     });
 
@@ -330,6 +334,15 @@ pub fn app() -> impl IntoElement {
     let library_routing_state = use_provide_space_routing_view_state();
     let media_preview_state = use_provide_media_preview_state();
     let webchat_views = use_provide_webchat_views(Some(Arc::clone(&hub_adapter)));
+    let onboarding_state = use_provide_onboarding_state(false);
+    use_hook({
+        let stub_core = Arc::clone(&stub_core);
+        move || {
+            if !stub_core.model().onboarding.seen {
+                onboarding_state.open();
+            }
+        }
+    });
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -362,6 +375,11 @@ pub fn app() -> impl IntoElement {
             }
             CoreEvent::ModeChanged { .. } | CoreEvent::WhichKeyChanged { .. } | CoreEvent::VimModeChanged { .. } => {
                 vim_statusline_state.close_all_keymaps();
+            }
+            CoreEvent::OnboardingChanged { state } => {
+                if let Some(path) = zendia_browser_core::onboarding::onboarding_profile_path() {
+                    let _ = zendia_browser_core::onboarding::save_profile_record_to(&path, &state.to_profile_record());
+                }
             }
             CoreEvent::ViewRequested { request, .. } => match request {
                 ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
@@ -477,6 +495,17 @@ pub fn app() -> impl IntoElement {
                         webchat_views.navigate_home(site);
                     }
                 }
+                ViewRequest::OnboardingOpen => {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    vim_picker_state.close();
+                    region_picker_state.stop();
+                    onboarding_state.open();
+                }
+                ViewRequest::OnboardingClose => {
+                    onboarding_state.close();
+                }
             },
             _ => {}
         }
@@ -547,6 +576,10 @@ pub fn app() -> impl IntoElement {
         let keymap = keymap.clone();
         move |e: Event<KeyboardEventData>| {
             track_modifiers(true, &e);
+            if onboarding_state.is_open() {
+                let _ = handle_onboarding_key_down(&e, &core, &onboarding_state);
+                return;
+            }
             // While the floating address bar is open, let Ctrl+N / Ctrl+P navigate its list instead of triggering
             // window.new / page.print.
             if address_bar_state.is_open()
@@ -631,4 +664,5 @@ pub fn app() -> impl IntoElement {
         .child(VimPickerOverlay)
         .child(MediaPreviewOverlay)
         .child(DownloadArcLayer { pinned_progress: None })
+        .child(OnboardingOverlay)
 }
