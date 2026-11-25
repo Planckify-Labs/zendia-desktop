@@ -9,6 +9,7 @@
 //! follow-scroll jump pill, composer with attachments & media compatibility warnings, model card, and instructions.
 
 use crate::ui::agent::confirm_card::AgentConfirmCard;
+use crate::ui::agent::follow::{ConversationFollow, JumpToLatest, use_conversation_follow};
 use crate::ui::agent::instructions::AgentInstructionsPage;
 use crate::ui::agent::markdown::{MarkdownView, copy_to_clipboard};
 use crate::ui::agent::model_card::{AgentModelCard, short_model_name};
@@ -34,8 +35,8 @@ use zendia_browser_core::agent::{
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::contributions::{SidePanelId, SidePanelLayout};
 use zendia_browser_core::model::{
-    AgentId, Conversation, ConversationStatus, ModelEffort, ModelId, ModelInfo, ServiceId, ServiceStatus, StepKind,
-    StepStatus,
+    AgentId, Conversation, ConversationId, ConversationStatus, ModelEffort, ModelId, ModelInfo, ServiceId,
+    ServiceStatus, StepId, StepKind, StepStatus,
 };
 
 const WEBCHAT_PANEL_ID: &str = "zendia.webchat";
@@ -67,15 +68,15 @@ impl Component for AgentPanel {
         let core = use_core();
         let theme = use_theme();
         let dock_state = try_use_dock_state();
-        let mut scroll_controller = use_scroll_controller(ScrollConfig::default);
+        let scroll_controller = use_scroll_controller(ScrollConfig::default);
         let composer_a11y_id = use_a11y();
         let fallback_composer = use_state(String::new);
         let composer_text = dock_state.map(|ds| ds.composer_text).unwrap_or(fallback_composer);
         let expanded_groups = use_state(HashSet::<u64>::new);
         let copied_step = use_state(|| None::<u64>);
         let mut agent_picker_open = use_state(|| false);
-        let mut away_from_bottom = use_state(|| false);
-        let mut last_step_count = use_state(|| 0usize);
+        let mut follow = use_conversation_follow(scroll_controller);
+        let mut last_shown = use_state(|| (None::<ConversationId>, None::<StepId>));
 
         let (
             active_tab_id,
@@ -168,23 +169,37 @@ impl Component for AgentPanel {
             )
         };
 
-        // Mark unseen reply as seen when the panel is open and showing that conversation.
-        if let Some(conv) = &active_conv
-            && conv.unseen
-        {
-            core.invoke_or_log(Command::AgentMarkSeen {
-                conversation_id: conv.id,
-            });
-        }
-
-        // Auto-follow scroll when new steps arrive and user hasn't scrolled up.
-        let step_count = active_conv.as_ref().map(|c| c.steps.len()).unwrap_or(0);
-        if *last_step_count.peek() != step_count {
-            last_step_count.set(step_count);
-            if !*away_from_bottom.peek() {
-                scroll_controller.scroll_to(ScrollPosition::End, Direction::Vertical);
+        // A reply finished while the panel was closed is seen once the panel shows it.
+        let unseen_conversation = active_conv.as_ref().filter(|conv| conv.unseen).map(|conv| conv.id);
+        use_side_effect_with_deps(&unseen_conversation, {
+            let core = core.clone();
+            move |conversation: &Option<ConversationId>| {
+                if let Some(conversation_id) = *conversation {
+                    core.invoke_or_log(Command::AgentMarkSeen { conversation_id });
+                }
             }
-        }
+        });
+
+        // Another conversation starts at its end; a newly sent request glides to the top once it is laid out.
+        let shown = (
+            active_conv.as_ref().map(|conv| conv.id),
+            active_conv.as_ref().and_then(|conv| {
+                conv.steps
+                    .iter()
+                    .rev()
+                    .find(|step| step.kind == StepKind::UserPrompt)
+                    .map(|step| step.id)
+            }),
+        );
+        use_side_effect_with_deps(&shown, move |shown: &(Option<ConversationId>, Option<StepId>)| {
+            let previous = *last_shown.peek();
+            if previous.0 != shown.0 {
+                follow.reset();
+            } else if previous.1 != shown.1 && shown.1.is_some() {
+                follow.request_glide();
+            }
+            last_shown.set(*shown);
+        });
 
         let theme_accent = theme.color(ThemeRole::Accent);
         let border_col = theme.color(ThemeRole::BorderSubtle);
@@ -563,7 +578,9 @@ impl Component for AgentPanel {
                 &theme,
                 expanded_groups,
                 copied_step,
+                follow,
             );
+            let room = *follow.room.read();
 
             let scroll_view = ScrollView::new_controlled(scroll_controller)
                 .width(Size::fill())
@@ -573,65 +590,24 @@ impl Component for AgentPanel {
                         .width(Size::fill())
                         .padding(Gaps::new(12.0, 14.0, 14.0, 14.0))
                         .spacing(12.0)
-                        .on_wheel(move |_| {
-                            let pos = scroll_controller.position();
-                            away_from_bottom.set_if_modified(pos.y < -120.0);
+                        .on_wheel(move |_| follow.release())
+                        .on_sized(move |e: Event<SizedEventData>| {
+                            follow.content_sized(e.area.min_y(), e.area.height());
                         })
                         .children(trace_items)
                         .maybe_child((conv.status == ConversationStatus::Working).then(|| {
                             let seed = seed_of(&format!("{}:{}", conv.id.0, conv.steps.len()));
                             let word = working_word(seed, conv.elapsed_secs);
                             WorkingRow::new(word, conv.elapsed_secs, agent_accent)
-                        })),
+                        }))
+                        .child(rect().width(Size::fill()).height(Size::px(room))),
                 );
-
-            let show_jump = *away_from_bottom.read();
-            let jump_pill = show_jump.then(|| {
-                rect()
-                    .position(Position::new_absolute().bottom(10.0).left(0.0))
-                    .width(Size::percent(100.0))
-                    .direction(Direction::Horizontal)
-                    .main_align(Alignment::center())
-                    .child(
-                        rect()
-                            .a11y_role(AccessibilityRole::Button)
-                            .a11y_alt("Jump to latest")
-                            .direction(Direction::Horizontal)
-                            .cross_align(Alignment::center())
-                            .spacing(5.0)
-                            .height(Size::px(26.0))
-                            .padding(Gaps::new(0.0, 11.0, 0.0, 9.0))
-                            .corner_radius(CornerRadius::new_all(999.0))
-                            .background(theme.color(ThemeRole::SurfaceRaised))
-                            .border(
-                                Border::new()
-                                    .width(1.0)
-                                    .alignment(BorderAlignment::Inner)
-                                    .fill(border_col),
-                            )
-                            .shadow(theme.shadows.card.to_shadow())
-                            .cursor(CursorIcon::Pointer)
-                            .on_press(move |e: Event<PressEventData>| {
-                                e.stop_propagation();
-                                away_from_bottom.set(false);
-                                scroll_controller.scroll_to(ScrollPosition::End, Direction::Vertical);
-                            })
-                            .child(Icon::new("arrow-down").size(11.0).role(ThemeRole::Text))
-                            .child(
-                                label()
-                                    .text("Jump to latest")
-                                    .font_size(11.0)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .color(theme.color(ThemeRole::Text)),
-                            ),
-                    )
-            });
 
             rect()
                 .width(Size::fill())
                 .height(Size::flex(1.0))
                 .child(scroll_view)
-                .maybe_child(jump_pill)
+                .child(JumpToLatest::new(follow))
                 .into_element()
         };
 
@@ -1320,9 +1296,15 @@ fn render_conversation_steps(
     theme: &crate::ui::theme::ResolvedTheme,
     mut expanded_groups: State<HashSet<u64>>,
     mut copied_step: State<Option<u64>>,
+    mut follow: ConversationFollow,
 ) -> Vec<Element> {
     let mut elements = Vec::new();
     let steps = &conv.steps;
+    let latest_prompt = steps
+        .iter()
+        .rev()
+        .find(|step| step.kind == StepKind::UserPrompt)
+        .map(|step| step.id);
     let mut i = 0;
 
     let bubble_bg = theme
@@ -1479,12 +1461,18 @@ fn render_conversation_steps(
                     row
                 });
 
+                let is_latest_prompt = latest_prompt == Some(step.id);
                 elements.push(
                     rect()
                         .width(Size::fill())
                         .direction(Direction::Horizontal)
                         .main_align(Alignment::end())
                         .opacity(if step.steer.is_some() { 0.72 } else { 1.0 })
+                        .on_sized(move |e: Event<SizedEventData>| {
+                            if is_latest_prompt {
+                                follow.prompt_sized(e.area.min_y());
+                            }
+                        })
                         .child(
                             rect()
                                 .max_width(Size::percent(86.0))

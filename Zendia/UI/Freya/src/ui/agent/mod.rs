@@ -9,6 +9,7 @@
 
 pub mod agents_panel;
 pub mod confirm_card;
+pub mod follow;
 pub mod instructions;
 pub mod markdown;
 pub mod model_card;
