@@ -46,6 +46,10 @@ pub struct SplitGroupId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DownloadId(pub u64);
 
+/// Stable identifier for an item in the library's Media section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LibraryMediaId(pub u64);
+
 /// Stable identifier for a browsing history entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HistoryEntryId(pub u64);
@@ -280,6 +284,13 @@ pub struct Download {
     pub bytes_received: u64,
     pub total_bytes: Option<u64>,
     pub status: DownloadStatus,
+    pub target_path: Option<String>,
+    pub speed_bytes_per_sec: Option<u64>,
+    pub updated_at_unix: u64,
+    pub file_exists: bool,
+    pub open_when_done: bool,
+    /// Whether the stub backend should advance this download on `download.tick`.
+    pub simulated: bool,
 }
 
 /// A visited page recorded in browsing history.
@@ -756,6 +767,9 @@ pub struct BrowserModel {
     pub folders: Vec<Folder>,
     pub split_groups: Vec<SplitGroup>,
     pub downloads: Vec<Download>,
+    pub library_media_enabled: bool,
+    pub library_media: Vec<crate::library_media::LibraryMediaItem>,
+    pub library_media_folders: Vec<String>,
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub search_engine: SearchEngine,
@@ -1280,6 +1294,34 @@ impl BrowserModel {
             Event::DownloadStarted { download } => {
                 self.downloads.retain(|item| item.id != download.id);
                 self.downloads.push(download.clone());
+                true
+            }
+            Event::DownloadUpdated { download } => {
+                if let Some(existing) = self.downloads.iter_mut().find(|item| item.id == download.id) {
+                    *existing = download.clone();
+                } else {
+                    self.downloads.push(download.clone());
+                }
+                true
+            }
+            Event::DownloadRemoved { download_id } => {
+                let before = self.downloads.len();
+                self.downloads.retain(|item| item.id != *download_id);
+                self.downloads.len() != before
+            }
+            Event::DownloadsClearedFinished => {
+                let before = self.downloads.len();
+                self.downloads.retain(|item| !crate::downloads::is_finished(item));
+                self.downloads.len() != before
+            }
+            Event::LibraryMediaChanged {
+                enabled,
+                items,
+                folders,
+            } => {
+                self.library_media_enabled = *enabled;
+                self.library_media = items.clone();
+                self.library_media_folders = folders.clone();
                 true
             }
             Event::ModeChanged { mode } => {

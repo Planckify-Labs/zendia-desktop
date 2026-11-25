@@ -10,9 +10,7 @@ use super::{StubBackend, StubState};
 use crate::commands::{Command, CommandError, CommandResult};
 use crate::events::{Event, ViewRequest};
 use crate::media::{self, MediaControl};
-use crate::model::{
-    Download, DownloadId, DownloadStatus, MediaSessionId, SpaceId, SplitDirection, SplitGroup, SplitGroupId, TabId,
-};
+use crate::model::{MediaSessionId, SpaceId, SplitDirection, SplitGroup, SplitGroupId, TabId};
 use crate::split::{self, DropZone, Glance, MAX_SPLIT_PANES};
 use crate::tab_source::TabSource;
 use crate::toasts::{self, DEFAULT_TOAST_TIMEOUT_MS, Toast, ToastAction, ToastId};
@@ -174,24 +172,7 @@ impl StubBackend {
                 self.bus.publish(Event::LayoutSettingsChanged { layout });
                 Ok(())
             }
-            Command::DebugSampleDownload => {
-                let download = {
-                    let mut state = self.lock();
-                    let id = DownloadId(state.model.downloads.iter().map(|d| d.id.0).max().unwrap_or(0) + 1);
-                    let download = Download {
-                        id,
-                        filename: format!("zendia-sample-{}.zip", id.0),
-                        url: "https://example.org/zendia-sample.zip".to_string(),
-                        bytes_received: 0,
-                        total_bytes: Some(4_200_000),
-                        status: DownloadStatus::InProgress,
-                    };
-                    state.model.downloads.push(download.clone());
-                    download
-                };
-                self.bus.publish(Event::DownloadStarted { download });
-                Ok(())
-            }
+            Command::DebugSampleDownload => self.start_sample_download(),
             Command::DebugSampleMedia => {
                 let sessions = {
                     let mut state = self.lock();

@@ -847,6 +847,50 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "library-media",
+        title: "Library · Downloads & Media",
+        phase: 9,
+        icon: "downloads",
+        summary: "Library Downloads (empty, mixed states, filtered), Media opt-in and local thumbnail grid, and the full-size Media Preview overlay.",
+        states: &[
+            GalleryStateSpec {
+                id: "downloads-empty",
+                label: "Downloads · Empty",
+                description: "Library open on Downloads with no downloads present.",
+            },
+            GalleryStateSpec {
+                id: "downloads-mixed",
+                label: "Downloads · Mixed",
+                description: "Day-grouped downloads showing in-progress, paused, completed image thumbnail, completed PDF, failed, cancelled, and missing file states.",
+            },
+            GalleryStateSpec {
+                id: "downloads-filtered",
+                label: "Downloads · Filtered",
+                description: "Downloads filtered by the search query \"nightly\" matching both URL and filename.",
+            },
+            GalleryStateSpec {
+                id: "media-empty",
+                label: "Media · Empty",
+                description: "Media section opt-in card ('Your Media in the Library') floating over the tiled skeleton backdrop.",
+            },
+            GalleryStateSpec {
+                id: "media-grid",
+                label: "Media · Grid",
+                description: "3-column grid of local PNG image thumbnails and a video tile with play badge and duration pill.",
+            },
+            GalleryStateSpec {
+                id: "media-preview",
+                label: "Media · Preview",
+                description: "Full-size media preview overlay open on a local PNG image at POPUP_OVERLAY_LEVEL.",
+            },
+            GalleryStateSpec {
+                id: "media-preview-next",
+                label: "Media · Preview (Next)",
+                description: "Media preview stepped forward with the right arrow onto the video item.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.

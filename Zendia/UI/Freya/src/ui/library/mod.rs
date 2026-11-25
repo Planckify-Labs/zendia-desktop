@@ -14,6 +14,7 @@
 //! seam: sections register the rows a cursor can walk, and wrap each row in [`nav::LibraryCursorRing`].
 //! [`search::LibrarySearchBar`] is the search box and filter button that History and Downloads share.
 
+pub mod media_preview;
 pub mod nav;
 pub mod search;
 pub mod sections;
