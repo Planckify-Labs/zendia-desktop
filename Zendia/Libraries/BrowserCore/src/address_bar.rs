@@ -1084,7 +1084,7 @@ pub fn builtin_palette_entries() -> Vec<PaletteEntry> {
             "Tabs",
             "plus",
             "tab.new",
-            vec![("activate".to_string(), "true".to_string())],
+            Vec::new(),
         ),
         palette_entry(
             "zendia.palette.toggle_chat",
@@ -1092,8 +1092,8 @@ pub fn builtin_palette_entries() -> Vec<PaletteEntry> {
             "Open or close the active agent conversation",
             "Agents",
             "chat",
-            "panel.toggle",
-            vec![("panel_id".to_string(), "zendia.agent".to_string())],
+            "agent.toggle",
+            Vec::new(),
         ),
         palette_entry(
             "zendia.palette.toggle_webchat",
@@ -1101,8 +1101,8 @@ pub fn builtin_palette_entries() -> Vec<PaletteEntry> {
             "Open ChatGPT, Gemini, or another chat site",
             "Web chat",
             "webchat",
-            "panel.toggle",
-            vec![("panel_id".to_string(), "zendia.webchat".to_string())],
+            "webchat.toggle",
+            Vec::new(),
         ),
     ]
 }
@@ -1230,6 +1230,16 @@ mod tests {
     use super::*;
     use crate::commands::builtin_command_descriptors;
     use crate::stub::sample_model;
+
+    #[test]
+    fn palette_lists_each_title_once() {
+        let model = sample_model(true);
+        let items = query_palette(&model, &builtin_command_descriptors(), "", None);
+        let mut seen = std::collections::HashSet::new();
+        for item in &items {
+            assert!(seen.insert(item.title.clone()), "`{}` is listed twice", item.title);
+        }
+    }
 
     #[test]
     fn classifies_urls_and_searches() {
