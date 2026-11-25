@@ -20,6 +20,7 @@ use crate::model::{
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
 use crate::site_info::SiteInfo;
+use crate::space_routing::{SpaceRouteId, SpaceRoutingSettings};
 use crate::split::Glance;
 use crate::toasts::{Toast, ToastId};
 use std::collections::BTreeMap;
@@ -47,6 +48,9 @@ pub enum Event {
     },
     SpacesUpdated {
         spaces: Vec<Space>,
+    },
+    SpaceRoutingChanged {
+        settings: SpaceRoutingSettings,
     },
     TabsReordered {
         tabs: Vec<Tab>,
@@ -266,6 +270,12 @@ pub enum ViewRequest {
     LibraryOpen { section: Option<LibrarySection> },
     /// Close the library.
     LibraryClose,
+    /// Start renaming a space inline in the library's Spaces section.
+    SpaceRename { space_id: SpaceId },
+    /// Open the icon picker for a space in the library's Spaces section.
+    SpaceIconPicker { space_id: SpaceId },
+    /// Open the edit form for a routing rule in the library's Space routing section.
+    SpaceRoutingEdit { rule_id: SpaceRouteId },
 }
 
 /// Returned when the core's event bus has been dropped.

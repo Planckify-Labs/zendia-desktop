@@ -14,6 +14,7 @@ pub mod icons;
 pub mod keymap;
 pub mod kit;
 pub mod layouts;
+pub mod library_spaces;
 pub mod menus;
 pub mod page;
 pub mod sidebar;
@@ -115,6 +116,9 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
             .key(state_id)
             .into_element(),
         "webchat" => webchat_panel::WebChatSection::new(state_id, Arc::clone(gallery_core))
+            .key(state_id)
+            .into_element(),
+        "library-spaces" => library_spaces::LibrarySpacesSection::new(state_id, Arc::clone(gallery_core))
             .key(state_id)
             .into_element(),
         other => rect()

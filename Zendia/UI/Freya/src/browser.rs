@@ -17,6 +17,8 @@ use crate::ui::chrome::menus::{
 };
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::use_provide_core_with_observer;
+use crate::ui::library::sections::space_routing::use_provide_space_routing_view_state;
+use crate::ui::library::sections::spaces::use_provide_spaces_view_state;
 use crate::ui::library::use_provide_library_state;
 use crate::ui::page::download_arc::{DownloadArcLayer, use_provide_download_arc};
 use crate::ui::page::{
@@ -323,6 +325,8 @@ pub fn app() -> impl IntoElement {
     let region_picker_state = use_provide_region_picker_state();
     let mut dock_state = use_provide_dock_state();
     let library_state = use_provide_library_state();
+    let library_spaces_state = use_provide_spaces_view_state();
+    let library_routing_state = use_provide_space_routing_view_state();
     let webchat_views = use_provide_webchat_views(Some(Arc::clone(&hub_adapter)));
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
@@ -360,6 +364,19 @@ pub fn app() -> impl IntoElement {
             CoreEvent::ViewRequested { request, .. } => match request {
                 ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
                     library_state.handle_view_request(request);
+                }
+                ViewRequest::SpaceRename { space_id } => {
+                    if let Some(space) = stub_core.model().space(*space_id) {
+                        library_spaces_state.start_rename(*space_id, space.name.clone());
+                    }
+                }
+                ViewRequest::SpaceIconPicker { space_id } => {
+                    library_spaces_state.open_icon_picker(*space_id, None);
+                }
+                ViewRequest::SpaceRoutingEdit { rule_id } => {
+                    if let Some(rule) = stub_core.model().space_routing.rules.iter().find(|r| r.id == *rule_id) {
+                        library_routing_state.start_edit(rule);
+                    }
                 }
                 ViewRequest::LocationFocus => {
                     menu_state.close_all();
@@ -539,6 +556,7 @@ pub fn app() -> impl IntoElement {
             }
             if !address_bar_state.is_open()
                 && !sidebar_state.is_renaming()
+                && !library_spaces_state.is_renaming()
                 && !dock_state.captures_text_input()
                 && crate::ui::vim::handle_focus_key_down(&e, &core)
             {
