@@ -12,6 +12,7 @@
 use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, ToolbarArea, ToolbarPlacementRules};
 use crate::events::Event;
+use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::site_info::{SiteExtension, SiteInfo, origin_for_url};
 use crate::split::Glance;
@@ -664,6 +665,7 @@ pub struct BrowserModel {
     pub which_key: Option<WhichKeyState>,
     pub statusline: StatuslineSettings,
     pub statusline_announcement: Option<StatuslineAnnouncement>,
+    pub focus: FocusState,
     pub theme: ThemeSettings,
     pub layout: LayoutSettings,
     pub vim_mode_enabled: bool,
@@ -1091,6 +1093,10 @@ impl BrowserModel {
             }
             Event::StatuslineAnnouncementChanged { announcement } => {
                 self.statusline_announcement = announcement.clone();
+                true
+            }
+            Event::FocusChanged { focus } => {
+                self.focus = focus.clone();
                 true
             }
             Event::ConversationUpdated { conversation } => {

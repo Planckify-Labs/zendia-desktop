@@ -74,6 +74,11 @@ impl SidebarViewState {
         folder.set(Some(folder_id));
     }
 
+    /// Whether an inline tab or folder rename field is currently active.
+    pub fn is_renaming(&self) -> bool {
+        self.renaming_tab.peek().is_some() || self.renaming_folder.peek().is_some()
+    }
+
     /// Cancels any active inline tab or folder rename without invoking a core command.
     pub fn cancel_rename(&self) {
         let mut tab = self.renaming_tab;

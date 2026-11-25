@@ -162,6 +162,12 @@ impl App for GalleryApp {
                 {
                     return;
                 }
+                if !address_bar_state.is_open()
+                    && !sidebar_state.is_renaming()
+                    && crate::ui::vim::handle_focus_key_down(&e, &core)
+                {
+                    return;
+                }
                 let _ = keymap.handle_global_key_down(&e, &core);
             }
         };

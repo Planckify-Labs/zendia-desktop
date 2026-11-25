@@ -8,6 +8,7 @@
 
 use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, SidePanelId};
+use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::model::{
     Bookmark, Conversation, Download, Essential, Folder, FolderId, InputMode, LayoutSettings, MediaSession,
@@ -148,6 +149,9 @@ pub enum Event {
     },
     StatuslineAnnouncementChanged {
         announcement: Option<StatuslineAnnouncement>,
+    },
+    FocusChanged {
+        focus: FocusState,
     },
     ConversationUpdated {
         conversation: Conversation,

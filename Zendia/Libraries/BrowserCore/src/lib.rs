@@ -16,6 +16,7 @@
 pub mod address_bar;
 pub mod commands;
 pub mod events;
+pub mod focus;
 pub mod input_state;
 pub mod media;
 pub mod menus;

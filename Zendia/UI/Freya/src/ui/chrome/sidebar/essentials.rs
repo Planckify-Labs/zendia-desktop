@@ -13,8 +13,11 @@ use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
 use crate::ui::kit::icons::prepared_icon_bytes;
 use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, use_theme};
+use crate::ui::vim::explorer::{apply_explorer_background, apply_explorer_border};
+use crate::ui::vim::hints::hint_badge_for_row;
 use freya::prelude::*;
 use zendia_browser_core::commands::Command;
+use zendia_browser_core::focus::FocusTarget;
 use zendia_browser_core::model::{Tab, TabId, TabMoveTarget};
 
 /// Height of an essential icon tile in expanded sidebar mode.
@@ -216,10 +219,24 @@ impl Component for EssentialTile {
         } else {
             Size::flex(1.0)
         };
-        let tile_height = if self.collapsed {
-            Size::px(36.0)
-        } else {
-            Size::px(ESSENTIAL_TILE_HEIGHT)
+        let tile_height_px = if self.collapsed { 36.0 } else { ESSENTIAL_TILE_HEIGHT };
+        let tile_height = Size::px(tile_height_px);
+        let focus_target = FocusTarget::Essential(tab_id);
+        let (tile_bg, tile_border_style, hint_badge) = {
+            let model = core.model().read();
+            let base_border = Border::new()
+                .width(if is_drop_target || focus() == Focus::Keyboard {
+                    1.5
+                } else {
+                    1.0
+                })
+                .alignment(BorderAlignment::Inner)
+                .fill(tile_border);
+            (
+                apply_explorer_background(tile_bg, &model, &focus_target, &theme),
+                apply_explorer_border(base_border, &model, &focus_target, &theme),
+                hint_badge_for_row(&model, &focus_target, tile_height_px, &theme),
+            )
         };
 
         let tile = rect()
@@ -231,16 +248,7 @@ impl Component for EssentialTile {
             .height(tile_height)
             .corner_radius(CornerRadius::new_all(ESSENTIAL_TILE_RADIUS))
             .background(tile_bg)
-            .border(
-                Border::new()
-                    .width(if is_drop_target || focus() == Focus::Keyboard {
-                        1.5
-                    } else {
-                        1.0
-                    })
-                    .alignment(BorderAlignment::Inner)
-                    .fill(tile_border),
-            )
+            .border(tile_border_style)
             .center()
             .cursor(CursorIcon::Pointer)
             .on_pointer_enter(move |_| {
@@ -260,7 +268,8 @@ impl Component for EssentialTile {
                     .background(badge_bg)
                     .center()
                     .child(icon_el),
-            );
+            )
+            .maybe_child(hint_badge);
 
         if self.active && theme.scheme == ResolvedScheme::Light {
             tile.shadow(

@@ -202,3 +202,24 @@ description = "Unsplit tabs"
 keys = ["<C-A-s>", "<D-A-s>"]
 command = "layout.compact_reveal_sidebar"
 description = "Show the sidebar in compact mode"
+
+# Vim focus surfaces (active only when vim mode is enabled).
+[[bindings]]
+keys = ["<C-A-e>", "<D-A-e>"]
+command = "explorer.open"
+description = "Focus sidebar explorer (vim mode)"
+
+[[bindings]]
+keys = ["<C-A-f>", "<D-A-f>"]
+command = "explorer.pick"
+description = "Show sidebar hint labels (vim mode)"
+
+[[bindings]]
+keys = ["<C-A-t>", "<D-A-t>"]
+command = "toolbar.focus_open"
+description = "Focus toolbar (vim mode)"
+
+[[bindings]]
+keys = ["<C-A-w>", "<D-A-w>"]
+command = "window_mode.open"
+description = "Enter window mode (vim mode)"

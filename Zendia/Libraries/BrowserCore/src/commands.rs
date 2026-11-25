@@ -7,6 +7,7 @@
 //! Named, typed browser commands and their descriptors for keymaps and the command palette.
 
 use crate::contributions::SidePanelId;
+use crate::focus::{FocusDirection, PaneDirection};
 use crate::input_state::StatuslineShow;
 use crate::media::MediaControl;
 use crate::model::{
@@ -398,6 +399,39 @@ pub enum Command {
     WhichKeyShowAll,
     /// Dismisses the active which-key popup.
     WhichKeyHide,
+    /// Focuses the sidebar explorer in vim mode.
+    ExplorerOpen,
+    ExplorerClose,
+    ExplorerMove {
+        direction: FocusDirection,
+    },
+    ExplorerSelect {
+        range: bool,
+    },
+    ExplorerActivate,
+    ExplorerPick,
+    FocusHintInput {
+        key: String,
+    },
+    FocusHintCancel,
+    /// Focuses toolbar buttons and the address bar in vim mode.
+    ToolbarFocusOpen,
+    ToolbarFocusClose,
+    ToolbarFocusMove {
+        direction: FocusDirection,
+    },
+    ToolbarFocusActivate,
+    /// Enters window mode over split panes in vim mode.
+    WindowModeOpen,
+    WindowModeClose,
+    WindowModeFocusPane {
+        pane: usize,
+    },
+    WindowModeMovePane {
+        direction: PaneDirection,
+    },
+    WindowModeCarryToggle,
+    WindowModeDrop,
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -580,6 +614,24 @@ impl Command {
             Self::StatuslineClearAnnouncement => "statusline.clear_announcement",
             Self::WhichKeyShowAll => "which_key.show_all",
             Self::WhichKeyHide => "which_key.hide",
+            Self::ExplorerOpen => "explorer.open",
+            Self::ExplorerClose => "explorer.close",
+            Self::ExplorerMove { .. } => "explorer.move",
+            Self::ExplorerSelect { .. } => "explorer.select",
+            Self::ExplorerActivate => "explorer.activate",
+            Self::ExplorerPick => "explorer.pick",
+            Self::FocusHintInput { .. } => "focus.hint_input",
+            Self::FocusHintCancel => "focus.hint_cancel",
+            Self::ToolbarFocusOpen => "toolbar.focus_open",
+            Self::ToolbarFocusClose => "toolbar.focus_close",
+            Self::ToolbarFocusMove { .. } => "toolbar.focus_move",
+            Self::ToolbarFocusActivate => "toolbar.focus_activate",
+            Self::WindowModeOpen => "window_mode.open",
+            Self::WindowModeClose => "window_mode.close",
+            Self::WindowModeFocusPane { .. } => "window_mode.focus_pane",
+            Self::WindowModeMovePane { .. } => "window_mode.move_pane",
+            Self::WindowModeCarryToggle => "window_mode.carry_toggle",
+            Self::WindowModeDrop => "window_mode.drop",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -1097,6 +1149,51 @@ impl Command {
             "statusline.clear_announcement" => Ok(Self::StatuslineClearAnnouncement),
             "which_key.show_all" => Ok(Self::WhichKeyShowAll),
             "which_key.hide" => Ok(Self::WhichKeyHide),
+            "explorer.open" => Ok(Self::ExplorerOpen),
+            "explorer.close" => Ok(Self::ExplorerClose),
+            "explorer.move" => {
+                let raw = parse_required_string_arg(name, args, "direction")?;
+                let direction = FocusDirection::parse(&raw).ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("unknown focus direction `{raw}`"),
+                })?;
+                Ok(Self::ExplorerMove { direction })
+            }
+            "explorer.select" => Ok(Self::ExplorerSelect {
+                range: parse_bool_arg(name, args, "range", false)?,
+            }),
+            "explorer.activate" => Ok(Self::ExplorerActivate),
+            "explorer.pick" => Ok(Self::ExplorerPick),
+            "focus.hint_input" => Ok(Self::FocusHintInput {
+                key: parse_required_string_arg(name, args, "key")?,
+            }),
+            "focus.hint_cancel" => Ok(Self::FocusHintCancel),
+            "toolbar.focus_open" => Ok(Self::ToolbarFocusOpen),
+            "toolbar.focus_close" => Ok(Self::ToolbarFocusClose),
+            "toolbar.focus_move" => {
+                let raw = parse_required_string_arg(name, args, "direction")?;
+                let direction = FocusDirection::parse(&raw).ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("unknown focus direction `{raw}`"),
+                })?;
+                Ok(Self::ToolbarFocusMove { direction })
+            }
+            "toolbar.focus_activate" => Ok(Self::ToolbarFocusActivate),
+            "window_mode.open" => Ok(Self::WindowModeOpen),
+            "window_mode.close" => Ok(Self::WindowModeClose),
+            "window_mode.focus_pane" => Ok(Self::WindowModeFocusPane {
+                pane: parse_required_u64_arg(name, args, "pane")? as usize,
+            }),
+            "window_mode.move_pane" => {
+                let raw = parse_required_string_arg(name, args, "direction")?;
+                let direction = PaneDirection::parse(&raw).ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("unknown pane direction `{raw}`"),
+                })?;
+                Ok(Self::WindowModeMovePane { direction })
+            }
+            "window_mode.carry_toggle" => Ok(Self::WindowModeCarryToggle),
+            "window_mode.drop" => Ok(Self::WindowModeDrop),
             _ => Ok(Self::Custom {
                 name: name.to_string(),
                 args: args.to_vec(),
@@ -2284,6 +2381,144 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             name: "which_key.hide".to_string(),
             title: "Hide Which-Key Popup".to_string(),
             description: "Close the active which-key popup".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "explorer.open".to_string(),
+            title: "Open Explorer Focus".to_string(),
+            description: "Focus sidebar rows in vim explorer mode".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "explorer.close".to_string(),
+            title: "Close Explorer Focus".to_string(),
+            description: "Leave vim explorer mode".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "explorer.move".to_string(),
+            title: "Move Explorer Cursor".to_string(),
+            description: "Move the explorer cursor over sidebar rows".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "direction",
+                ArgumentType::String,
+                true,
+                "Direction to move (next, previous, first, last, into, out)",
+            )],
+        },
+        CommandDescriptor {
+            name: "explorer.select".to_string(),
+            title: "Select Explorer Row".to_string(),
+            description: "Toggle selection on the focused sidebar row or start visual range selection".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "range",
+                ArgumentType::Bool,
+                false,
+                "Toggle visual range selection instead of picking one row",
+            )],
+        },
+        CommandDescriptor {
+            name: "explorer.activate".to_string(),
+            title: "Activate Explorer Row".to_string(),
+            description: "Activate the focused tab or toggle the focused folder".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "explorer.pick".to_string(),
+            title: "Show Sidebar Hint Labels".to_string(),
+            description: "Display jump hint labels over visible sidebar rows".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "focus.hint_input".to_string(),
+            title: "Type Hint Label Key".to_string(),
+            description: "Narrow or jump to an active hint label".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "key",
+                ArgumentType::String,
+                true,
+                "Hint character typed",
+            )],
+        },
+        CommandDescriptor {
+            name: "focus.hint_cancel".to_string(),
+            title: "Cancel Hint Labels".to_string(),
+            description: "Dismiss active hint labels".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "toolbar.focus_open".to_string(),
+            title: "Open Toolbar Focus".to_string(),
+            description: "Focus toolbar buttons and the address bar in vim toolbar mode".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "toolbar.focus_close".to_string(),
+            title: "Close Toolbar Focus".to_string(),
+            description: "Leave vim toolbar mode".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "toolbar.focus_move".to_string(),
+            title: "Move Toolbar Cursor".to_string(),
+            description: "Move the toolbar cursor across toolbar buttons and the address bar".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "direction",
+                ArgumentType::String,
+                true,
+                "Direction to move (next, previous, first, last)",
+            )],
+        },
+        CommandDescriptor {
+            name: "toolbar.focus_activate".to_string(),
+            title: "Activate Toolbar Item".to_string(),
+            description: "Press the focused toolbar button or open the address bar".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "window_mode.open".to_string(),
+            title: "Open Window Mode".to_string(),
+            description: "Enter vim window mode over split panes".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "window_mode.close".to_string(),
+            title: "Close Window Mode".to_string(),
+            description: "Leave vim window mode".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "window_mode.focus_pane".to_string(),
+            title: "Focus Split Pane by Number".to_string(),
+            description: "Focus a numbered pane in the active split group".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "pane",
+                ArgumentType::Integer,
+                true,
+                "1-based pane number",
+            )],
+        },
+        CommandDescriptor {
+            name: "window_mode.move_pane".to_string(),
+            title: "Move Split Pane".to_string(),
+            description: "Move the active pane or carry landing target in a direction".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "direction",
+                ArgumentType::String,
+                true,
+                "Direction to move (left, right, up, down)",
+            )],
+        },
+        CommandDescriptor {
+            name: "window_mode.carry_toggle".to_string(),
+            title: "Toggle Window Mode Carry".to_string(),
+            description: "Pick up or release the active pane to show landing labels".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "window_mode.drop".to_string(),
+            title: "Drop Carried Pane".to_string(),
+            description: "Land the carried pane at the selected target".to_string(),
             arguments: Vec::new(),
         },
     ]
