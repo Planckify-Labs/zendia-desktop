@@ -28,8 +28,7 @@ use crate::ui::kit::{DeclaredUi, Icon};
 use crate::ui::theme::{CHROME_OVERLAY_LEVEL, ResolvedScheme, ThemeRole, motion, use_theme};
 use freya::prelude::*;
 use zendia_browser_core::agent::{
-    AGENT_PANEL_ID, PANEL_DEFAULT_WIDTH, PANEL_MAX_WIDTH, SidePanelPrefs, format_elapsed_clock,
-    resolve_panel_layout_with_min,
+    AGENT_PANEL_ID, PANEL_DEFAULT_WIDTH, PANEL_MAX_WIDTH, SidePanelPrefs, format_elapsed_clock, resolve_stacked_panels,
 };
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::contributions::{ContributionSource, SidePanelId, SidePanelLayout, SidePanelSide};
@@ -58,6 +57,8 @@ pub struct ResolvedDockPanel {
     pub width: f32,
     pub split_fell_back: bool,
     pub focused: bool,
+    /// How far a floating or sliding panel sits from its side's edge, past the panels already docked there.
+    pub offset: f32,
 }
 
 impl ResolvedDockPanel {
@@ -66,26 +67,25 @@ impl ResolvedDockPanel {
     pub fn overlay_clearance(&self) -> f32 {
         match self.effective_layout {
             SidePanelLayout::Split => 0.0,
-            SidePanelLayout::Float => self.width + FLOAT_INSET,
-            SidePanelLayout::Slide => self.width,
+            SidePanelLayout::Float => self.offset + self.width + FLOAT_INSET,
+            SidePanelLayout::Slide => self.offset + self.width,
         }
     }
 }
 
-/// Computes the resolved dock placement for the currently open side panel, if any.
-pub fn resolve_active_dock_panel(
+/// Resolves where every open side panel sits, in the order they were opened. Any number can be open at once, each
+/// with its own layout and side, as each of the fork's dock frames is independent.
+pub fn resolve_open_dock_panels(
     model: &zendia_browser_core::model::BrowserModel,
     dock_state: DockHostState,
     stage_width: f32,
-) -> Option<ResolvedDockPanel> {
-    let open_id = dock_state.open_panels.read().last().cloned()?;
-    let mut prefs = model.panel_prefs(&open_id);
-    let min_w = SidePanelPrefs::min_width_for(open_id.as_str());
-    if let Some(preview_w) = dock_state.preview_width_for(&open_id) {
-        prefs.width = preview_w.clamp(min_w, PANEL_MAX_WIDTH);
+) -> Vec<ResolvedDockPanel> {
+    let open_ids = dock_state.open_panels.read().clone();
+    if open_ids.is_empty() {
+        return Vec::new();
     }
 
-    // Compute narrowest pane fraction if the active tab is inside a split view group.
+    // The narrowest pane's share of the page when the active tab sits in a split view group.
     let narrowest_pane_fraction = model
         .active_tab
         .and_then(|tab_id| model.split_group_for_tab(tab_id))
@@ -105,18 +105,34 @@ pub fn resolve_active_dock_panel(
         })
         .unwrap_or(1.0);
 
+    let inputs: Vec<(SidePanelPrefs, f32)> = open_ids
+        .iter()
+        .map(|id| {
+            let mut prefs = model.panel_prefs(id);
+            let min_w = SidePanelPrefs::min_width_for(id.as_str());
+            if let Some(preview_w) = dock_state.preview_width_for(id) {
+                prefs.width = preview_w.clamp(min_w, PANEL_MAX_WIDTH);
+            }
+            (prefs, min_w)
+        })
+        .collect();
     let effective_stage = if stage_width > 200.0 { stage_width } else { 1120.0 };
-    let resolved = resolve_panel_layout_with_min(prefs, effective_stage, narrowest_pane_fraction, min_w);
-    let focused = dock_state.is_focused(&open_id);
+    let stacked = resolve_stacked_panels(&inputs, effective_stage, narrowest_pane_fraction);
 
-    Some(ResolvedDockPanel {
-        panel_id: open_id,
-        prefs,
-        effective_layout: resolved.effective_layout,
-        width: resolved.width,
-        split_fell_back: resolved.fell_back,
-        focused,
-    })
+    open_ids
+        .into_iter()
+        .zip(inputs)
+        .zip(stacked)
+        .map(|((panel_id, (prefs, _)), placed)| ResolvedDockPanel {
+            focused: dock_state.is_focused(&panel_id),
+            panel_id,
+            prefs,
+            effective_layout: placed.layout.effective_layout,
+            width: placed.layout.width,
+            split_fell_back: placed.layout.fell_back,
+            offset: placed.offset,
+        })
+        .collect()
 }
 
 /// Resolves the brand accent color for the currently active agent (falling back to the theme's accent).
@@ -542,9 +558,10 @@ impl Component for DockFrame {
         match layout {
             SidePanelLayout::Split => card,
             SidePanelLayout::Float => {
+                let inset = FLOAT_INSET + self.resolved.offset;
                 let pos = match side {
-                    SidePanelSide::Right => Position::new_absolute().right(FLOAT_INSET).top(FLOAT_INSET),
-                    SidePanelSide::Left => Position::new_absolute().left(FLOAT_INSET).top(FLOAT_INSET),
+                    SidePanelSide::Right => Position::new_absolute().right(inset).top(FLOAT_INSET),
+                    SidePanelSide::Left => Position::new_absolute().left(inset).top(FLOAT_INSET),
                 };
                 rect()
                     .layer(Layer::OverlayLevel(CHROME_OVERLAY_LEVEL))
@@ -554,9 +571,10 @@ impl Component for DockFrame {
                     .child(card)
             }
             SidePanelLayout::Slide => {
+                let inset = self.resolved.offset;
                 let pos = match side {
-                    SidePanelSide::Right => Position::new_absolute().right(0.0).top(0.0),
-                    SidePanelSide::Left => Position::new_absolute().left(0.0).top(0.0),
+                    SidePanelSide::Right => Position::new_absolute().right(inset).top(0.0),
+                    SidePanelSide::Left => Position::new_absolute().left(inset).top(0.0),
                 };
                 rect()
                     .layer(Layer::OverlayLevel(CHROME_OVERLAY_LEVEL))
@@ -1094,7 +1112,7 @@ impl Component for DockSlideHandle {
         let dock_state = try_use_dock_state();
         let mut hovered = use_state(|| false);
 
-        if dock_state.is_some_and(|ds| ds.is_agent_open() || ds.is_agents_open()) {
+        if dock_state.is_some_and(|ds| ds.is_agent_open()) {
             return rect().width(Size::px(0.0)).height(Size::px(0.0));
         }
 

@@ -806,6 +806,16 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
                 label: "AgentServer Down",
                 description: "AgentServer unavailable banner in the Agents panel while preserving the roster.",
             },
+            GalleryStateSpec {
+                id: "with-agent-panel",
+                label: "Beside Agent Panel",
+                description: "Agents panel on the left and the agent panel on the right, open at the same time.",
+            },
+            GalleryStateSpec {
+                id: "both-right",
+                label: "Both Right",
+                description: "Agents panel swapped to the right, sitting next to the agent panel instead of over it.",
+            },
         ],
     },
     GallerySectionSpec {

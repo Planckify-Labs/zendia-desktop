@@ -16,7 +16,7 @@ use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
 use std::sync::Arc;
 use zendia_browser_core::BrowserCore;
-use zendia_browser_core::agent::{AGENTS_PANEL_DEFAULT_WIDTH, AGENTS_PANEL_ID, SidePanelPrefs};
+use zendia_browser_core::agent::{AGENT_PANEL_ID, AGENTS_PANEL_DEFAULT_WIDTH, AGENTS_PANEL_ID, SidePanelPrefs};
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::contributions::{SidePanelId, SidePanelLayout, SidePanelSide};
 use zendia_browser_core::model::{
@@ -311,9 +311,21 @@ impl Component for AgentsPanelSection {
             let mut fixture = build_fixture_model(&self.state_id);
             fixture.theme = self.gallery_core.model().theme;
             self.gallery_core.stub().replace_model(fixture);
+            let beside_agent_panel = matches!(self.state_id.as_str(), "with-agent-panel" | "both-right");
+            if self.state_id == "both-right" {
+                core.invoke_or_log(Command::PanelSetSide {
+                    panel_id: SidePanelId::new(AGENTS_PANEL_ID),
+                    side: SidePanelSide::Right,
+                });
+            }
             if let Some(mut ds) = dock_state {
                 let agents_id = SidePanelId::new(AGENTS_PANEL_ID);
-                ds.open_panels.set(vec![agents_id.clone()]);
+                let mut open = Vec::new();
+                if beside_agent_panel {
+                    open.push(SidePanelId::new(AGENT_PANEL_ID));
+                }
+                open.push(agents_id.clone());
+                ds.open_panels.set(open);
                 ds.focused_panel.set(Some(agents_id));
                 ds.model_card_open.set(false);
                 ds.instructions_open.set(false);

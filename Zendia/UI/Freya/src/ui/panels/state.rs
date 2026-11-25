@@ -120,9 +120,9 @@ impl DockHostState {
         }
     }
 
-    /// Toggles `panel_id` open or closed, returning `true` if it is now open.
+    /// Toggles `panel_id` open or closed, returning `true` if it is now open. Other open panels stay open beside it.
     pub fn toggle_panel(&mut self, panel_id: SidePanelId) -> bool {
-        if self.open_panels.peek().last() == Some(&panel_id) {
+        if self.open_panels.peek().contains(&panel_id) {
             self.close_panel(&panel_id);
             false
         } else {

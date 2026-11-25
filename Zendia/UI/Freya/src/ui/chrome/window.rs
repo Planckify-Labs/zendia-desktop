@@ -23,7 +23,7 @@ use crate::ui::chrome::toolbar::TopToolbar;
 use crate::ui::core_view::use_core;
 use crate::ui::library::{LIBRARY_SLIDE_DURATION, Library, try_use_library_state};
 use crate::ui::panels::{
-    DockClosedPill, DockFrame, DockSlideHandle, SPLIT_GAP, active_agent_accent, resolve_active_dock_panel,
+    DockClosedPill, DockFrame, DockSlideHandle, SPLIT_GAP, active_agent_accent, resolve_open_dock_panels,
     try_use_dock_state,
 };
 use crate::ui::spaces::{SpaceSwipeMode, SpaceTextureOverlay, try_use_space_editing_state};
@@ -122,11 +122,13 @@ impl Component for WindowShell {
             toolbar_items,
             vim_mode_enabled,
             input_mode,
-            resolved_panel,
+            resolved_panels,
             agent_accent,
         ) = {
             let model = core.model().read();
-            let resolved_panel = dock_state.and_then(|ds| resolve_active_dock_panel(&model, ds, *stage_width.read()));
+            let resolved_panels = dock_state
+                .map(|ds| resolve_open_dock_panels(&model, ds, *stage_width.read()))
+                .unwrap_or_default();
             let accent = active_agent_accent(&model, &theme);
             let active_space = model.active_space().cloned();
             let active_app = active_space
@@ -149,7 +151,7 @@ impl Component for WindowShell {
                 model.contributions.toolbar_items.clone(),
                 model.vim_mode_enabled,
                 model.input_mode,
-                resolved_panel,
+                resolved_panels,
                 accent,
             )
         };
@@ -157,14 +159,14 @@ impl Component for WindowShell {
         // Keep the vim statusline clear of any floating/sliding side panel on its resting corner edge.
         if let Some(sl) = statusline_state {
             let statusline_on_right = layout.sidebar_side == SidebarSide::Left;
-            let clearance = resolved_panel
-                .as_ref()
+            let clearance = resolved_panels
+                .iter()
                 .filter(|p| {
                     let panel_on_right = p.prefs.side == SidePanelSide::Right;
                     panel_on_right == statusline_on_right
                 })
                 .map(|p| p.overlay_clearance())
-                .unwrap_or(0.0);
+                .fold(0.0, f32::max);
             sl.set_side_panel_clearance(clearance);
         }
 
@@ -321,25 +323,33 @@ impl Component for WindowShell {
             }
         };
 
-        let split_panel = resolved_panel
-            .as_ref()
-            .filter(|p| p.effective_layout == SidePanelLayout::Split)
-            .cloned();
-        let overlay_panel = resolved_panel
-            .as_ref()
-            .filter(|p| p.effective_layout != SidePanelLayout::Split)
-            .cloned();
-
-        let split_panel_el = split_panel.as_ref().map(|p| {
+        // Every open panel shows at once. Split panels sit in the row beside the page, the first opened nearest the
+        // window edge; floating and sliding panels float over the stage at their side.
+        let split_el = |p: &crate::ui::panels::ResolvedDockPanel| {
             DockFrame::new(p.clone(), agent_accent, build_panel_content(p))
                 .key(format!("split:{}", p.panel_id.0))
                 .into_element()
-        });
-        let overlay_panel_el = overlay_panel.as_ref().map(|p| {
-            DockFrame::new(p.clone(), agent_accent, build_panel_content(p))
-                .key(format!("overlay:{}", p.panel_id.0))
-                .into_element()
-        });
+        };
+        let split_left: Vec<Element> = resolved_panels
+            .iter()
+            .filter(|p| p.effective_layout == SidePanelLayout::Split && p.prefs.side == SidePanelSide::Left)
+            .map(split_el)
+            .collect();
+        let split_right: Vec<Element> = resolved_panels
+            .iter()
+            .rev()
+            .filter(|p| p.effective_layout == SidePanelLayout::Split && p.prefs.side == SidePanelSide::Right)
+            .map(split_el)
+            .collect();
+        let overlay_panel_els: Vec<Element> = resolved_panels
+            .iter()
+            .filter(|p| p.effective_layout != SidePanelLayout::Split)
+            .map(|p| {
+                DockFrame::new(p.clone(), agent_accent, build_panel_content(p))
+                    .key(format!("overlay:{}", p.panel_id.0))
+                    .into_element()
+            })
+            .collect();
 
         let page_card_inner = rect()
             .width(Size::flex(1.0))
@@ -370,29 +380,15 @@ impl Component for WindowShell {
             })
             .child(self.page.clone());
 
-        let stage_inner = match (split_panel.as_ref().map(|p| p.prefs.side), split_panel_el) {
-            (Some(SidePanelSide::Left), Some(panel_el)) => rect()
-                .width(Size::fill())
-                .height(Size::fill())
-                .direction(Direction::Horizontal)
-                .content(Content::Flex)
-                .spacing(SPLIT_GAP)
-                .child(panel_el)
-                .child(page_card_inner),
-            (Some(SidePanelSide::Right), Some(panel_el)) => rect()
-                .width(Size::fill())
-                .height(Size::fill())
-                .direction(Direction::Horizontal)
-                .content(Content::Flex)
-                .spacing(SPLIT_GAP)
-                .child(page_card_inner)
-                .child(panel_el),
-            _ => rect()
-                .width(Size::fill())
-                .height(Size::fill())
-                .content(Content::Flex)
-                .child(page_card_inner),
-        };
+        let stage_inner = rect()
+            .width(Size::fill())
+            .height(Size::fill())
+            .direction(Direction::Horizontal)
+            .content(Content::Flex)
+            .spacing(SPLIT_GAP)
+            .children(split_left)
+            .child(page_card_inner)
+            .children(split_right);
 
         let page_card = rect()
             .width(Size::flex(1.0))
@@ -412,7 +408,7 @@ impl Component for WindowShell {
                     .width(Size::fill())
                     .height(Size::fill())
                     .child(stage_inner)
-                    .maybe_child(overlay_panel_el)
+                    .children(overlay_panel_els)
                     .maybe_child(dock_state.is_some().then_some(DockClosedPill))
                     .maybe_child(dock_state.is_some().then_some(DockSlideHandle)),
             );

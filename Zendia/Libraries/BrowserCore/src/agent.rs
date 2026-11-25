@@ -162,6 +162,89 @@ pub fn resolve_panel_layout_with_min(
     }
 }
 
+/// Where one of several open side panels sits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StackedPanelLayout {
+    pub layout: ResolvedPanelLayout,
+    /// How far a floating or sliding panel sits from its side's edge of the stage: past the split panels on that
+    /// side and the floating panels opened before it there. Always 0 for split panels, which take their place in
+    /// the row beside the page.
+    pub offset: f32,
+}
+
+/// Resolves every open side panel, in the order they were opened, so any number can be open at once, as each of the
+/// fork's dock frames is independent. `panels` holds each panel's preferences and minimum width.
+///
+/// Split panels share the stage with the page: each is resolved against the room left after the split panels
+/// before it, so a later one falls back to floating when the page would get too narrow. Panels on the same side sit
+/// next to each other instead of on top of each other.
+pub fn resolve_stacked_panels(
+    panels: &[(SidePanelPrefs, f32)],
+    stage_width: f32,
+    min_pane_share: f32,
+) -> Vec<StackedPanelLayout> {
+    let mut remaining = stage_width;
+    let mut layouts: Vec<ResolvedPanelLayout> = panels
+        .iter()
+        .map(|(prefs, min_width)| {
+            let resolved = resolve_panel_layout_with_min(*prefs, remaining, min_pane_share, *min_width);
+            if resolved.effective_layout == SidePanelLayout::Split && remaining.is_finite() {
+                remaining -= resolved.width + PANEL_SPLIT_GAP;
+            }
+            resolved
+        })
+        .collect();
+
+    // Floating panels on both sides share what the split panels leave. When they do not all fit, each gives up
+    // width in proportion to what it has above its minimum; only a window too narrow for every minimum overlaps them.
+    if remaining.is_finite() {
+        let floating: Vec<usize> = (0..layouts.len())
+            .filter(|&i| layouts[i].effective_layout != SidePanelLayout::Split)
+            .collect();
+        let needed: f32 = floating
+            .iter()
+            .map(|&i| layouts[i].width + PANEL_FLOAT_INSET)
+            .sum::<f32>()
+            + PANEL_FLOAT_INSET;
+        let excess = needed - remaining;
+        let slack: f32 = floating.iter().map(|&i| layouts[i].width - panels[i].1).sum();
+        if excess > 0.0 && slack > 0.0 {
+            let share = (excess / slack).min(1.0);
+            for &i in &floating {
+                let give = (layouts[i].width - panels[i].1) * share;
+                layouts[i].width = (layouts[i].width - give).floor();
+            }
+        }
+    }
+
+    let split_extent = |side: SidePanelSide| -> f32 {
+        panels
+            .iter()
+            .zip(&layouts)
+            .filter(|((prefs, _), layout)| prefs.side == side && layout.effective_layout == SidePanelLayout::Split)
+            .map(|(_, layout)| layout.width + PANEL_SPLIT_GAP)
+            .sum()
+    };
+    let split_extents = [split_extent(SidePanelSide::Left), split_extent(SidePanelSide::Right)];
+    let mut floating_extent = [0.0_f32; 2];
+    panels
+        .iter()
+        .zip(layouts)
+        .map(|((prefs, _), layout)| {
+            if layout.effective_layout == SidePanelLayout::Split {
+                return StackedPanelLayout { layout, offset: 0.0 };
+            }
+            let slot = match prefs.side {
+                SidePanelSide::Left => 0,
+                SidePanelSide::Right => 1,
+            };
+            let offset = split_extents[slot] + floating_extent[slot];
+            floating_extent[slot] += layout.width + PANEL_FLOAT_INSET;
+            StackedPanelLayout { layout, offset }
+        })
+        .collect()
+}
+
 /// One selectable context window size offered by a model in the model card.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextChoice {
@@ -832,6 +915,88 @@ pub fn agents_button_badge(model: &crate::model::BrowserModel) -> Option<crate::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn panel(side: SidePanelSide, layout: SidePanelLayout, width: f32) -> (SidePanelPrefs, f32) {
+        (
+            SidePanelPrefs {
+                side,
+                layout,
+                width,
+                ..SidePanelPrefs::default()
+            },
+            PANEL_MIN_WIDTH,
+        )
+    }
+
+    #[test]
+    fn panels_on_both_sides_open_together() {
+        let stacked = resolve_stacked_panels(
+            &[
+                panel(SidePanelSide::Right, SidePanelLayout::Float, 420.0),
+                panel(SidePanelSide::Left, SidePanelLayout::Float, 440.0),
+            ],
+            1400.0,
+            1.0,
+        );
+        assert_eq!(stacked.len(), 2);
+        assert_eq!(stacked[0].offset, 0.0);
+        assert_eq!(stacked[1].offset, 0.0);
+        assert_eq!(stacked[1].layout.width, 440.0);
+    }
+
+    #[test]
+    fn floating_panels_on_one_side_sit_next_to_each_other() {
+        let stacked = resolve_stacked_panels(
+            &[
+                panel(SidePanelSide::Right, SidePanelLayout::Split, 440.0),
+                panel(SidePanelSide::Right, SidePanelLayout::Float, 460.0),
+                panel(SidePanelSide::Right, SidePanelLayout::Float, 480.0),
+            ],
+            1800.0,
+            1.0,
+        );
+        assert_eq!(stacked[0].layout.effective_layout, SidePanelLayout::Split);
+        assert_eq!(stacked[1].offset, 440.0 + PANEL_SPLIT_GAP);
+        assert_eq!(stacked[2].offset, 440.0 + PANEL_SPLIT_GAP + 460.0 + PANEL_FLOAT_INSET);
+    }
+
+    #[test]
+    fn floating_panels_shrink_toward_their_minimum_to_fit_the_stage() {
+        let stacked = resolve_stacked_panels(
+            &[
+                panel(SidePanelSide::Left, SidePanelLayout::Float, 520.0),
+                panel(SidePanelSide::Right, SidePanelLayout::Float, 520.0),
+            ],
+            1000.0,
+            1.0,
+        );
+        let total: f32 = stacked.iter().map(|p| p.layout.width + PANEL_FLOAT_INSET).sum::<f32>() + PANEL_FLOAT_INSET;
+        assert!(total <= 1000.0, "{total}");
+        assert!(stacked.iter().all(|p| p.layout.width >= PANEL_MIN_WIDTH));
+
+        let roomy = resolve_stacked_panels(
+            &[panel(SidePanelSide::Left, SidePanelLayout::Float, 520.0)],
+            1600.0,
+            1.0,
+        );
+        assert_eq!(roomy[0].layout.width, 520.0);
+    }
+
+    #[test]
+    fn a_later_split_panel_floats_when_the_page_would_get_too_narrow() {
+        let stacked = resolve_stacked_panels(
+            &[
+                panel(SidePanelSide::Right, SidePanelLayout::Split, 420.0),
+                panel(SidePanelSide::Left, SidePanelLayout::Split, 420.0),
+            ],
+            1100.0,
+            1.0,
+        );
+        assert_eq!(stacked[0].layout.effective_layout, SidePanelLayout::Split);
+        assert!(stacked[1].layout.fell_back);
+        assert_eq!(stacked[1].layout.effective_layout, SidePanelLayout::Float);
+        assert_eq!(stacked[1].offset, 0.0);
+    }
 
     #[test]
     fn split_layout_falls_back_when_stage_is_too_narrow() {
