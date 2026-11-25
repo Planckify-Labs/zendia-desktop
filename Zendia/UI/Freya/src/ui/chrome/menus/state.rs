@@ -49,6 +49,8 @@ pub struct OpenContextMenu {
     pub position: (f32, f32),
     pub items: Vec<ResolvedMenuItem>,
     pub tab_id: Option<TabId>,
+    /// Id of a submenu entry to show open as the menu appears.
+    pub open_submenu: Option<String>,
 }
 
 /// Active HTML `<select>` dropdown popup state held by [`MenuViewState`].

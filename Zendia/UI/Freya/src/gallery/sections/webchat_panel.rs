@@ -119,6 +119,7 @@ impl Component for WebChatSection {
                         position: (310.0, 290.0),
                         items,
                         tab_id: active_tab,
+                        open_submenu: Some("zendia.tab.ask".to_string()),
                     });
                 } else {
                     ms.close_all();

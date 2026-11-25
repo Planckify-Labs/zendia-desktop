@@ -13,14 +13,20 @@ use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
 use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedTheme, ThemeRole, use_theme};
+use crate::ui::webchat::chat_site_logo;
 use freya::prelude::*;
 use zendia_browser_core::contributions::MenuEntryKind;
-use zendia_browser_core::menus::ResolvedMenuItem;
+use zendia_browser_core::menus::{ResolvedMenuItem, ask_site_pick, retarget_ask_menu};
+use zendia_browser_core::model::ChatSiteId;
 
 pub(crate) const CTX_MENU_MIN_WIDTH: f32 = 216.0;
 pub(crate) const CTX_MENU_MAX_WIDTH: f32 = 340.0;
 pub(crate) const CTX_MENU_ROW_HEIGHT: f32 = 26.0;
 pub(crate) const CTX_MENU_SEP_HEIGHT: f32 = 9.0;
+/// Height of the row of chat site logos at the top of an Ask submenu.
+const ASK_SITE_ROW_HEIGHT: f32 = 34.0;
+/// Width each logo takes in that row, spacing included.
+const ASK_SITE_BUTTON_STRIDE: f32 = 28.0;
 
 pub(crate) fn native_menu_bg(theme: &ResolvedTheme) -> Color {
     if theme.scheme.is_dark() {
@@ -44,7 +50,11 @@ pub(crate) fn native_menu_hover_bg(theme: &ResolvedTheme) -> Color {
 fn estimate_menu_size(items: &[ResolvedMenuItem]) -> (f32, f32) {
     let mut height = 10.0;
     let mut max_chars = 18usize;
-    for item in items {
+    let site_row_len = ask_site_row_len(items);
+    if site_row_len > 0 {
+        height += ASK_SITE_ROW_HEIGHT;
+    }
+    for item in &items[site_row_len..] {
         if item.is_separator() {
             height += CTX_MENU_SEP_HEIGHT;
         } else {
@@ -55,8 +65,16 @@ fn estimate_menu_size(items: &[ResolvedMenuItem]) -> (f32, f32) {
             max_chars = max_chars.max(item.label.chars().count() + extra);
         }
     }
-    let width = ((max_chars as f32) * 7.2 + 44.0).clamp(CTX_MENU_MIN_WIDTH, CTX_MENU_MAX_WIDTH);
+    let site_row_width = site_row_len as f32 * ASK_SITE_BUTTON_STRIDE + 16.0;
+    let width = ((max_chars as f32) * 7.2 + 44.0)
+        .max(site_row_width)
+        .clamp(CTX_MENU_MIN_WIDTH, CTX_MENU_MAX_WIDTH);
     (width, height)
+}
+
+/// Number of leading items that form an Ask submenu's row of chat sites.
+fn ask_site_row_len(items: &[ResolvedMenuItem]) -> usize {
+    items.iter().take_while(|item| ask_site_pick(item).is_some()).count()
 }
 
 fn row_offset(items: &[ResolvedMenuItem], target: usize) -> f32 {
@@ -87,6 +105,7 @@ pub struct ContextMenuOverlay;
 impl Component for ContextMenuOverlay {
     fn render(&self) -> impl IntoElement {
         let menu_state = use_menu_state();
+        let core = use_core();
         let Some(open) = menu_state.context_menu.read().clone() else {
             return rect().into_element();
         };
@@ -110,13 +129,32 @@ impl Component for ContextMenuOverlay {
                         menu_state.close_context_menu();
                     }),
             )
-            .child(
-                ContextMenuCard::new(open.items)
+            .child({
+                let mut card = ContextMenuCard::new(open.items)
                     .origin(origin)
                     .window_size(window_size)
                     .capture_global_keys(true)
-                    .on_close(move |_| menu_state.close_context_menu()),
-            )
+                    .on_close(move |_| menu_state.close_context_menu())
+                    .on_pick_site(move |site_id: ChatSiteId| {
+                        let site = core
+                            .model()
+                            .peek()
+                            .chat_sites
+                            .iter()
+                            .find(|site| site.id == site_id)
+                            .cloned();
+                        let mut context_menu = menu_state.context_menu;
+                        if let Some(site) = site
+                            && let Some(open) = context_menu.write().as_mut()
+                        {
+                            retarget_ask_menu(&mut open.items, &site);
+                        }
+                    });
+                if let Some(submenu) = open.open_submenu {
+                    card = card.initial_open_submenu(submenu);
+                }
+                card
+            })
             .into_element()
     }
 }
@@ -130,6 +168,7 @@ pub struct ContextMenuCard {
     initial_open_submenu: Option<String>,
     capture_global_keys: bool,
     on_close: Option<EventHandler<()>>,
+    on_pick_site: Option<EventHandler<ChatSiteId>>,
     key: DiffKey,
 }
 
@@ -148,6 +187,7 @@ impl ContextMenuCard {
             initial_open_submenu: None,
             capture_global_keys: false,
             on_close: None,
+            on_pick_site: None,
             key: DiffKey::None,
         }
     }
@@ -176,6 +216,12 @@ impl ContextMenuCard {
         self.on_close = Some(handler.into());
         self
     }
+
+    /// Called when a site in an Ask submenu's row of sites is picked. The menu stays open.
+    pub fn on_pick_site(mut self, handler: impl Into<EventHandler<ChatSiteId>>) -> Self {
+        self.on_pick_site = Some(handler.into());
+        self
+    }
 }
 
 impl Component for ContextMenuCard {
@@ -195,6 +241,7 @@ impl Component for ContextMenuCard {
         let items_for_keys = self.items.clone();
         let core_for_keys = core.clone();
         let on_close_keys = self.on_close.clone();
+        let on_pick_keys = self.on_pick_site.clone();
         let capture = self.capture_global_keys;
 
         let handle_key = move |e: Event<KeyboardEventData>| {
@@ -261,6 +308,12 @@ impl Component for ContextMenuCard {
                         && let Some(child) = parent.children.get(child_idx)
                         && child.enabled
                     {
+                        if let Some(site_id) = ask_site_pick(child) {
+                            if let Some(pick) = &on_pick_keys {
+                                pick.call(site_id);
+                            }
+                            return;
+                        }
                         invoke_menu_command(&core_for_keys, &child.command, &child.command_args);
                         if !child.keeps_menu_open
                             && let Some(close) = &on_close_keys
@@ -366,38 +419,53 @@ impl Component for ContextMenuCard {
             .filter(|(_, parent)| !parent.children.is_empty())
             .map(|(parent_idx, parent)| {
                 let (sub_w, sub_h) = estimate_menu_size(&parent.children);
-                let sub_gutter = menu_needs_gutter(&parent.children);
-                let sub_rows = parent.children.iter().enumerate().map(|(sub_idx, child)| {
-                    if child.is_separator() {
-                        return context_menu_separator(&theme, sub_idx);
-                    }
-                    let cmd = child.command.clone();
-                    let args = child.command_args.clone();
-                    let enabled = child.enabled;
-                    let keeps_open = child.keeps_menu_open;
-                    let core_sub = core.clone();
-                    let on_close_sub = self.on_close.clone();
-
-                    context_menu_row(
+                let site_row_len = ask_site_row_len(&parent.children);
+                let sub_gutter = menu_needs_gutter(&parent.children[site_row_len..]);
+                let site_row = (site_row_len > 0).then(|| {
+                    ask_site_row(
                         &theme,
-                        child,
-                        sub_idx,
-                        sub_gutter,
-                        cur_sub_active == Some(sub_idx),
-                        move |_| {
-                            sub_active_index.set(Some(sub_idx));
-                        },
-                        move |_| {
-                            if !enabled {
-                                return;
-                            }
-                            invoke_menu_command(&core_sub, &cmd, &args);
-                            if !keeps_open && let Some(close) = &on_close_sub {
-                                close.call(());
-                            }
-                        },
+                        &parent.children[..site_row_len],
+                        cur_sub_active,
+                        sub_active_index,
+                        self.on_pick_site.clone(),
                     )
                 });
+                let sub_rows = parent
+                    .children
+                    .iter()
+                    .enumerate()
+                    .skip(site_row_len)
+                    .map(|(sub_idx, child)| {
+                        if child.is_separator() {
+                            return context_menu_separator(&theme, sub_idx);
+                        }
+                        let cmd = child.command.clone();
+                        let args = child.command_args.clone();
+                        let enabled = child.enabled;
+                        let keeps_open = child.keeps_menu_open;
+                        let core_sub = core.clone();
+                        let on_close_sub = self.on_close.clone();
+
+                        context_menu_row(
+                            &theme,
+                            child,
+                            sub_idx,
+                            sub_gutter,
+                            cur_sub_active == Some(sub_idx),
+                            move |_| {
+                                sub_active_index.set(Some(sub_idx));
+                            },
+                            move |_| {
+                                if !enabled {
+                                    return;
+                                }
+                                invoke_menu_command(&core_sub, &cmd, &args);
+                                if !keeps_open && let Some(close) = &on_close_sub {
+                                    close.call(());
+                                }
+                            },
+                        )
+                    });
 
                 let card = rect()
                     .a11y_role(AccessibilityRole::Menu)
@@ -413,6 +481,7 @@ impl Component for ContextMenuCard {
                     )
                     .shadow(theme.shadows.card.to_shadow())
                     .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
+                    .maybe_child(site_row)
                     .children(sub_rows);
 
                 let y_off = row_offset(&self.items, parent_idx);
@@ -451,6 +520,72 @@ impl Component for ContextMenuCard {
     fn render_key(&self) -> DiffKey {
         self.key.clone().or(self.default_key())
     }
+}
+
+/// The row of chat site logos at the top of an Ask submenu. The checked site is the one the menu asks; picking another
+/// retargets the menu and keeps it open.
+fn ask_site_row(
+    theme: &ResolvedTheme,
+    picks: &[ResolvedMenuItem],
+    active: Option<usize>,
+    mut active_index: State<Option<usize>>,
+    on_pick: Option<EventHandler<ChatSiteId>>,
+) -> Element {
+    let buttons = picks.iter().enumerate().filter_map(|(idx, item)| {
+        let site_id = ask_site_pick(item)?;
+        let checked = matches!(item.kind, MenuEntryKind::Checkable { checked: true });
+        let background = if checked || active == Some(idx) {
+            native_menu_hover_bg(theme)
+        } else {
+            Color::TRANSPARENT
+        };
+        let border = if checked {
+            theme.color(ThemeRole::Accent)
+        } else {
+            Color::TRANSPARENT
+        };
+        let logo = chat_site_logo(
+            item.icon.as_deref().unwrap_or(site_id.0.as_str()),
+            15.0,
+            theme.color(ThemeRole::Text),
+        );
+        let on_pick = on_pick.clone();
+        Some(
+            rect()
+                .key(idx)
+                .a11y_role(AccessibilityRole::MenuItemRadio)
+                .a11y_alt(if checked {
+                    format!("{}, asked", item.label)
+                } else {
+                    item.label.clone()
+                })
+                .width(Size::px(ASK_SITE_BUTTON_STRIDE - 2.0))
+                .height(Size::px(ASK_SITE_BUTTON_STRIDE - 2.0))
+                .center()
+                .corner_radius(CornerRadius::new_all(5.0))
+                .background(background)
+                .border(Border::new().width(1.0).alignment(BorderAlignment::Inner).fill(border))
+                .cursor(CursorIcon::Pointer)
+                .on_pointer_enter(move |_| active_index.set(Some(idx)))
+                .on_press(move |_| {
+                    if let Some(pick) = &on_pick {
+                        pick.call(site_id.clone());
+                    }
+                })
+                .child(logo)
+                .into_element(),
+        )
+    });
+    rect()
+        .key("ask-sites")
+        .width(Size::fill())
+        .height(Size::px(ASK_SITE_ROW_HEIGHT))
+        .padding(Gaps::new(0.0, 4.0, 0.0, 4.0))
+        .spacing(2.0)
+        .direction(Direction::Horizontal)
+        .cross_align(Alignment::center())
+        .children(buttons)
+        .into_element()
 }
 
 pub(crate) fn context_menu_separator(theme: &ResolvedTheme, key: usize) -> Element {

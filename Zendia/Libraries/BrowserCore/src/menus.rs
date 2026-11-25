@@ -10,8 +10,8 @@
 //! All types and functions here are pure data and independent of any UI toolkit.
 
 use crate::contributions::{ContributionId, ContributionSource, MenuEntry, MenuEntryKind, MenuLocation};
-use crate::model::{BrowserModel, FolderId, SpaceId, TabId, TabKind};
-use std::collections::BTreeSet;
+use crate::model::{BrowserModel, ChatSite, ChatSiteId, FolderId, SpaceId, TabId, TabKind};
+use std::collections::{BTreeMap, BTreeSet};
 use zendia_keymap::{KeyModifiers, KeyTable};
 
 /// Built-in widget identifier for the App Menu's zoom controls row (`- 100% + | fullscreen`).
@@ -302,13 +302,17 @@ fn resolve_menu_level(
             seen_groups.insert(group.to_string());
         }
     }
-    let mut extra_groups: BTreeSet<&str> = BTreeSet::new();
+    // Groups the caller did not order come by their first entry's order, then by name.
+    let mut extra_groups: BTreeMap<&str, i32> = BTreeMap::new();
     for entry in &level_entries {
         if !seen_groups.contains(&entry.group) {
-            extra_groups.insert(entry.group.as_str());
+            let first = extra_groups.entry(entry.group.as_str()).or_insert(entry.order);
+            *first = (*first).min(entry.order);
         }
     }
-    for group in extra_groups {
+    let mut extra_groups: Vec<(&str, i32)> = extra_groups.into_iter().collect();
+    extra_groups.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+    for (group, _) in extra_groups {
         ordered_groups.push(group.to_string());
     }
 
@@ -732,23 +736,117 @@ pub fn builtin_app_menu_entries(vim_mode_enabled: bool) -> Vec<MenuEntry> {
     entries
 }
 
+/// Id of the tab context menu's Ask submenu.
+pub const TAB_ASK_MENU_ID: &str = "zendia.tab.ask";
+/// Id of the page context menu's Ask submenu.
+pub const PAGE_ASK_MENU_ID: &str = "zendia.page.ask";
+/// Group of the row of chat sites at the top of an Ask submenu.
+const ASK_SITES_GROUP: &str = "ask_sites";
+
+fn tab_ask_label(chat_site_name: &str) -> String {
+    format!("Ask {chat_site_name} About This Tab")
+}
+
+fn page_ask_label(chat_site_name: &str) -> String {
+    format!("Ask {chat_site_name}")
+}
+
+/// The row of chat sites at the top of an Ask submenu, the active one checked. Picking one points that open menu at
+/// the site without changing the web chat panel, so it is view state and runs no command. With fewer than two sites
+/// there is nothing to pick and no row.
+fn ask_site_entries(
+    ask_menu_id: &str,
+    location: MenuLocation,
+    chat_sites: &[ChatSite],
+    active_site_id: &str,
+) -> Vec<MenuEntry> {
+    if chat_sites.len() < 2 {
+        return Vec::new();
+    }
+    chat_sites
+        .iter()
+        .zip(0..)
+        .map(|(site, order)| MenuEntry {
+            command_args: vec![("site_id".to_string(), site.id.0.clone())],
+            kind: MenuEntryKind::Checkable {
+                checked: site.id.0 == active_site_id,
+            },
+            keeps_menu_open: true,
+            ..child_entry(
+                &format!("{ask_menu_id}.site.{}", site.id.0),
+                ask_menu_id,
+                location,
+                &site.name,
+                Some(&site.icon),
+                "",
+                ASK_SITES_GROUP,
+                order,
+            )
+        })
+        .collect()
+}
+
+/// Returns the chat site that `item` picks when it is in an Ask submenu's row of sites.
+pub fn ask_site_pick(item: &ResolvedMenuItem) -> Option<ChatSiteId> {
+    let in_row = [TAB_ASK_MENU_ID, PAGE_ASK_MENU_ID].iter().any(|menu_id| {
+        item.id
+            .as_str()
+            .strip_prefix(menu_id)
+            .is_some_and(|rest| rest.starts_with(".site."))
+    });
+    if !in_row {
+        return None;
+    }
+    item.command_args
+        .iter()
+        .find(|(key, _)| key == "site_id")
+        .map(|(_, value)| ChatSiteId::new(value.clone()))
+}
+
+/// Points the Ask submenus among `items` at `site`: relabels them, checks `site` in their row of sites and sends their
+/// prompts to it.
+pub fn retarget_ask_menu(items: &mut [ResolvedMenuItem], site: &ChatSite) {
+    for item in items {
+        item.label = match item.id.as_str() {
+            TAB_ASK_MENU_ID => tab_ask_label(&site.name),
+            PAGE_ASK_MENU_ID => page_ask_label(&site.name),
+            _ => continue,
+        };
+        for child in &mut item.children {
+            if let Some(picked) = ask_site_pick(child) {
+                child.kind = MenuEntryKind::Checkable {
+                    checked: picked == site.id,
+                };
+            } else if child.command == "webchat.ask" {
+                for (key, value) in &mut child.command_args {
+                    if key == "site_id" {
+                        *value = site.id.0.clone();
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Built-in tab context menu contributions matching Zendia's tab menu.
 pub fn builtin_tab_context_entries(chat_site_name: &str, essentials_count: usize) -> Vec<MenuEntry> {
-    builtin_tab_context_entries_for_site("chatgpt", chat_site_name, essentials_count)
+    builtin_tab_context_entries_for_site(&[], "chatgpt", chat_site_name, essentials_count)
 }
 
 /// Built-in tab context menu contributions targeting a specific active web chat site.
 pub fn builtin_tab_context_entries_for_site(
+    chat_sites: &[ChatSite],
     chat_site_id: &str,
     chat_site_name: &str,
     essentials_count: usize,
 ) -> Vec<MenuEntry> {
     let loc = MenuLocation::TabContext;
-    let ask_label = format!("Ask {chat_site_name} About This Tab");
+    let ask_label = tab_ask_label(chat_site_name);
 
-    vec![
+    let mut entries = ask_site_entries(TAB_ASK_MENU_ID, loc, chat_sites, chat_site_id);
+    entries.extend([
         // Group: zendia_ask
-        submenu_entry("zendia.tab.ask", loc, &ask_label, Some("sparkles"), "zendia_ask", 10),
+        submenu_entry(TAB_ASK_MENU_ID, loc, &ask_label, Some("sparkles"), "zendia_ask", 10),
         MenuEntry {
             command_args: vec![
                 ("site_id".to_string(), chat_site_id.to_string()),
@@ -829,7 +927,7 @@ pub fn builtin_tab_context_entries_for_site(
                 None,
                 "webchat.ask",
                 "all_sites",
-                10,
+                100,
             )
         },
         // Group: organize
@@ -1023,21 +1121,27 @@ pub fn builtin_tab_context_entries_for_site(
             "routing",
             10,
         ),
-    ]
+    ]);
+    entries
 }
 
 /// Built-in Zendia contributions injected into Ladybird's page context menus (Ask, Split View, Glance).
 pub fn builtin_page_context_entries(chat_site_name: &str) -> Vec<MenuEntry> {
-    builtin_page_context_entries_for_site("chatgpt", chat_site_name)
+    builtin_page_context_entries_for_site(&[], "chatgpt", chat_site_name)
 }
 
 /// Built-in Zendia page context menu contributions targeting a specific active web chat site.
-pub fn builtin_page_context_entries_for_site(chat_site_id: &str, chat_site_name: &str) -> Vec<MenuEntry> {
+pub fn builtin_page_context_entries_for_site(
+    chat_sites: &[ChatSite],
+    chat_site_id: &str,
+    chat_site_name: &str,
+) -> Vec<MenuEntry> {
     let loc = MenuLocation::PageContext;
-    let ask_label = format!("Ask {chat_site_name}");
+    let ask_label = page_ask_label(chat_site_name);
 
-    vec![
-        submenu_entry("zendia.page.ask", loc, &ask_label, Some("sparkles"), "zendia", 10),
+    let mut entries = ask_site_entries(PAGE_ASK_MENU_ID, loc, chat_sites, chat_site_id);
+    entries.extend([
+        submenu_entry(PAGE_ASK_MENU_ID, loc, &ask_label, Some("sparkles"), "zendia", 10),
         MenuEntry {
             command_args: vec![
                 ("site_id".to_string(), chat_site_id.to_string()),
@@ -1120,7 +1224,8 @@ pub fn builtin_page_context_entries_for_site(chat_site_id: &str, chat_site_name:
             "zendia",
             30,
         ),
-    ]
+    ]);
+    entries
 }
 
 /// Built-in folder context menu contributions matching Zen's folder actions menu.
@@ -1213,25 +1318,31 @@ pub fn builtin_space_context_entries() -> Vec<MenuEntry> {
 
 /// All built-in menu contributions registered by the browser core at startup.
 pub fn builtin_menu_entries(vim_mode_enabled: bool, chat_site_name: &str, essentials_count: usize) -> Vec<MenuEntry> {
-    builtin_menu_entries_for_site(vim_mode_enabled, "chatgpt", chat_site_name, essentials_count)
+    builtin_menu_entries_for_site(vim_mode_enabled, &[], "chatgpt", chat_site_name, essentials_count)
 }
 
-/// All built-in menu contributions targeting a specific active web chat site.
+/// All built-in menu contributions, with Ask menus that list `chat_sites` and target the active site.
 pub fn builtin_menu_entries_for_site(
     vim_mode_enabled: bool,
+    chat_sites: &[ChatSite],
     chat_site_id: &str,
     chat_site_name: &str,
     essentials_count: usize,
 ) -> Vec<MenuEntry> {
     let mut entries = builtin_app_menu_entries(vim_mode_enabled);
     entries.extend(builtin_tab_context_entries_for_site(
+        chat_sites,
         chat_site_id,
         chat_site_name,
         essentials_count,
     ));
     entries.extend(builtin_folder_context_entries());
     entries.extend(builtin_space_context_entries());
-    entries.extend(builtin_page_context_entries_for_site(chat_site_id, chat_site_name));
+    entries.extend(builtin_page_context_entries_for_site(
+        chat_sites,
+        chat_site_id,
+        chat_site_name,
+    ));
     entries
 }
 
@@ -2094,6 +2205,45 @@ pub struct SelectDropdownRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ask_submenu_starts_with_a_row_of_sites_that_retargets_it() {
+        let model = crate::stub::sample_model(true);
+        let tab_id = model.tabs[0].id;
+        let mut items = build_tab_context_menu(&model, tab_id, None);
+        let ask = items.iter().find(|item| item.id.as_str() == TAB_ASK_MENU_ID).unwrap();
+        assert_eq!(ask.label, "Ask ChatGPT About This Tab");
+
+        let row: Vec<ChatSiteId> = ask.children.iter().map_while(ask_site_pick).collect();
+        let site_ids: Vec<ChatSiteId> = model.chat_sites.iter().map(|site| site.id.clone()).collect();
+        assert_eq!(row, site_ids);
+        assert!(ask.children[row.len()].is_separator());
+        assert_eq!(
+            ask.children.last().map(|item| item.label.as_str()),
+            Some("Summarize Page in English: Every Site")
+        );
+
+        let claude = model.chat_sites.iter().find(|site| site.id.0 == "claude").unwrap();
+        retarget_ask_menu(&mut items, claude);
+        let ask = items.iter().find(|item| item.id.as_str() == TAB_ASK_MENU_ID).unwrap();
+        assert_eq!(ask.label, "Ask Claude About This Tab");
+        for child in &ask.children {
+            if let Some(site_id) = ask_site_pick(child) {
+                assert_eq!(
+                    child.kind,
+                    MenuEntryKind::Checkable {
+                        checked: site_id == claude.id
+                    }
+                );
+            } else if child.command == "webchat.ask" {
+                assert!(
+                    child
+                        .command_args
+                        .contains(&("site_id".to_string(), "claude".to_string()))
+                );
+            }
+        }
+    }
 
     fn labels(items: &[ResolvedMenuItem]) -> Vec<&str> {
         items

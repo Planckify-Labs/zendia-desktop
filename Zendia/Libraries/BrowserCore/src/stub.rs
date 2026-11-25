@@ -1727,8 +1727,13 @@ impl StubBackend {
                 .unwrap_or_else(|| "ChatGPT".to_string());
             let essentials_count = state.model.essentials.len();
             let vim_enabled = state.model.vim_mode_enabled;
-            state.model.contributions.menu_entries =
-                crate::menus::builtin_menu_entries_for_site(vim_enabled, &site_id_str, &site_name, essentials_count);
+            state.model.contributions.menu_entries = crate::menus::builtin_menu_entries_for_site(
+                vim_enabled,
+                &state.model.chat_sites,
+                &site_id_str,
+                &site_name,
+                essentials_count,
+            );
             (
                 state.model.chat_sites.clone(),
                 state.model.active_chat_site_id.clone(),
@@ -3633,6 +3638,16 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
 
     let chat_sites = crate::webchat::builtin_chat_sites();
     let active_chat_site_id = chat_sites.first().map(|site| site.id.clone());
+    let mut contributions = sample_contributions();
+    if let Some(active_site) = chat_sites.first() {
+        contributions.menu_entries = crate::menus::builtin_menu_entries_for_site(
+            false,
+            &chat_sites,
+            &active_site.id.0,
+            &active_site.name,
+            essentials.len(),
+        );
+    }
 
     let services = vec![
         ServiceState {
@@ -3692,7 +3707,7 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         show_essentials_promo: false,
         glance: None,
         toasts: Vec::new(),
-        contributions: sample_contributions(),
+        contributions,
         side_panel_prefs: BTreeMap::new(),
         agents,
         default_agent_id: Some(claude_agent),

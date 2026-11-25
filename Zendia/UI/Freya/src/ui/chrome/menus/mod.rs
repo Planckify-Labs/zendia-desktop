@@ -144,6 +144,7 @@ pub fn open_hub_context_menu(
             position: window_pos,
             items,
             tab_id,
+            open_submenu: None,
         });
     }
 }
@@ -221,6 +222,7 @@ pub fn open_tab_context_menu(menu_state: &MenuViewState, model: &BrowserModel, t
             position,
             items,
             tab_id: Some(tab_id),
+            open_submenu: None,
         });
     }
 }
@@ -239,6 +241,7 @@ pub fn open_folder_context_menu(
             position,
             items,
             tab_id: None,
+            open_submenu: None,
         });
     }
 }
@@ -257,6 +260,7 @@ pub fn open_space_context_menu(
             position,
             items,
             tab_id: None,
+            open_submenu: None,
         });
     }
 }
