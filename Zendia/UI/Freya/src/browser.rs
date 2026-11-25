@@ -17,6 +17,7 @@ use crate::ui::chrome::menus::{
 };
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::use_provide_core_with_observer;
+use crate::ui::library::use_provide_library_state;
 use crate::ui::page::download_arc::{DownloadArcLayer, use_provide_download_arc};
 use crate::ui::page::{
     PageArea, PageStage, PageSurfaceContext, PaneMode, VimOverlayLayer, use_provide_keymap, use_provide_page_surfaces,
@@ -321,6 +322,7 @@ pub fn app() -> impl IntoElement {
     let vim_picker_state = use_provide_vim_picker_state();
     let region_picker_state = use_provide_region_picker_state();
     let mut dock_state = use_provide_dock_state();
+    let library_state = use_provide_library_state();
     let webchat_views = use_provide_webchat_views(Some(Arc::clone(&hub_adapter)));
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
@@ -356,6 +358,9 @@ pub fn app() -> impl IntoElement {
                 vim_statusline_state.close_all_keymaps();
             }
             CoreEvent::ViewRequested { request, .. } => match request {
+                ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
+                    library_state.handle_view_request(request);
+                }
                 ViewRequest::LocationFocus => {
                     menu_state.close_all();
                     let current_url = stub_core

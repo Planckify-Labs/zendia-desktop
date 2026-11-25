@@ -20,6 +20,7 @@ use crate::ui::chrome::sidebar::{SidebarFrame, SidebarResizeHandle, try_use_side
 use crate::ui::chrome::toasts::ToastHost;
 use crate::ui::chrome::toolbar::TopToolbar;
 use crate::ui::core_view::use_core;
+use crate::ui::library::{Library, try_use_library_state};
 use crate::ui::panels::{
     DockClosedPill, DockFrame, DockSlideHandle, SPLIT_GAP, active_agent_accent, resolve_active_dock_panel,
     try_use_dock_state,
@@ -88,6 +89,7 @@ impl Component for WindowShell {
         let is_resizing = use_state(|| false);
         let sidebar_state = try_use_sidebar_state();
         let dock_state = try_use_dock_state();
+        let library_open = try_use_library_state().is_some_and(|state| state.is_open());
         let statusline_state = try_use_vim_statusline_state();
         let mut shell_area = use_state(|| (0.0f32, 0.0f32, 0.0f32, 0.0f32));
         let mut stage_width = use_state(|| 1120.0f32);
@@ -394,6 +396,25 @@ impl Component for WindowShell {
                 .direction(Direction::Horizontal)
                 .content(Content::Flex)
                 .child(page_card)
+        } else if library_open {
+            // The library takes the sidebar's place and the resize handle's.
+            let library = Library.into_element();
+            match layout.sidebar_side {
+                SidebarSide::Left => rect()
+                    .width(Size::fill())
+                    .height(Size::flex(1.0))
+                    .direction(Direction::Horizontal)
+                    .content(Content::Flex)
+                    .child(library)
+                    .child(page_card),
+                SidebarSide::Right => rect()
+                    .width(Size::fill())
+                    .height(Size::flex(1.0))
+                    .direction(Direction::Horizontal)
+                    .content(Content::Flex)
+                    .child(page_card)
+                    .child(library),
+            }
         } else {
             match layout.sidebar_side {
                 SidebarSide::Left => rect()

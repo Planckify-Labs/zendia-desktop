@@ -20,6 +20,7 @@ use crate::ui::chrome::menus::{MenuLayer, use_provide_menu_state};
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::{use_core, use_provide_core_with_observer};
 use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
+use crate::ui::library::use_provide_library_state;
 use crate::ui::page::download_arc::use_provide_download_arc;
 use crate::ui::page::use_provide_keymap;
 use crate::ui::panels::use_provide_dock_state;
@@ -66,6 +67,7 @@ impl App for GalleryApp {
         let vim_picker_state = use_provide_vim_picker_state();
         let region_picker_state = use_provide_region_picker_state();
         let mut dock_state = use_provide_dock_state();
+        let library_state = use_provide_library_state();
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
@@ -87,6 +89,9 @@ impl App for GalleryApp {
                     vim_statusline_state.close_all_keymaps();
                 }
                 CoreEvent::ViewRequested { request, .. } => match request {
+                    ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
+                        library_state.handle_view_request(request);
+                    }
                     ViewRequest::LocationFocus => {
                         menu_state.close_all();
                         let current_url = gallery_core

@@ -10,6 +10,7 @@ use crate::agent::{InstructionAttachment, InstructionId};
 use crate::contributions::{SidePanelId, SidePanelLayout, SidePanelSide};
 use crate::focus::{FocusDirection, PaneDirection};
 use crate::input_state::StatuslineShow;
+use crate::library::LibrarySection;
 use crate::media::MediaControl;
 use crate::model::{
     AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, MediaSessionId, ModelEffort, ModelId, NotificationId,
@@ -568,6 +569,16 @@ pub enum Command {
     PickerClose {
         request_id: Option<PickerRequestId>,
     },
+    /// Opens the library, or closes it when it is open on `section` (or on any section when `section` is `None`).
+    LibraryToggle {
+        section: Option<LibrarySection>,
+    },
+    /// Opens the library on `section`, or on the section it last showed.
+    LibraryOpen {
+        section: Option<LibrarySection>,
+    },
+    /// Closes the library.
+    LibraryClose,
     /// Starts the page region picker overlay on the active or specified tab.
     RegionPick {
         tab_id: Option<TabId>,
@@ -623,6 +634,20 @@ fn parse_required_u64_arg(command: &str, args: &[(String, String)], key: &str) -
         command: command.to_string(),
         message: format!("missing required argument `{key}`"),
     })
+}
+
+fn parse_optional_library_section_arg(
+    command: &str,
+    args: &[(String, String)],
+) -> Result<Option<LibrarySection>, CommandError> {
+    find_arg(args, "section")
+        .map(|id| {
+            LibrarySection::from_id(id).ok_or_else(|| CommandError::InvalidArgument {
+                command: command.to_string(),
+                message: format!("unknown library section `{id}`"),
+            })
+        })
+        .transpose()
 }
 
 fn parse_required_string_arg(command: &str, args: &[(String, String)], key: &str) -> Result<String, CommandError> {
@@ -821,6 +846,9 @@ impl Command {
             Self::PickerOpen { .. } => "picker.open",
             Self::PickerChoose { .. } => "picker.choose",
             Self::PickerClose { .. } => "picker.close",
+            Self::LibraryToggle { .. } => "library.toggle",
+            Self::LibraryOpen { .. } => "library.open",
+            Self::LibraryClose => "library.close",
             Self::RegionPick { .. } => "region.pick",
             Self::RegionCapture { .. } => "region.capture",
             Self::RegionCancel => "region.cancel",
@@ -1579,6 +1607,13 @@ impl Command {
             "picker.close" => Ok(Self::PickerClose {
                 request_id: find_arg(args, "request_id").map(PickerRequestId::new),
             }),
+            "library.toggle" => Ok(Self::LibraryToggle {
+                section: parse_optional_library_section_arg(name, args)?,
+            }),
+            "library.open" => Ok(Self::LibraryOpen {
+                section: parse_optional_library_section_arg(name, args)?,
+            }),
+            "library.close" => Ok(Self::LibraryClose),
             "region.pick" => Ok(Self::RegionPick {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
             }),
@@ -2898,6 +2933,34 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
                     "Auto-clear delay in milliseconds",
                 ),
             ],
+        },
+        CommandDescriptor {
+            name: "library.toggle".to_string(),
+            title: "Toggle Library".to_string(),
+            description: "Open or close the library".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "section",
+                ArgumentType::String,
+                false,
+                "Section to open (history, downloads, media, spaces, space-routing)",
+            )],
+        },
+        CommandDescriptor {
+            name: "library.open".to_string(),
+            title: "Open Library Section".to_string(),
+            description: "Open the library on a section".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "section",
+                ArgumentType::String,
+                false,
+                "Section to open (history, downloads, media, spaces, space-routing)",
+            )],
+        },
+        CommandDescriptor {
+            name: "library.close".to_string(),
+            title: "Close Library".to_string(),
+            description: "Close the library".to_string(),
+            arguments: Vec::new(),
         },
         CommandDescriptor {
             name: "picker.open".to_string(),

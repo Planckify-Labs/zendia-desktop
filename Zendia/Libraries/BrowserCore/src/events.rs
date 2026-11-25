@@ -11,6 +11,7 @@ use crate::agent::{AgentInstruction, AgentSelection, SidePanelPrefs};
 use crate::contributions::{Contributions, SidePanelId};
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
+use crate::library::LibrarySection;
 use crate::model::{
     AgentId, Bookmark, ChatSite, ChatSiteId, Conversation, ConversationId, Download, Essential, Folder, FolderId,
     InputMode, LayoutSettings, MediaSession, NotificationId, PinnedTab, ServiceState, SidebarNotification, Space,
@@ -259,6 +260,12 @@ pub enum ViewRequest {
     RegionPick { tab_id: Option<TabId> },
     /// Region picking was cancelled.
     RegionPickCancelled,
+    /// Open the library, or close it when it already shows `section` (any section when `None`).
+    LibraryToggle { section: Option<LibrarySection> },
+    /// Open the library on `section`, or on the section it last showed.
+    LibraryOpen { section: Option<LibrarySection> },
+    /// Close the library.
+    LibraryClose,
 }
 
 /// Returned when the core's event bus has been dropped.

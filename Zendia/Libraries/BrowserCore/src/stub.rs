@@ -2184,6 +2184,18 @@ impl BrowserCore for StubBackend {
                 self.request_view(ViewRequest::SitePanelToggle);
                 Ok(())
             }
+            Command::LibraryToggle { section } => {
+                self.request_view(ViewRequest::LibraryToggle { section });
+                Ok(())
+            }
+            Command::LibraryOpen { section } => {
+                self.request_view(ViewRequest::LibraryOpen { section });
+                Ok(())
+            }
+            Command::LibraryClose => {
+                self.request_view(ViewRequest::LibraryClose);
+                Ok(())
+            }
             Command::SitePermissionSet {
                 origin,
                 permission,
