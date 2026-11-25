@@ -20,7 +20,9 @@ pub mod library_spaces;
 pub mod menus;
 pub mod onboarding;
 pub mod page;
+pub mod share;
 pub mod sidebar;
+pub mod spaces_editing;
 pub mod split_glance;
 pub mod theme;
 pub mod vim_focus;
@@ -131,6 +133,12 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
             .key(state_id)
             .into_element(),
         "onboarding" => onboarding::OnboardingSection::new(state_id, Arc::clone(gallery_core))
+            .key(state_id)
+            .into_element(),
+        "spaces-editing" => spaces_editing::SpacesEditingSection::new(state_id, Arc::clone(gallery_core))
+            .key(state_id)
+            .into_element(),
+        "share" => share::ShareSection::new(state_id, Arc::clone(gallery_core))
             .key(state_id)
             .into_element(),
         other => rect()

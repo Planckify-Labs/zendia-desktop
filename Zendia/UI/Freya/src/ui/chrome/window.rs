@@ -14,7 +14,8 @@
 use crate::ui::agent::{AgentPanel, AgentsPanel};
 use crate::ui::chrome::layout::{
     BackdropEndpoints, ChromePalette, ELEMENT_SEPARATION, PAGE_CARD_RADIUS, RESIZE_HANDLE_WIDTH,
-    SPACE_GRADIENT_CROSSFADE, TOP_TOOLBAR_HEIGHT, ToolbarSlots, page_card_margins, window_backdrop_endpoints,
+    SPACE_GRADIENT_CROSSFADE, TOP_TOOLBAR_HEIGHT, ToolbarSlots, page_card_margins,
+    window_backdrop_endpoints_for_appearance,
 };
 use crate::ui::chrome::sidebar::{SidebarFrame, SidebarResizeHandle, try_use_sidebar_state};
 use crate::ui::chrome::toasts::ToastHost;
@@ -25,6 +26,7 @@ use crate::ui::panels::{
     DockClosedPill, DockFrame, DockSlideHandle, SPLIT_GAP, active_agent_accent, resolve_active_dock_panel,
     try_use_dock_state,
 };
+use crate::ui::spaces::{SpaceSwipeMode, SpaceTextureOverlay, try_use_space_editing_state};
 use crate::ui::theme::CHROME_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedScheme, motion, use_theme};
 use crate::ui::vim::statusline::try_use_vim_statusline_state;
@@ -89,6 +91,7 @@ impl Component for WindowShell {
         let palette = ChromePalette::for_scheme(theme.scheme);
         let is_resizing = use_state(|| false);
         let sidebar_state = try_use_sidebar_state();
+        let space_editing = try_use_space_editing_state();
         let dock_state = try_use_dock_state();
         let library_state = try_use_library_state();
         let library_open = library_state.is_some_and(|state| state.is_open());
@@ -110,13 +113,39 @@ impl Component for WindowShell {
         let mut stage_width = use_state(|| 1120.0f32);
         let mut toolbar_revealed = use_state(|| false);
 
-        let (layout, active_space, toolbar_items, vim_mode_enabled, input_mode, resolved_panel, agent_accent) = {
+        let (
+            layout,
+            active_space,
+            active_appearance,
+            swipe_target_space,
+            swipe_target_appearance,
+            toolbar_items,
+            vim_mode_enabled,
+            input_mode,
+            resolved_panel,
+            agent_accent,
+        ) = {
             let model = core.model().read();
             let resolved_panel = dock_state.and_then(|ds| resolve_active_dock_panel(&model, ds, *stage_width.read()));
             let accent = active_agent_accent(&model, &theme);
+            let active_space = model.active_space().cloned();
+            let active_app = active_space
+                .as_ref()
+                .and_then(|s| model.space_appearances.get(&s.id).cloned());
+            let swipe_target_id = space_editing.and_then(|se| {
+                let sw = se.swipe.read();
+                (sw.mode == SpaceSwipeMode::SwitchSpace)
+                    .then_some(sw.target_space_id)
+                    .flatten()
+            });
+            let swipe_target_space = swipe_target_id.and_then(|id| model.space(id).cloned());
+            let swipe_target_app = swipe_target_id.and_then(|id| model.space_appearances.get(&id).cloned());
             (
                 model.layout.clone(),
-                model.active_space().cloned(),
+                active_space,
+                active_app,
+                swipe_target_space,
+                swipe_target_app,
                 model.contributions.toolbar_items.clone(),
                 model.vim_mode_enabled,
                 model.input_mode,
@@ -139,10 +168,25 @@ impl Component for WindowShell {
             sl.set_side_panel_clearance(clearance);
         }
 
-        let target_endpoints = if vim_mode_enabled {
+        let draft_appearance = space_editing.and_then(|se| se.active_draft_appearance());
+        let effective_appearance = draft_appearance.as_ref().or(active_appearance.as_ref());
+
+        let base_target_endpoints = if vim_mode_enabled {
             vim_mode_backdrop_endpoints(input_mode, theme.scheme, &theme)
         } else {
-            window_backdrop_endpoints(active_space.as_ref(), theme.scheme)
+            window_backdrop_endpoints_for_appearance(active_space.as_ref(), effective_appearance, theme.scheme)
+        };
+        let target_endpoints = if let (Some(se), Some(target_sp)) = (space_editing, swipe_target_space.as_ref()) {
+            let sw = se.swipe.read();
+            let blend = (sw.offset_x.abs() / layout.effective_sidebar_width().max(120.0)).clamp(0.0, 1.0);
+            let neighbor = window_backdrop_endpoints_for_appearance(
+                Some(target_sp),
+                swipe_target_appearance.as_ref(),
+                theme.scheme,
+            );
+            base_target_endpoints.lerp(&neighbor, blend)
+        } else {
+            base_target_endpoints
         };
         let gradient_key: (Option<SpaceId>, ResolvedScheme, bool, InputMode) = (
             active_space.as_ref().map(|s| s.id),
@@ -160,7 +204,19 @@ impl Component for WindowShell {
             from_endpoints.set(prev);
             to_endpoints.set(target_endpoints);
             last_gradient_key.set(gradient_key);
+        } else if *to_endpoints.peek() != target_endpoints {
+            // Live appearance edits or mid-swipe blending update immediately without restarting a space crossfade.
+            from_endpoints.set(target_endpoints);
+            to_endpoints.set(target_endpoints);
         }
+
+        let texture_overlay = effective_appearance.and_then(|app| {
+            (app.texture_amount > 0.005 && app.texture_kind != zendia_browser_core::space_appearance::TextureKind::None)
+                .then_some(SpaceTextureOverlay {
+                    kind: app.texture_kind,
+                    amount: app.texture_amount,
+                })
+        });
 
         let crossfade = use_animation_with_dependencies(&gradient_key, move |conf, _| {
             conf.on_creation(OnCreation::Finish);
@@ -542,6 +598,7 @@ impl Component for WindowShell {
                 }
             })
             .on_global_pointer_move(on_global_pointer_move)
+            .maybe_child(texture_overlay)
             .maybe_child(top_bar)
             .child(body)
             .child(toasts)

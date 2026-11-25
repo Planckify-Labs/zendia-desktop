@@ -18,7 +18,9 @@ use crate::events::Event;
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::onboarding::OnboardingState;
+use crate::share::ShareSettings;
 use crate::site_info::{SiteExtension, SiteInfo, origin_for_url};
+use crate::space_appearance::SpaceAppearance;
 use crate::space_routing::SpaceRoutingSettings;
 use crate::split::Glance;
 use crate::toasts::Toast;
@@ -762,7 +764,9 @@ pub struct BrowserModel {
     pub windows: Vec<Window>,
     pub spaces: Vec<Space>,
     pub active_space: Option<SpaceId>,
+    pub space_appearances: BTreeMap<SpaceId, SpaceAppearance>,
     pub space_routing: SpaceRoutingSettings,
+    pub share: ShareSettings,
     pub tabs: Vec<Tab>,
     pub active_tab: Option<TabId>,
     pub essentials: Vec<Essential>,
@@ -836,6 +840,11 @@ impl BrowserModel {
 
     pub fn active_space(&self) -> Option<&Space> {
         self.active_space.and_then(|id| self.space(id))
+    }
+
+    /// Returns the stored [`SpaceAppearance`] for `space_id`, or an empty default appearance if none has been set.
+    pub fn space_appearance(&self, space_id: SpaceId) -> SpaceAppearance {
+        self.space_appearances.get(&space_id).cloned().unwrap_or_default()
     }
 
     /// Essential tabs shared across all spaces, in their configured tile order.
@@ -1184,6 +1193,14 @@ impl BrowserModel {
             }
             Event::SpacesUpdated { spaces } => {
                 self.spaces = spaces.clone();
+                true
+            }
+            Event::SpaceAppearanceChanged { space_id, appearance } => {
+                self.space_appearances.insert(*space_id, appearance.clone());
+                true
+            }
+            Event::ShareSettingsChanged { settings } => {
+                self.share = settings.clone();
                 true
             }
             Event::SpaceRoutingChanged { settings } => {

@@ -27,6 +27,8 @@ use crate::ui::page::{
     PageArea, PageStage, PageSurfaceContext, PaneMode, VimOverlayLayer, use_provide_keymap, use_provide_page_surfaces,
 };
 use crate::ui::panels::use_provide_dock_state;
+use crate::ui::share::{ShareConfirmOverlay, use_provide_share_state};
+use crate::ui::spaces::{GradientGeneratorOverlay, use_provide_space_editing_state};
 use crate::ui::theme::{ThemeRole, use_provide_theme, use_theme};
 use crate::ui::vim::use_provide_vim_statusline_state;
 use crate::ui::vim::{VimPickerOverlay, use_provide_region_picker_state, use_provide_vim_picker_state};
@@ -333,6 +335,8 @@ pub fn app() -> impl IntoElement {
     let library_spaces_state = use_provide_spaces_view_state();
     let library_routing_state = use_provide_space_routing_view_state();
     let media_preview_state = use_provide_media_preview_state();
+    let space_editing_state = use_provide_space_editing_state();
+    let share_state = use_provide_share_state();
     let webchat_views = use_provide_webchat_views(Some(Arc::clone(&hub_adapter)));
     let onboarding_state = use_provide_onboarding_state(false);
     use_hook({
@@ -506,6 +510,34 @@ pub fn app() -> impl IntoElement {
                 ViewRequest::OnboardingClose => {
                     onboarding_state.close();
                 }
+                ViewRequest::SpaceCreateFormOpen => {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    space_editing_state.open_create_form();
+                }
+                ViewRequest::SpaceCreateFormClose => {
+                    space_editing_state.close_create_form();
+                }
+                ViewRequest::ThemePickerOpen { space_id } => {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    let sidebar_w = stub_core.model().layout.effective_sidebar_width();
+                    space_editing_state.open_theme_picker(*space_id, Some((sidebar_w + 10.0, 86.0)));
+                }
+                ViewRequest::ThemePickerClose => {
+                    space_editing_state.close_theme_picker();
+                }
+                ViewRequest::ShareConfirmOpen { payload } => {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    share_state.open(payload.clone());
+                }
+                ViewRequest::ShareConfirmClose => {
+                    share_state.close();
+                }
             },
             _ => {}
         }
@@ -588,10 +620,14 @@ pub fn app() -> impl IntoElement {
             {
                 return;
             }
-            if vim_picker_state.is_open() || region_picker_state.is_active() || media_preview_state.is_open() {
+            if vim_picker_state.is_open()
+                || region_picker_state.is_active()
+                || media_preview_state.is_open()
+                || share_state.is_open()
+            {
                 return;
             }
-            if dock_state.captures_text_input()
+            if (dock_state.captures_text_input() || space_editing_state.captures_text_input())
                 && !e
                     .modifiers
                     .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
@@ -663,6 +699,8 @@ pub fn app() -> impl IntoElement {
         .child(AddressBarLayer)
         .child(VimPickerOverlay)
         .child(MediaPreviewOverlay)
+        .child(GradientGeneratorOverlay)
+        .child(ShareConfirmOverlay)
         .child(DownloadArcLayer { pinned_progress: None })
         .child(OnboardingOverlay)
 }

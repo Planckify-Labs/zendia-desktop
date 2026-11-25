@@ -11,6 +11,7 @@ use freya::prelude::{Color, LinearGradient};
 use std::time::Duration;
 use zendia_browser_core::contributions::{ToolbarArea, ToolbarItem};
 use zendia_browser_core::model::{LayoutSettings, SidebarSide, Space};
+use zendia_browser_core::space_appearance::{SpaceAppearance, compute_gradient};
 
 /// Inset separation around the rounded page card (`zen.theme.content-element-separation`).
 pub const ELEMENT_SEPARATION: f32 = 8.0;
@@ -194,6 +195,28 @@ pub fn window_backdrop_endpoints(space: Option<&Space>, scheme: ResolvedScheme) 
 #[allow(dead_code)]
 pub fn window_backdrop_gradient(space: Option<&Space>, scheme: ResolvedScheme) -> LinearGradient {
     window_backdrop_endpoints(space, scheme).to_gradient()
+}
+
+/// Computes resolved backdrop endpoints reading `appearance` when the space has custom gradient generator dots,
+/// falling back to Phase 2's [`window_backdrop_endpoints`] otherwise so default spaces remain unchanged.
+pub fn window_backdrop_endpoints_for_appearance(
+    space: Option<&Space>,
+    appearance: Option<&SpaceAppearance>,
+    scheme: ResolvedScheme,
+) -> BackdropEndpoints {
+    if let Some(app) = appearance
+        && !app.dots.is_empty()
+    {
+        let resolved = compute_gradient(app, scheme == ResolvedScheme::Dark);
+        let first = resolved.stops.first().copied().unwrap_or((19, 19, 19));
+        let last = resolved.stops.last().copied().unwrap_or(first);
+        return BackdropEndpoints {
+            start: Rgba::rgb(first.0, first.1, first.2),
+            end: Rgba::rgb(last.0, last.1, last.2),
+            angle_deg: resolved.angle_deg,
+        };
+    }
+    window_backdrop_endpoints(space, scheme)
 }
 
 /// Neutral surface tints for chrome elements (URL bar, selected tab pill, hover fills, dividers) matching Zen's

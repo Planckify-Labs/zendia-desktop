@@ -28,6 +28,8 @@ use crate::ui::onboarding::{OnboardingOverlay, use_provide_onboarding_state};
 use crate::ui::page::download_arc::use_provide_download_arc;
 use crate::ui::page::use_provide_keymap;
 use crate::ui::panels::use_provide_dock_state;
+use crate::ui::share::{ShareConfirmOverlay, use_provide_share_state};
+use crate::ui::spaces::{GradientGeneratorOverlay, use_provide_space_editing_state};
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_provide_theme, use_theme};
 use crate::ui::vim::use_provide_vim_statusline_state;
 use crate::ui::vim::{VimPickerOverlay, use_provide_region_picker_state, use_provide_vim_picker_state};
@@ -76,6 +78,8 @@ impl App for GalleryApp {
         let library_routing_state = use_provide_space_routing_view_state();
         let media_preview_state = use_provide_media_preview_state();
         let onboarding_state = use_provide_onboarding_state(true);
+        let space_editing_state = use_provide_space_editing_state();
+        let share_state = use_provide_share_state();
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
@@ -210,6 +214,33 @@ impl App for GalleryApp {
                     ViewRequest::WebChatReload { .. } | ViewRequest::WebChatNavigateHome { .. } => {}
                     ViewRequest::OnboardingOpen => onboarding_state.open(),
                     ViewRequest::OnboardingClose => onboarding_state.close(),
+                    ViewRequest::SpaceCreateFormOpen => {
+                        menu_state.close_all();
+                        address_bar_state.close();
+                        address_bar_state.close_site_panel();
+                        space_editing_state.open_create_form();
+                    }
+                    ViewRequest::SpaceCreateFormClose => {
+                        space_editing_state.close_create_form();
+                    }
+                    ViewRequest::ThemePickerOpen { space_id } => {
+                        menu_state.close_all();
+                        address_bar_state.close();
+                        address_bar_state.close_site_panel();
+                        space_editing_state.open_theme_picker(*space_id, Some((456.0, 180.0)));
+                    }
+                    ViewRequest::ThemePickerClose => {
+                        space_editing_state.close_theme_picker();
+                    }
+                    ViewRequest::ShareConfirmOpen { payload } => {
+                        menu_state.close_all();
+                        address_bar_state.close();
+                        address_bar_state.close_site_panel();
+                        share_state.open(payload.clone());
+                    }
+                    ViewRequest::ShareConfirmClose => {
+                        share_state.close();
+                    }
                 },
                 _ => {}
             }
@@ -253,10 +284,14 @@ impl App for GalleryApp {
                 {
                     return;
                 }
-                if vim_picker_state.is_open() || region_picker_state.is_active() || media_preview_state.is_open() {
+                if vim_picker_state.is_open()
+                    || region_picker_state.is_active()
+                    || media_preview_state.is_open()
+                    || share_state.is_open()
+                {
                     return;
                 }
-                if dock_state.captures_text_input()
+                if (dock_state.captures_text_input() || space_editing_state.captures_text_input())
                     && !e
                         .modifiers
                         .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
@@ -381,6 +416,12 @@ impl App for GalleryApp {
                                     if section_id != "onboarding" {
                                         onboarding_state.reset_for_gallery();
                                     }
+                                    if section_id != "spaces-editing" {
+                                        space_editing_state.reset();
+                                    }
+                                    if section_id != "share" {
+                                        share_state.close();
+                                    }
                                     active_section_id.set(section_id.to_string());
                                     active_state_id.set(default_state.to_string());
                                 })
@@ -479,6 +520,8 @@ impl App for GalleryApp {
             .child(VimPickerOverlay)
             .child(MediaPreviewOverlay)
             .child(OnboardingOverlay)
+            .child(GradientGeneratorOverlay)
+            .child(ShareConfirmOverlay)
     }
 }
 
