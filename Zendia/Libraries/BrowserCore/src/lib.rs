@@ -21,6 +21,8 @@ pub mod input_state;
 pub mod media;
 pub mod menus;
 pub mod model;
+pub mod picker;
+pub mod region;
 pub mod site_info;
 pub mod split;
 pub mod stub;

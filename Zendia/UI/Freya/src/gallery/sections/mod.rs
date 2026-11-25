@@ -18,6 +18,7 @@ pub mod sidebar;
 pub mod split_glance;
 pub mod theme;
 pub mod vim_focus;
+pub mod vim_pickers;
 pub mod vim_statusline;
 pub mod window_shell;
 
@@ -93,6 +94,11 @@ pub fn render_section(section_id: &str, state_id: &str, gallery_core: &Arc<Galle
         }
         .into_element(),
         "vim-focus" => vim_focus::VimFocusSection {
+            state_id: state_id.to_string(),
+            gallery_core: Arc::clone(gallery_core),
+        }
+        .into_element(),
+        "vim-pickers" => vim_pickers::VimPickersSection {
             state_id: state_id.to_string(),
             gallery_core: Arc::clone(gallery_core),
         }

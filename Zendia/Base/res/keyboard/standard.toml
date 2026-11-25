@@ -203,10 +203,12 @@ keys = ["<C-A-s>", "<D-A-s>"]
 command = "layout.compact_reveal_sidebar"
 description = "Show the sidebar in compact mode"
 
-# Vim focus surfaces (active only when vim mode is enabled).
+# Entry points for the vim surfaces. They act only while vim mode is on. The vim profile (vim.toml) maps these
+# surfaces to leader keys, but nothing dispatches that profile until InputServer exists, so these keys open them
+# meanwhile, like the debug input cycle above. Ctrl+Alt+T is left alone: desktops use it to open a terminal.
 [[bindings]]
 keys = ["<C-A-e>", "<D-A-e>"]
-command = "explorer.open"
+command = "explorer.toggle"
 description = "Focus sidebar explorer (vim mode)"
 
 [[bindings]]
@@ -215,11 +217,28 @@ command = "explorer.pick"
 description = "Show sidebar hint labels (vim mode)"
 
 [[bindings]]
-keys = ["<C-A-t>", "<D-A-t>"]
-command = "toolbar.focus_open"
+keys = ["<C-A-b>", "<D-A-b>"]
+command = "toolbar.open"
 description = "Focus toolbar (vim mode)"
 
 [[bindings]]
 keys = ["<C-A-w>", "<D-A-w>"]
-command = "window_mode.open"
+command = "window.mode"
 description = "Enter window mode (vim mode)"
+
+[[bindings]]
+keys = ["<C-A-p>", "<D-A-p>"]
+command = "picker.open"
+description = "Open tabs picker"
+args = { name = "tabs" }
+
+[[bindings]]
+keys = ["<C-A-a>", "<D-A-a>"]
+command = "picker.open"
+description = "Open agents picker"
+args = { name = "agents" }
+
+[[bindings]]
+keys = ["<C-A-r>", "<D-A-r>"]
+command = "region.pick"
+description = "Pick page region"

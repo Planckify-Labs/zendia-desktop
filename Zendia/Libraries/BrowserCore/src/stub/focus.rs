@@ -85,6 +85,14 @@ impl StubBackend {
         if !self.vim_enabled() {
             return Ok(());
         }
+        // `explorer.toggle`: entering it again leaves it, as the fork's `<leader>e` does.
+        let already_open = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.focus.surface == Some(FocusSurface::Explorer)
+        };
+        if already_open {
+            return self.handle_focus_close(FocusSurface::Explorer);
+        }
         let focus = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let cursor = state
@@ -649,6 +657,16 @@ mod tests {
 
         core.invoke(Command::WindowModeOpen).unwrap();
         assert_eq!(core.model().input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn explorer_toggle_leaves_the_explorer_when_it_is_open() {
+        let core = stub_with_vim();
+        core.invoke(Command::ExplorerOpen).unwrap();
+        assert_eq!(core.model().focus.surface, Some(FocusSurface::Explorer));
+        core.invoke(Command::ExplorerOpen).unwrap();
+        assert_eq!(core.model().focus.surface, None);
+        assert_ne!(core.model().input_mode, InputMode::Explorer);
     }
 
     #[test]

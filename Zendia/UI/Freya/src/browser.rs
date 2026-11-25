@@ -23,6 +23,7 @@ use crate::ui::page::{
 };
 use crate::ui::theme::{ThemeRole, use_provide_theme, use_theme};
 use crate::ui::vim::use_provide_vim_statusline_state;
+use crate::ui::vim::{VimPickerOverlay, use_provide_region_picker_state, use_provide_vim_picker_state};
 use freya::prelude::*;
 use hub_protocol::ipc_types::hub_client::messages as client;
 use hub_protocol::ipc_types::hub_server::messages as server;
@@ -314,6 +315,8 @@ pub fn app() -> impl IntoElement {
     let address_bar_state = use_provide_address_bar_state();
     let download_arc = use_provide_download_arc();
     let vim_statusline_state = use_provide_vim_statusline_state();
+    let vim_picker_state = use_provide_vim_picker_state();
+    let region_picker_state = use_provide_region_picker_state();
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -381,6 +384,35 @@ pub fn app() -> impl IntoElement {
                 if let Some(folder) = stub_core.model().folder(*folder_id) {
                     sidebar_state.start_folder_rename(*folder_id, folder.name.clone());
                 }
+            }
+            CoreEvent::PickerOpenRequested { request } => {
+                if stub_core.model().vim_mode_enabled {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    region_picker_state.stop();
+                    vim_picker_state.open(request.clone());
+                }
+            }
+            CoreEvent::PickerClosed { .. } => {
+                vim_picker_state.close();
+            }
+            CoreEvent::RegionPickRequested { tab_id } => {
+                if stub_core.model().vim_mode_enabled {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    vim_picker_state.close();
+                    region_picker_state.start(*tab_id);
+                }
+            }
+            CoreEvent::RegionCaptured { .. } | CoreEvent::RegionPickCancelled => {
+                region_picker_state.stop();
+            }
+            CoreEvent::VimModeChanged { enabled: false } => {
+                vim_statusline_state.close_all_keymaps();
+                vim_picker_state.close();
+                region_picker_state.stop();
             }
             CoreEvent::WhichKeyAllRequested { mode } => {
                 vim_statusline_state.open_all_keymaps(*mode);
@@ -465,6 +497,9 @@ pub fn app() -> impl IntoElement {
             {
                 return;
             }
+            if vim_picker_state.is_open() || region_picker_state.is_active() {
+                return;
+            }
             if !address_bar_state.is_open()
                 && !sidebar_state.is_renaming()
                 && crate::ui::vim::handle_focus_key_down(&e, &core)
@@ -518,5 +553,6 @@ pub fn app() -> impl IntoElement {
         .child(WindowShell::new(location, location_a11y_id, page_stage))
         .child(MenuLayer)
         .child(AddressBarLayer)
+        .child(VimPickerOverlay)
         .child(DownloadArcLayer { pinned_progress: None })
 }

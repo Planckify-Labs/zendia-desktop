@@ -14,6 +14,8 @@ use crate::model::{
     AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, MediaSessionId, NotificationId, SidebarSide, SpaceId,
     SplitDirection, SplitGroupId, TabId, TabMoveTarget, ThemeOverrides, ThemeScheme, ToolbarLayout,
 };
+use crate::picker::PickerRequestId;
+use crate::region::RegionRect;
 use crate::site_info::{PermissionState, SitePermissionKind};
 use crate::split::{DropZone, parse_direction};
 use crate::toasts::ToastId;
@@ -432,6 +434,32 @@ pub enum Command {
     },
     WindowModeCarryToggle,
     WindowModeDrop,
+    /// Opens a Zendia picker modal by built-in name (e.g. `"tabs"`, `"agents"`) or registered request id.
+    PickerOpen {
+        name: Option<String>,
+        request_id: Option<PickerRequestId>,
+    },
+    /// Chooses an item in the active picker and runs its associated command.
+    PickerChoose {
+        request_id: Option<PickerRequestId>,
+        item_id: String,
+    },
+    /// Dismisses the active picker modal without choosing an item.
+    PickerClose {
+        request_id: Option<PickerRequestId>,
+    },
+    /// Starts the page region picker overlay on the active or specified tab.
+    RegionPick {
+        tab_id: Option<TabId>,
+    },
+    /// Captures a chosen rectangle in page coordinates or the whole page.
+    RegionCapture {
+        tab_id: Option<TabId>,
+        rect: Option<RegionRect>,
+        whole_page: bool,
+    },
+    /// Cancels an active region pick without capturing.
+    RegionCancel,
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -614,7 +642,7 @@ impl Command {
             Self::StatuslineClearAnnouncement => "statusline.clear_announcement",
             Self::WhichKeyShowAll => "which_key.show_all",
             Self::WhichKeyHide => "which_key.hide",
-            Self::ExplorerOpen => "explorer.open",
+            Self::ExplorerOpen => "explorer.toggle",
             Self::ExplorerClose => "explorer.close",
             Self::ExplorerMove { .. } => "explorer.move",
             Self::ExplorerSelect { .. } => "explorer.select",
@@ -622,16 +650,22 @@ impl Command {
             Self::ExplorerPick => "explorer.pick",
             Self::FocusHintInput { .. } => "focus.hint_input",
             Self::FocusHintCancel => "focus.hint_cancel",
-            Self::ToolbarFocusOpen => "toolbar.focus_open",
+            Self::ToolbarFocusOpen => "toolbar.open",
             Self::ToolbarFocusClose => "toolbar.focus_close",
             Self::ToolbarFocusMove { .. } => "toolbar.focus_move",
             Self::ToolbarFocusActivate => "toolbar.focus_activate",
-            Self::WindowModeOpen => "window_mode.open",
+            Self::WindowModeOpen => "window.mode",
             Self::WindowModeClose => "window_mode.close",
             Self::WindowModeFocusPane { .. } => "window_mode.focus_pane",
             Self::WindowModeMovePane { .. } => "window_mode.move_pane",
             Self::WindowModeCarryToggle => "window_mode.carry_toggle",
             Self::WindowModeDrop => "window_mode.drop",
+            Self::PickerOpen { .. } => "picker.open",
+            Self::PickerChoose { .. } => "picker.choose",
+            Self::PickerClose { .. } => "picker.close",
+            Self::RegionPick { .. } => "region.pick",
+            Self::RegionCapture { .. } => "region.capture",
+            Self::RegionCancel => "region.cancel",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -1149,7 +1183,8 @@ impl Command {
             "statusline.clear_announcement" => Ok(Self::StatuslineClearAnnouncement),
             "which_key.show_all" => Ok(Self::WhichKeyShowAll),
             "which_key.hide" => Ok(Self::WhichKeyHide),
-            "explorer.open" => Ok(Self::ExplorerOpen),
+            // Entering the focus surfaces uses the names of the vim profile (Base/res/keyboard/vim.toml).
+            "explorer.toggle" => Ok(Self::ExplorerOpen),
             "explorer.close" => Ok(Self::ExplorerClose),
             "explorer.move" => {
                 let raw = parse_required_string_arg(name, args, "direction")?;
@@ -1168,7 +1203,7 @@ impl Command {
                 key: parse_required_string_arg(name, args, "key")?,
             }),
             "focus.hint_cancel" => Ok(Self::FocusHintCancel),
-            "toolbar.focus_open" => Ok(Self::ToolbarFocusOpen),
+            "toolbar.open" | "toolbar.focus_open" => Ok(Self::ToolbarFocusOpen),
             "toolbar.focus_close" => Ok(Self::ToolbarFocusClose),
             "toolbar.focus_move" => {
                 let raw = parse_required_string_arg(name, args, "direction")?;
@@ -1179,7 +1214,7 @@ impl Command {
                 Ok(Self::ToolbarFocusMove { direction })
             }
             "toolbar.focus_activate" => Ok(Self::ToolbarFocusActivate),
-            "window_mode.open" => Ok(Self::WindowModeOpen),
+            "window.mode" | "window_mode.open" => Ok(Self::WindowModeOpen),
             "window_mode.close" => Ok(Self::WindowModeClose),
             "window_mode.focus_pane" => Ok(Self::WindowModeFocusPane {
                 pane: parse_required_u64_arg(name, args, "pane")? as usize,
@@ -1194,11 +1229,79 @@ impl Command {
             }
             "window_mode.carry_toggle" => Ok(Self::WindowModeCarryToggle),
             "window_mode.drop" => Ok(Self::WindowModeDrop),
-            _ => Ok(Self::Custom {
+            "picker.open" => Ok(Self::PickerOpen {
+                name: find_arg(args, "name").map(str::to_string),
+                request_id: find_arg(args, "request_id").map(PickerRequestId::new),
+            }),
+            "picker.choose" => Ok(Self::PickerChoose {
+                request_id: find_arg(args, "request_id").map(PickerRequestId::new),
+                item_id: parse_required_string_arg(name, args, "item_id")?,
+            }),
+            "picker.close" => Ok(Self::PickerClose {
+                request_id: find_arg(args, "request_id").map(PickerRequestId::new),
+            }),
+            "region.pick" => Ok(Self::RegionPick {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "region.capture" => {
+                let x = parse_optional_f32_arg(name, args, "x")?;
+                let y = parse_optional_f32_arg(name, args, "y")?;
+                let width = parse_optional_f32_arg(name, args, "width")?;
+                let height = parse_optional_f32_arg(name, args, "height")?;
+                let rect = match (x, y, width, height) {
+                    (Some(x), Some(y), Some(width), Some(height)) => Some(RegionRect::new(x, y, width, height)),
+                    (None, None, None, None) => None,
+                    _ => {
+                        return Err(CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: "region.capture requires all of x, y, width, height when specifying a rect"
+                                .to_string(),
+                        });
+                    }
+                };
+                let whole_page = parse_bool_arg(name, args, "whole_page", rect.is_none())?;
+                Ok(Self::RegionCapture {
+                    tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                    rect,
+                    whole_page,
+                })
+            }
+            "region.cancel" => Ok(Self::RegionCancel),
+            _ => Ok(Self::vim_profile_alias(name).unwrap_or_else(|| Self::Custom {
                 name: name.to_string(),
                 args: args.to_vec(),
-            }),
+            })),
         }
+    }
+
+    /// The vim profile, ported from the fork, names some focus actions its own way. Those names parse to the same
+    /// typed commands so keys from either source reach one implementation.
+    fn vim_profile_alias(name: &str) -> Option<Self> {
+        use crate::focus::FocusDirection as Dir;
+        let explorer = |direction| Self::ExplorerMove { direction };
+        let toolbar = |direction| Self::ToolbarFocusMove { direction };
+        Some(match name {
+            "explorer.open" => Self::ExplorerActivate,
+            "explorer.down" => explorer(Dir::Next),
+            "explorer.up" => explorer(Dir::Previous),
+            "explorer.first" => explorer(Dir::First),
+            "explorer.last" => explorer(Dir::Last),
+            "explorer.right" => explorer(Dir::Into),
+            "explorer.collapse" => explorer(Dir::Out),
+            "explorer.quit" => Self::ExplorerClose,
+            "explorer.jump" => Self::ExplorerPick,
+            "explorer.visual" => Self::ExplorerSelect { range: true },
+            "explorer.toggle_select" => Self::ExplorerSelect { range: false },
+            "toolbar.left" => toolbar(Dir::Previous),
+            "toolbar.right" => toolbar(Dir::Next),
+            "toolbar.first" => toolbar(Dir::First),
+            "toolbar.last" => toolbar(Dir::Last),
+            "toolbar.press" => Self::ToolbarFocusActivate,
+            "toolbar.quit" => Self::ToolbarFocusClose,
+            "window.quit" | "window.escape" => Self::WindowModeClose,
+            "window.drop" => Self::WindowModeDrop,
+            _ => return None,
+        })
     }
 }
 
@@ -2366,6 +2469,25 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             ],
         },
         CommandDescriptor {
+            name: "picker.open".to_string(),
+            title: "Open Picker".to_string(),
+            description: "Open a built-in (tabs, agents) or registered Zendia picker modal".to_string(),
+            arguments: vec![
+                ArgumentSchema::new(
+                    "name",
+                    ArgumentType::String,
+                    false,
+                    "Built-in picker name (tabs or agents)",
+                ),
+                ArgumentSchema::new(
+                    "request_id",
+                    ArgumentType::String,
+                    false,
+                    "Registered custom picker request id",
+                ),
+            ],
+        },
+        CommandDescriptor {
             name: "statusline.clear_announcement".to_string(),
             title: "Clear Statusline Announcement".to_string(),
             description: "Dismiss the active statusline announcement".to_string(),
@@ -2384,7 +2506,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             arguments: Vec::new(),
         },
         CommandDescriptor {
-            name: "explorer.open".to_string(),
+            name: "explorer.toggle".to_string(),
             title: "Open Explorer Focus".to_string(),
             description: "Focus sidebar rows in vim explorer mode".to_string(),
             arguments: Vec::new(),
@@ -2447,7 +2569,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             arguments: Vec::new(),
         },
         CommandDescriptor {
-            name: "toolbar.focus_open".to_string(),
+            name: "toolbar.open".to_string(),
             title: "Open Toolbar Focus".to_string(),
             description: "Focus toolbar buttons and the address bar in vim toolbar mode".to_string(),
             arguments: Vec::new(),
@@ -2476,7 +2598,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             arguments: Vec::new(),
         },
         CommandDescriptor {
-            name: "window_mode.open".to_string(),
+            name: "window.mode".to_string(),
             title: "Open Window Mode".to_string(),
             description: "Enter vim window mode over split panes".to_string(),
             arguments: Vec::new(),
@@ -2521,6 +2643,51 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             description: "Land the carried pane at the selected target".to_string(),
             arguments: Vec::new(),
         },
+        CommandDescriptor {
+            name: "picker.choose".to_string(),
+            title: "Choose Picker Item".to_string(),
+            description: "Select an item from the active picker and invoke its command".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("request_id", ArgumentType::String, false, "Picker request id"),
+                ArgumentSchema::new("item_id", ArgumentType::String, true, "Item id to choose"),
+            ],
+        },
+        CommandDescriptor {
+            name: "picker.close".to_string(),
+            title: "Close Picker".to_string(),
+            description: "Dismiss the active Zendia picker modal".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "request_id",
+                ArgumentType::String,
+                false,
+                "Picker request id",
+            )],
+        },
+        CommandDescriptor {
+            name: "region.pick".to_string(),
+            title: "Pick Page Region".to_string(),
+            description: "Start the page region selection overlay".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "region.capture".to_string(),
+            title: "Capture Page Region".to_string(),
+            description: "Capture a page rectangle or the whole page view".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab"),
+                ArgumentSchema::new("x", ArgumentType::Float, false, "Left edge in page CSS pixels"),
+                ArgumentSchema::new("y", ArgumentType::Float, false, "Top edge in page CSS pixels"),
+                ArgumentSchema::new("width", ArgumentType::Float, false, "Width in page CSS pixels"),
+                ArgumentSchema::new("height", ArgumentType::Float, false, "Height in page CSS pixels"),
+                ArgumentSchema::new("whole_page", ArgumentType::Bool, false, "Capture the whole page view"),
+            ],
+        },
+        CommandDescriptor {
+            name: "region.cancel".to_string(),
+            title: "Cancel Page Region Pick".to_string(),
+            description: "Cancel an active page region selection".to_string(),
+            arguments: Vec::new(),
+        },
     ]
 }
 
@@ -2535,5 +2702,96 @@ fn media_session_descriptor(name: &str, title: &str, description: &str) -> Comma
             true,
             "Media session",
         )],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The vim profile ported from the fork, shipped with the browser.
+    const VIM_PROFILE: &str = include_str!("../../../Base/res/keyboard/vim.toml");
+
+    /// Vim profile commands for phase 5's surfaces that have no implementation yet. Each one is a later feature;
+    /// remove it here when it lands.
+    const NOT_YET: &[&str] = &[
+        "explorer.create",
+        "explorer.find",
+        "explorer.fold_close",
+        "explorer.fold_open",
+        "explorer.fold_toggle",
+        "explorer.half_page_down",
+        "explorer.half_page_up",
+        "explorer.menu",
+        "explorer.move_down",
+        "explorer.move_out_of_folder",
+        "explorer.move_up",
+        "explorer.preview",
+        "explorer.split_horizontal",
+        "explorer.split_vertical",
+        "explorer.yank",
+        "explorer.yank_markdown",
+        "toolbar.jump",
+        "toolbar.menu",
+        "window.close",
+        "window.minimize",
+        "window.toggle_maximize",
+    ];
+
+    #[test]
+    fn vim_profile_focus_commands_reach_typed_commands() {
+        let namespaces = [
+            "explorer.",
+            "toolbar.",
+            "window.",
+            "picker.",
+            "region.",
+            "statusline.",
+            "which_key.",
+        ];
+        let mut missing = Vec::new();
+        for line in VIM_PROFILE.lines() {
+            let Some(name) = line
+                .trim()
+                .strip_prefix("command = \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+            else {
+                continue;
+            };
+            if !namespaces.iter().any(|prefix| name.starts_with(prefix)) || NOT_YET.contains(&name) {
+                continue;
+            }
+            let parsed = Command::from_name_and_args(name, &[]);
+            let typed = match parsed {
+                Ok(Command::Custom { .. }) => false,
+                Ok(_) => true,
+                // A typed command that needs arguments the profile line gives separately still exists.
+                Err(CommandError::InvalidArgument { .. }) => true,
+                Err(_) => false,
+            };
+            if !typed && !missing.contains(&name) {
+                missing.push(name);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "vim.toml commands with no typed command: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn entering_focus_surfaces_uses_the_vim_profile_names() {
+        assert_eq!(Command::ExplorerOpen.name(), "explorer.toggle");
+        assert_eq!(Command::ToolbarFocusOpen.name(), "toolbar.open");
+        assert_eq!(Command::WindowModeOpen.name(), "window.mode");
+        assert_eq!(
+            Command::from_name_and_args("explorer.open", &[]).unwrap(),
+            Command::ExplorerActivate,
+            "in the vim profile, explorer.open opens the item under the cursor"
+        );
+        assert_eq!(
+            Command::from_name_and_args("window_mode.open", &[]).unwrap(),
+            Command::WindowModeOpen
+        );
     }
 }

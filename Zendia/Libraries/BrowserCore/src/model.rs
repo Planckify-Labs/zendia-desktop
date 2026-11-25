@@ -1168,6 +1168,12 @@ impl BrowserModel {
             | Event::FolderRenameRequested { .. }
             | Event::CompactSidebarRevealRequested
             | Event::WhichKeyAllRequested { .. }
+            | Event::PickerOpenRequested { .. }
+            | Event::PickerChosen { .. }
+            | Event::PickerClosed { .. }
+            | Event::RegionPickRequested { .. }
+            | Event::RegionCaptured { .. }
+            | Event::RegionPickCancelled
             | Event::ModelReplaced => false,
         }
     }

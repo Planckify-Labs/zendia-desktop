@@ -6,10 +6,25 @@
 
 //! Vim mode overlays: statusline and mascot, which-key popup, hint labels, picker, and focus rings.
 
+pub mod explorer;
+pub mod hints;
 pub mod mascot;
 pub mod mascot_data;
+pub mod picker;
+pub mod region_picker;
 pub mod statusline;
+pub mod toolbar_focus;
 pub mod which_key;
+pub mod window_mode;
+
+pub use picker::{
+    VimPickerCard, VimPickerOverlay, VimPickerViewState, try_use_vim_picker_state, use_provide_vim_picker_state,
+    use_vim_picker_state,
+};
+pub use region_picker::{
+    RegionPickerOverlay, RegionPickerSurface, RegionPickerViewState, try_use_region_picker_state,
+    use_provide_region_picker_state, use_region_picker_state,
+};
 
 pub use mascot::{MASCOT_FULL_SIZE, MASCOT_MORPH_DURATION, MASCOT_REST_SCALE, VimMascot, mascot_mode_color};
 pub use statusline::{
@@ -18,7 +33,11 @@ pub use statusline::{
 };
 pub use which_key::WhichKeyPopup;
 
+use crate::ui::core_view::CoreView;
 use freya::prelude::*;
+use zendia_browser_core::commands::Command;
+use zendia_browser_core::focus::{FocusDirection, PaneDirection};
+use zendia_browser_core::model::{BrowserModel, InputMode};
 
 /// Combined vim statusline (mascot, typed keys, announcements) and which-key popup floated over the page.
 ///
@@ -97,16 +116,6 @@ impl Component for VimOverlayLayer {
         self.key.clone().or(self.default_key())
     }
 }
-
-pub mod explorer;
-pub mod hints;
-pub mod toolbar_focus;
-pub mod window_mode;
-
-use crate::ui::core_view::CoreView;
-use zendia_browser_core::commands::Command;
-use zendia_browser_core::focus::{FocusDirection, PaneDirection};
-use zendia_browser_core::model::{BrowserModel, InputMode};
 
 /// Whether an active vim focus surface (explorer, toolbar, or window mode) should capture plain keystrokes instead of
 /// forwarding them to the focused web page.
