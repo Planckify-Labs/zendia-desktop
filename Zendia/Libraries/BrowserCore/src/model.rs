@@ -12,6 +12,7 @@
 use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, ToolbarArea, ToolbarPlacementRules};
 use crate::events::Event;
+use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::site_info::{SiteExtension, SiteInfo, origin_for_url};
 use crate::split::Glance;
 use crate::toasts::Toast;
@@ -659,7 +660,10 @@ pub struct BrowserModel {
     pub services: Vec<ServiceState>,
     pub input_mode: InputMode,
     pub pending_keys: Vec<String>,
+    pub pending_count: Option<u32>,
     pub which_key: Option<WhichKeyState>,
+    pub statusline: StatuslineSettings,
+    pub statusline_announcement: Option<StatuslineAnnouncement>,
     pub theme: ThemeSettings,
     pub layout: LayoutSettings,
     pub vim_mode_enabled: bool,
@@ -1073,8 +1077,20 @@ impl BrowserModel {
                 self.pending_keys = keys.clone();
                 true
             }
+            Event::PendingCountChanged { count } => {
+                self.pending_count = *count;
+                true
+            }
             Event::WhichKeyChanged { state } => {
                 self.which_key = state.clone();
+                true
+            }
+            Event::StatuslineSettingsChanged { settings } => {
+                self.statusline = settings.clone();
+                true
+            }
+            Event::StatuslineAnnouncementChanged { announcement } => {
+                self.statusline_announcement = announcement.clone();
                 true
             }
             Event::ConversationUpdated { conversation } => {
@@ -1145,6 +1161,7 @@ impl BrowserModel {
             | Event::TabRenameRequested { .. }
             | Event::FolderRenameRequested { .. }
             | Event::CompactSidebarRevealRequested
+            | Event::WhichKeyAllRequested { .. }
             | Event::ModelReplaced => false,
         }
     }

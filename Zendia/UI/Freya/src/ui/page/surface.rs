@@ -11,6 +11,7 @@ use crate::ui::core_view::use_core;
 use crate::ui::page::keymap_context::use_keymap;
 use crate::ui::page::surface_store::{SurfaceRect, use_page_surfaces};
 use crate::ui::theme::{ThemeRole, use_theme};
+use crate::ui::vim::try_use_vim_statusline_state;
 use freya::elements::image::image;
 use freya::prelude::*;
 use hub_protocol::Web_DevicePixelPoint;
@@ -106,6 +107,7 @@ impl Component for PageSurface {
         let theme = use_theme();
         let keymap = use_keymap();
         let page_ctx = use_page_surfaces();
+        let vim_state = try_use_vim_statusline_state();
 
         let fallback_a11y_id = use_hook(AccessibilityId::new_unique);
         let a11y_id = self.a11y_id.unwrap_or(fallback_a11y_id);
@@ -239,6 +241,9 @@ impl Component for PageSurface {
         let on_wheel = {
             let tracker = Rc::clone(page_ctx.tracker());
             move |e: Event<WheelEventData>| {
+                if let Some(state) = vim_state {
+                    state.notify_page_scroll();
+                }
                 let Some(view_id) = view_id else { return };
                 let dpr = *Platform::get().current_window().scale_factor.peek();
                 tracker.borrow_mut().send_wheel(

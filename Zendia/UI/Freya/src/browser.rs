@@ -19,9 +19,10 @@ use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::use_provide_core_with_observer;
 use crate::ui::page::download_arc::{DownloadArcLayer, use_provide_download_arc};
 use crate::ui::page::{
-    DebugInputOverlay, PageArea, PageStage, PageSurfaceContext, PaneMode, use_provide_keymap, use_provide_page_surfaces,
+    PageArea, PageStage, PageSurfaceContext, PaneMode, VimOverlayLayer, use_provide_keymap, use_provide_page_surfaces,
 };
 use crate::ui::theme::{ThemeRole, use_provide_theme, use_theme};
+use crate::ui::vim::use_provide_vim_statusline_state;
 use freya::prelude::*;
 use hub_protocol::ipc_types::hub_client::messages as client;
 use hub_protocol::ipc_types::hub_server::messages as server;
@@ -312,6 +313,7 @@ pub fn app() -> impl IntoElement {
     let sidebar_state = use_provide_sidebar_state();
     let address_bar_state = use_provide_address_bar_state();
     let download_arc = use_provide_download_arc();
+    let vim_statusline_state = use_provide_vim_statusline_state();
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
@@ -379,6 +381,12 @@ pub fn app() -> impl IntoElement {
                 if let Some(folder) = stub_core.model().folder(*folder_id) {
                     sidebar_state.start_folder_rename(*folder_id, folder.name.clone());
                 }
+            }
+            CoreEvent::WhichKeyAllRequested { mode } => {
+                vim_statusline_state.open_all_keymaps(*mode);
+            }
+            CoreEvent::ModeChanged { .. } | CoreEvent::WhichKeyChanged { .. } | CoreEvent::VimModeChanged { .. } => {
+                vim_statusline_state.close_all_keymaps();
             }
             _ => {}
         }
@@ -494,7 +502,7 @@ pub fn app() -> impl IntoElement {
     let page_stage = PageStage::new()
         .on_sized(on_stage_sized)
         .page(page_content)
-        .overlay(DebugInputOverlay);
+        .overlay(VimOverlayLayer::new());
 
     rect()
         .width(Size::fill())

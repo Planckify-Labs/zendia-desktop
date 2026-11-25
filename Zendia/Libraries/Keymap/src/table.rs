@@ -14,6 +14,8 @@ use std::str::FromStr;
 
 /// Embedded default standard browser keyboard profile (`Zendia/Base/res/keyboard/standard.toml`).
 pub const STANDARD_PROFILE_TOML: &str = include_str!("../../../Base/res/keyboard/standard.toml");
+/// Embedded default vim keyboard profile (`Zendia/Base/res/keyboard/vim.toml`).
+pub const VIM_PROFILE_TOML: &str = include_str!("../../../Base/res/keyboard/vim.toml");
 
 /// Typed scalar value passed as a command argument in a key binding.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -90,6 +92,25 @@ pub struct Binding {
     pub keys: KeySequence,
     pub invocation: CommandInvocation,
     pub description: Option<String>,
+    pub mode: Option<String>,
+}
+
+/// A named which-key group associated with a key prefix (for example `<leader>a` -> `ai`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupSpec {
+    pub keys: KeySequence,
+    pub name: String,
+    pub color: Option<String>,
+    pub mode: Option<String>,
+}
+
+/// Direct child of a prefix node inside a compiled [`KeyTable`], used to build which-key views.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrieChild {
+    pub stroke: KeyStroke,
+    pub binding: Option<Binding>,
+    pub is_group: bool,
+    pub descendant_count: usize,
 }
 
 /// Errors encountered while loading or compiling a keyboard profile.
@@ -135,7 +156,19 @@ struct RawBinding {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
     args: BTreeMap<String, ArgValue>,
+}
+
+#[derive(Deserialize)]
+struct RawGroup {
+    keys: String,
+    name: String,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +180,8 @@ struct RawProfile {
     leader: Option<String>,
     #[serde(default)]
     bindings: Vec<RawBinding>,
+    #[serde(default)]
+    groups: Vec<RawGroup>,
 }
 
 /// A parsed keyboard profile before compilation into a lookup trie.
@@ -156,6 +191,7 @@ pub struct Profile {
     pub description: Option<String>,
     pub leader: KeyStroke,
     pub bindings: Vec<Binding>,
+    pub groups: Vec<GroupSpec>,
 }
 
 impl Profile {
@@ -186,8 +222,23 @@ impl Profile {
                         args: entry.args.clone(),
                     },
                     description: entry.description.clone(),
+                    mode: entry.mode.clone(),
                 });
             }
+        }
+
+        let mut groups = Vec::new();
+        for entry in raw.groups {
+            let parsed = KeySequence::parse(&entry.keys).map_err(|error| TableError::Notation {
+                keys: entry.keys,
+                error,
+            })?;
+            groups.push(GroupSpec {
+                keys: parsed.expand_leader(leader),
+                name: entry.name,
+                color: entry.color,
+                mode: entry.mode,
+            });
         }
 
         Ok(Self {
@@ -195,12 +246,18 @@ impl Profile {
             description: raw.description,
             leader,
             bindings,
+            groups,
         })
     }
 
     /// Loads the embedded standard browser keyboard profile.
     pub fn standard() -> Self {
         Self::from_toml(STANDARD_PROFILE_TOML).expect("embedded standard.toml must be valid")
+    }
+
+    /// Loads the embedded default vim keyboard profile.
+    pub fn vim() -> Self {
+        Self::from_toml(VIM_PROFILE_TOML).expect("embedded vim.toml must be valid")
     }
 }
 
@@ -239,6 +296,11 @@ impl TrieNode {
             child.collect_bindings(out);
         }
     }
+
+    fn count_bindings(&self) -> usize {
+        let own = usize::from(self.binding.is_some());
+        own + self.children.values().map(TrieNode::count_bindings).sum::<usize>()
+    }
 }
 
 /// Compiled, prefix-free lookup table built from one or more layered keyboard profiles.
@@ -246,6 +308,7 @@ impl TrieNode {
 pub struct KeyTable {
     root: TrieNode,
     bindings: Vec<Binding>,
+    groups: BTreeMap<Vec<KeyStroke>, GroupSpec>,
 }
 
 impl KeyTable {
@@ -256,16 +319,41 @@ impl KeyTable {
 
     /// Compiles a stack of layered profiles into a key table (later profiles override earlier ones).
     pub fn from_profiles(profiles: &[Profile]) -> Self {
+        Self::from_profiles_filtered(profiles, None)
+    }
+
+    /// Compiles a single profile filtered to bindings and groups for `mode` (or unscoped entries).
+    pub fn from_profile_for_mode(profile: &Profile, mode: &str) -> Self {
+        Self::from_profiles_filtered(std::slice::from_ref(profile), Some(mode))
+    }
+
+    fn from_profiles_filtered(profiles: &[Profile], mode: Option<&str>) -> Self {
         let mut root = TrieNode::default();
+        let mut groups = BTreeMap::new();
         for profile in profiles {
             for binding in &profile.bindings {
+                if let Some(target_mode) = mode
+                    && let Some(binding_mode) = binding.mode.as_deref()
+                    && binding_mode != target_mode
+                {
+                    continue;
+                }
                 root.insert(binding.keys.strokes(), binding.clone());
+            }
+            for group in &profile.groups {
+                if let Some(target_mode) = mode
+                    && let Some(group_mode) = group.mode.as_deref()
+                    && group_mode != target_mode
+                {
+                    continue;
+                }
+                groups.insert(group.keys.strokes().to_vec(), group.clone());
             }
         }
         let mut flat = Vec::new();
         root.collect_bindings(&mut flat);
         let bindings = flat.into_iter().cloned().collect();
-        Self { root, bindings }
+        Self { root, bindings, groups }
     }
 
     /// Parses and compiles a TOML keyboard profile directly into a key table.
@@ -279,9 +367,40 @@ impl KeyTable {
         Self::from_profile(&Profile::standard())
     }
 
+    /// Returns the compiled vim keyboard table for `mode` (`"n"`, `"i"`, `"v"`, `"e"`, `"t"`, `"l"`, `"w"`).
+    pub fn vim_for_mode(mode: &str) -> Self {
+        Self::from_profile_for_mode(&Profile::vim(), mode)
+    }
+
     /// Returns all active bindings in deterministic key order.
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings
+    }
+
+    /// Returns all configured which-key groups in deterministic key order.
+    pub fn groups(&self) -> impl Iterator<Item = &GroupSpec> {
+        self.groups.values()
+    }
+
+    /// Returns the configured which-key group metadata for a prefix sequence, if any.
+    pub fn group_for(&self, prefix: &[KeyStroke]) -> Option<&GroupSpec> {
+        self.groups.get(prefix)
+    }
+
+    /// Returns the direct child strokes available under `prefix` (empty for root-level bindings).
+    pub fn children_at(&self, prefix: &[KeyStroke]) -> Vec<TrieChild> {
+        let Some(node) = self.node_at(prefix) else {
+            return Vec::new();
+        };
+        node.children
+            .iter()
+            .map(|(&stroke, child)| TrieChild {
+                stroke,
+                binding: child.binding.clone(),
+                is_group: !child.children.is_empty(),
+                descendant_count: child.count_bindings(),
+            })
+            .collect()
     }
 
     /// Returns the first key sequence bound to `command`, if any (useful for menus and the palette).
@@ -378,5 +497,40 @@ mod tests {
             ),
             Err(TableError::Notation { .. })
         ));
+    }
+
+    #[test]
+    fn loads_embedded_vim_profile_with_modes_and_groups() {
+        let profile = Profile::vim();
+        assert_eq!(profile.name, "vim");
+        assert!(!profile.bindings.is_empty());
+        assert!(!profile.groups.is_empty());
+
+        let normal = KeyTable::vim_for_mode("n");
+        let leader_a = KeySequence::parse("<Space>a").unwrap();
+        let ai_group = normal.group_for(leader_a.strokes()).expect("normal <Space>a group");
+        assert_eq!(ai_group.name, "ai");
+        assert_eq!(ai_group.color.as_deref(), Some("pink"));
+
+        let leader_children = normal.children_at(KeySequence::parse("<Space>").unwrap().strokes());
+        assert!(
+            leader_children
+                .iter()
+                .any(|c| c.stroke == KeyStroke::char('a') && c.is_group)
+        );
+        assert!(
+            leader_children
+                .iter()
+                .any(|c| c.stroke == KeyStroke::char('?') && !c.is_group)
+        );
+
+        let ai_children = normal.children_at(leader_a.strokes());
+        assert!(ai_children.len() >= 10);
+
+        // Mode filtering isolates explorer bindings from normal mode.
+        let explorer = KeyTable::vim_for_mode("e");
+        let fold_group = explorer.group_for(KeySequence::parse("z").unwrap().strokes()).unwrap();
+        assert_eq!(fold_group.name, "fold");
+        assert!(normal.group_for(KeySequence::parse("z").unwrap().strokes()).is_none());
     }
 }

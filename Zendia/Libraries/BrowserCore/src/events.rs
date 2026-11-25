@@ -8,6 +8,7 @@
 
 use crate::address_bar::SearchEngine;
 use crate::contributions::{Contributions, SidePanelId};
+use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
 use crate::model::{
     Bookmark, Conversation, Download, Essential, Folder, FolderId, InputMode, LayoutSettings, MediaSession,
     NotificationId, PinnedTab, ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId,
@@ -132,8 +133,21 @@ pub enum Event {
     PendingKeysChanged {
         keys: Vec<String>,
     },
+    PendingCountChanged {
+        count: Option<u32>,
+    },
     WhichKeyChanged {
         state: Option<WhichKeyState>,
+    },
+    /// View-level request to open the all-keymaps which-key popup (`<leader>?`).
+    WhichKeyAllRequested {
+        mode: InputMode,
+    },
+    StatuslineSettingsChanged {
+        settings: StatuslineSettings,
+    },
+    StatuslineAnnouncementChanged {
+        announcement: Option<StatuslineAnnouncement>,
     },
     ConversationUpdated {
         conversation: Conversation,

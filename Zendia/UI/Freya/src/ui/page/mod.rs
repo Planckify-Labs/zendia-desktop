@@ -17,7 +17,7 @@ pub mod surface_store;
 #[allow(unused_imports)]
 pub use keymap_context::{KeymapController, use_keymap, use_provide_keymap};
 #[allow(unused_imports)]
-pub use overlay::{DebugInputOverlay, PageOverlayLayer, PageStage};
+pub use overlay::{PageOverlayLayer, PageStage, VimOverlayLayer};
 #[allow(unused_imports)]
 pub use page_area::{PageArea, PaneMode, PlaceholderPage};
 #[allow(unused_imports)]

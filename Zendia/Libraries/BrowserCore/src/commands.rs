@@ -7,6 +7,7 @@
 //! Named, typed browser commands and their descriptors for keymaps and the command palette.
 
 use crate::contributions::SidePanelId;
+use crate::input_state::StatuslineShow;
 use crate::media::MediaControl;
 use crate::model::{
     AgentId, ChatSiteId, CompactHide, ConversationId, FolderId, MediaSessionId, NotificationId, SidebarSide, SpaceId,
@@ -382,6 +383,21 @@ pub enum Command {
     DebugSampleDownload,
     /// Starts sample media in a background tab so the media controls can be seen without the engine reporting media.
     DebugSampleMedia,
+    /// Configures how the vim statusline rests after activity settles (`always`, `shrink`, `never`).
+    StatuslineSetShow {
+        show: StatuslineShow,
+    },
+    /// Shows a short transient announcement beside the vim mode indicator.
+    StatuslineAnnounce {
+        message: String,
+        timeout_ms: Option<u64>,
+    },
+    /// Clears any active statusline announcement immediately.
+    StatuslineClearAnnouncement,
+    /// Opens the all-keymaps which-key popup for the active vim mode (`<leader>?`).
+    WhichKeyShowAll,
+    /// Dismisses the active which-key popup.
+    WhichKeyHide,
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -559,6 +575,11 @@ impl Command {
             Self::LayoutSetTabSwitchMotion { .. } => "layout.set_tab_switch_motion",
             Self::DebugSampleDownload => "debug.sample_download",
             Self::DebugSampleMedia => "debug.sample_media",
+            Self::StatuslineSetShow { .. } => "statusline.set_show",
+            Self::StatuslineAnnounce { .. } => "statusline.announce",
+            Self::StatuslineClearAnnouncement => "statusline.clear_announcement",
+            Self::WhichKeyShowAll => "which_key.show_all",
+            Self::WhichKeyHide => "which_key.hide",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -1061,6 +1082,21 @@ impl Command {
             }),
             "debug.sample_download" => Ok(Self::DebugSampleDownload),
             "debug.sample_media" => Ok(Self::DebugSampleMedia),
+            "statusline.set_show" => {
+                let raw = parse_required_string_arg(name, args, "show")?;
+                let show = StatuslineShow::parse(&raw).ok_or_else(|| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("unknown statusline.show value `{raw}` (expected always, shrink, or never)"),
+                })?;
+                Ok(Self::StatuslineSetShow { show })
+            }
+            "statusline.announce" => Ok(Self::StatuslineAnnounce {
+                message: parse_required_string_arg(name, args, "message")?,
+                timeout_ms: parse_optional_u64_arg(name, args, "timeout_ms")?,
+            }),
+            "statusline.clear_announcement" => Ok(Self::StatuslineClearAnnouncement),
+            "which_key.show_all" => Ok(Self::WhichKeyShowAll),
+            "which_key.hide" => Ok(Self::WhichKeyHide),
             _ => Ok(Self::Custom {
                 name: name.to_string(),
                 args: args.to_vec(),
@@ -2203,6 +2239,51 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             name: "debug.sample_media".to_string(),
             title: "Play Sample Media (Debug)".to_string(),
             description: "Play sample media in a background tab to show the media controls".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "statusline.set_show".to_string(),
+            title: "Set Statusline Visibility".to_string(),
+            description:
+                "Choose whether the vim mode indicator stays full size, shrinks to a badge, or hides when quiet"
+                    .to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "show",
+                ArgumentType::String,
+                true,
+                "always, shrink, or never",
+            )],
+        },
+        CommandDescriptor {
+            name: "statusline.announce".to_string(),
+            title: "Show Statusline Announcement".to_string(),
+            description: "Display a short transient message beside the vim mode indicator".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("message", ArgumentType::String, true, "Message to announce"),
+                ArgumentSchema::new(
+                    "timeout_ms",
+                    ArgumentType::Integer,
+                    false,
+                    "Auto-clear delay in milliseconds",
+                ),
+            ],
+        },
+        CommandDescriptor {
+            name: "statusline.clear_announcement".to_string(),
+            title: "Clear Statusline Announcement".to_string(),
+            description: "Dismiss the active statusline announcement".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "which_key.show_all".to_string(),
+            title: "Show All Vim Keymaps".to_string(),
+            description: "Open the which-key popup listing every mapping in the active vim mode".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "which_key.hide".to_string(),
+            title: "Hide Which-Key Popup".to_string(),
+            description: "Close the active which-key popup".to_string(),
             arguments: Vec::new(),
         },
     ]

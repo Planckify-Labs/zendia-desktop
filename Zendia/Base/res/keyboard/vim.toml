@@ -1,0 +1,1985 @@
+# Copyright (c) 2026-present, the Zendia developers.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+# Default vim keyboard profile ported from Zendia's LazyVim-inspired keymap.
+# Buffers are tabs, tab pages are Zen spaces, windows are split view panes.
+# Modes: n (NORMAL), i (INSERT), v (VISUAL), e (EXPLORER), t (TOOLBAR), l (LIBRARY), w (WINDOW).
+
+name = "vim"
+description = "Zendia default vim keyboard shortcuts"
+leader = "<Space>"
+
+# ---------------------------------------------------------------------------
+# Which-key groups
+# ---------------------------------------------------------------------------
+
+[[groups]]
+mode = "n"
+keys = "<leader><Tab>"
+name = "spaces"
+color = "teal"
+
+[[groups]]
+mode = "n"
+keys = "<leader>a"
+name = "ai"
+color = "pink"
+
+[[groups]]
+mode = "n"
+keys = "<leader>b"
+name = "buffer"
+color = "blue"
+
+[[groups]]
+mode = "n"
+keys = "<leader>c"
+name = "captcha"
+color = "yellow"
+
+[[groups]]
+mode = "n"
+keys = "<leader>f"
+name = "file/find"
+color = "cyan"
+
+[[groups]]
+mode = "n"
+keys = "<leader>o"
+name = "library"
+color = "teal"
+
+[[groups]]
+mode = "n"
+keys = "<leader>q"
+name = "quit/session"
+color = "red"
+
+[[groups]]
+mode = "n"
+keys = "<leader>s"
+name = "search"
+color = "green"
+
+[[groups]]
+mode = "n"
+keys = "<leader>u"
+name = "ui"
+color = "purple"
+
+[[groups]]
+mode = "n"
+keys = "<leader>w"
+name = "windows"
+color = "orange"
+
+[[groups]]
+mode = "n"
+keys = "["
+name = "prev"
+color = "purple"
+
+[[groups]]
+mode = "n"
+keys = "]"
+name = "next"
+color = "purple"
+
+[[groups]]
+mode = "n"
+keys = "g"
+name = "goto"
+color = "purple"
+
+[[groups]]
+mode = "v"
+keys = "<leader>a"
+name = "ask web chat"
+color = "pink"
+
+[[groups]]
+mode = "v"
+keys = "a"
+name = "around"
+color = "purple"
+
+[[groups]]
+mode = "v"
+keys = "i"
+name = "inside"
+color = "purple"
+
+[[groups]]
+mode = "e"
+keys = "g"
+name = "goto"
+color = "purple"
+
+[[groups]]
+mode = "e"
+keys = "z"
+name = "fold"
+color = "purple"
+
+[[groups]]
+mode = "l"
+keys = "g"
+name = "goto"
+color = "purple"
+
+# ---------------------------------------------------------------------------
+# Normal mode — fields & insert
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = "i"
+command = "input.choose"
+description = "Insert in a Field, by Label if There are Several"
+
+[[bindings]]
+mode = "n"
+keys = "I"
+command = "mode.insert"
+description = "Insert Mode"
+
+[[bindings]]
+mode = "n"
+keys = "gi"
+command = "input.last"
+description = "Insert in Last Used Field"
+
+[[bindings]]
+mode = "n"
+keys = "]i"
+command = "input.next"
+description = "Next Field"
+
+[[bindings]]
+mode = "n"
+keys = "[i"
+command = "input.prev"
+description = "Prev Field"
+
+# ---------------------------------------------------------------------------
+# Insert mode
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "i"
+keys = "<C-j>"
+command = "input.next"
+description = "Next Field"
+
+[[bindings]]
+mode = "i"
+keys = "<C-k>"
+command = "input.prev"
+description = "Prev Field"
+
+[[bindings]]
+mode = "i"
+keys = "<Esc>"
+command = "mode.normal"
+description = "Normal Mode"
+
+[[bindings]]
+mode = "i"
+keys = "<C-w>"
+command = "edit.delete_word_backward"
+description = "Delete Word Before Cursor"
+
+[[bindings]]
+mode = "i"
+keys = "<C-u>"
+command = "edit.delete_to_line_start"
+description = "Delete to Start of Line"
+
+[[bindings]]
+mode = "i"
+keys = "<C-h>"
+command = "edit.delete_char_backward"
+description = "Delete Char Before Cursor"
+
+[[bindings]]
+mode = "i"
+keys = "<A-p>"
+command = "yank.put_prev"
+description = "Cycle Previous Yank"
+
+[[bindings]]
+mode = "i"
+keys = "<A-n>"
+command = "yank.put_next"
+description = "Cycle Next Yank"
+
+[[bindings]]
+mode = "i"
+keys = "<C-Bslash>"
+command = "panes.last"
+description = "Go to Last Window"
+
+# ---------------------------------------------------------------------------
+# Normal mode — scrolling
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = "j"
+command = "scroll.down"
+description = "Scroll Down"
+
+[[bindings]]
+mode = "n"
+keys = "k"
+command = "scroll.up"
+description = "Scroll Up"
+
+[[bindings]]
+mode = "n"
+keys = "h"
+command = "scroll.left"
+description = "Scroll Left"
+
+[[bindings]]
+mode = "n"
+keys = "l"
+command = "scroll.right"
+description = "Scroll Right"
+
+[[bindings]]
+mode = "n"
+keys = "gg"
+command = "scroll.top"
+description = "Go to Top"
+
+[[bindings]]
+mode = "n"
+keys = "G"
+command = "scroll.bottom"
+description = "Go to Bottom"
+
+[[bindings]]
+mode = "n"
+keys = "<C-d>"
+command = "scroll.half_page_down"
+description = "Scroll Half Page Down"
+
+[[bindings]]
+mode = "n"
+keys = "<C-u>"
+command = "scroll.half_page_up"
+description = "Scroll Half Page Up"
+
+[[bindings]]
+mode = "n"
+keys = "<C-f>"
+command = "scroll.page_down"
+description = "Scroll Page Down"
+
+[[bindings]]
+mode = "n"
+keys = "<C-b>"
+command = "scroll.page_up"
+description = "Scroll Page Up"
+
+# ---------------------------------------------------------------------------
+# Normal mode — tabs (buffers)
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = "J"
+command = "tab.next"
+description = "Next Tab"
+
+[[bindings]]
+mode = "n"
+keys = "K"
+command = "tab.previous"
+description = "Prev Tab"
+
+[[bindings]]
+mode = "n"
+keys = "[b"
+command = "tab.previous"
+description = "Prev Tab"
+
+[[bindings]]
+mode = "n"
+keys = "]b"
+command = "tab.next"
+description = "Next Tab"
+
+[[bindings]]
+mode = "n"
+keys = "[B"
+command = "tab.move_prev"
+description = "Move Tab Prev"
+
+[[bindings]]
+mode = "n"
+keys = "]B"
+command = "tab.move_next"
+description = "Move Tab Next"
+
+[[bindings]]
+mode = "n"
+keys = ["<leader>bb", "<leader>`"]
+command = "tab.alternate"
+description = "Switch to Other Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bd"
+command = "tab.close"
+description = "Delete Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bo"
+command = "tab.close_others"
+description = "Delete Other Tabs"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>br"
+command = "tab.close_right"
+description = "Delete Tabs to the Right"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bl"
+command = "tab.close_left"
+description = "Delete Tabs to the Left"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bp"
+command = "tab.toggle_pin"
+description = "Toggle Pin"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bP"
+command = "tab.close_unpinned"
+description = "Delete Unpinned Tabs"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bj"
+command = "tab.pick"
+description = "Pick Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bm"
+command = "tab.menu"
+description = "Tab Menu"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>be"
+command = "tab.toggle_essential"
+description = "Toggle Essential"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bR"
+command = "tab.start_rename"
+description = "Rename Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bc"
+command = "tab.duplicate"
+description = "Duplicate Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bu"
+command = "tab.unload"
+description = "Unload Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bM"
+command = "tab.toggle_mute"
+description = "Toggle Mute"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>bf"
+command = "tab.move_to_folder"
+description = "Move to Folder"
+
+[[bindings]]
+mode = "n"
+keys = "u"
+command = "tab.reopen_closed"
+description = "Reopen Closed Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>fn"
+command = "tab.new"
+description = "New Tab"
+
+# ---------------------------------------------------------------------------
+# Normal mode — navigation, URL & yank
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = ["H", "<C-o>"]
+command = "navigation.back"
+description = "Go Back"
+
+[[bindings]]
+mode = "n"
+keys = ["L", "<C-i>"]
+command = "navigation.forward"
+description = "Go Forward"
+
+[[bindings]]
+mode = "n"
+keys = "r"
+command = "navigation.reload"
+description = "Reload Page"
+args = { bypass_cache = false }
+
+[[bindings]]
+mode = "n"
+keys = "R"
+command = "navigation.reload"
+description = "Reload Page Without Cache"
+args = { bypass_cache = true }
+
+[[bindings]]
+mode = "n"
+keys = "-"
+command = "url.up"
+description = "Open Parent Path"
+
+[[bindings]]
+mode = "n"
+keys = "yy"
+command = "address_bar.copy_current_url"
+description = "Yank Page URL"
+
+[[bindings]]
+mode = "n"
+keys = "p"
+command = "url.paste"
+description = "Open Clipboard URL"
+
+[[bindings]]
+mode = "n"
+keys = "P"
+command = "url.paste_new_tab"
+description = "Open Clipboard URL in New Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>p"
+command = "yank.history"
+description = "Yank History"
+
+# ---------------------------------------------------------------------------
+# Normal mode — hints & CAPTCHA
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = "s"
+command = "jump.hints"
+description = "Label Every Link, Button and Field"
+
+[[bindings]]
+mode = "n"
+keys = "gs"
+command = "jump.controls"
+description = "Jump to a Link, Button or Field by its Text"
+
+[[bindings]]
+mode = "n"
+keys = ["gc", "<leader>cc"]
+command = "jump.captcha"
+description = "Label the CAPTCHA to Solve it with the Keys"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>cv"
+command = "captcha.verify"
+description = "Verify the CAPTCHA (Verify, Next, Skip)"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ci"
+command = "captcha.answer"
+description = "Type the CAPTCHA's Answer"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>cr"
+command = "captcha.reload"
+description = "Get a New CAPTCHA Challenge"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ca"
+command = "captcha.audio"
+description = "Switch the CAPTCHA to Audio, or Back to Images"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>cp"
+command = "captcha.play"
+description = "Play the CAPTCHA's Audio"
+
+# ---------------------------------------------------------------------------
+# Normal mode — visual & search & find
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = "v"
+command = "visual.enter"
+description = "Visual Mode"
+
+[[bindings]]
+mode = "n"
+keys = "S"
+command = "jump.text"
+description = "Jump to a Word by its Letters"
+
+[[bindings]]
+mode = "n"
+keys = "/"
+command = "page.find"
+description = "Search in Page"
+
+[[bindings]]
+mode = "n"
+keys = "n"
+command = "search.next"
+description = "Next Search Result"
+
+[[bindings]]
+mode = "n"
+keys = "N"
+command = "search.prev"
+description = "Prev Search Result"
+
+[[bindings]]
+mode = "n"
+keys = ["<leader><Space>", "<leader>ff"]
+command = "address_bar.open"
+description = "Find Tabs, History and Bookmarks"
+
+[[bindings]]
+mode = "n"
+keys = ["<leader>,", "<leader>fb"]
+command = "find.tabs"
+description = "Tabs"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>fr"
+command = "find.recent"
+description = "Recent"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>/"
+command = "search.web"
+description = "Search the Web"
+
+# ---------------------------------------------------------------------------
+# Normal mode — spaces
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = ["<leader><Tab>]", "gt"]
+command = "space.next"
+description = "Next Space"
+
+[[bindings]]
+mode = "n"
+keys = ["<leader><Tab>[", "gT"]
+command = "space.previous"
+description = "Prev Space"
+
+[[bindings]]
+mode = "n"
+keys = "<leader><Tab><Tab>"
+command = "space.new"
+description = "New Space"
+
+[[bindings]]
+mode = "n"
+keys = "<leader><Tab>f"
+command = "space.first"
+description = "First Space"
+
+[[bindings]]
+mode = "n"
+keys = "<leader><Tab>l"
+command = "space.last"
+description = "Last Space"
+
+[[bindings]]
+mode = "n"
+keys = "<leader><Tab>d"
+command = "space.close"
+description = "Close Space"
+
+[[bindings]]
+mode = "n"
+keys = "<leader><Tab>r"
+command = "space.rename"
+description = "Rename Space"
+
+[[bindings]]
+mode = "n"
+keys = "<leader><Tab>i"
+command = "space.icon"
+description = "Space Icon"
+
+[[bindings]]
+mode = "n"
+keys = "<leader><Tab>t"
+command = "space.theme"
+description = "Space Theme"
+
+[[bindings]]
+mode = "n"
+keys = "<leader><Tab>u"
+command = "space.unload"
+description = "Unload Space"
+
+# ---------------------------------------------------------------------------
+# Normal mode — split view panes & windows
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = ["<C-h>", "<leader>wh"]
+command = "split.focus_left"
+description = "Go to Left Window"
+
+[[bindings]]
+mode = "n"
+keys = ["<C-j>", "<leader>wj"]
+command = "split.focus_down"
+description = "Go to Lower Window"
+
+[[bindings]]
+mode = "n"
+keys = ["<C-k>", "<leader>wk"]
+command = "split.focus_up"
+description = "Go to Upper Window"
+
+[[bindings]]
+mode = "n"
+keys = ["<C-l>", "<leader>wl"]
+command = "split.focus_right"
+description = "Go to Right Window"
+
+[[bindings]]
+mode = "n"
+keys = "<C-Bslash>"
+command = "panes.last"
+description = "Go to Last Window"
+
+[[bindings]]
+mode = "n"
+keys = ["<C-Up>", "<leader>w+"]
+command = "split.grow_height"
+description = "Increase Window Height"
+
+[[bindings]]
+mode = "n"
+keys = ["<C-Down>", "<leader>w-"]
+command = "split.shrink_height"
+description = "Decrease Window Height"
+
+[[bindings]]
+mode = "n"
+keys = ["<C-Right>", "<leader>w>"]
+command = "split.grow_width"
+description = "Increase Window Width"
+
+[[bindings]]
+mode = "n"
+keys = ["<C-Left>", "<leader>w<lt>"]
+command = "split.shrink_width"
+description = "Decrease Window Width"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>-"
+command = "split.set_layout"
+description = "Split Window Below"
+args = { direction = "vertical" }
+
+[[bindings]]
+mode = "n"
+keys = "<leader>|"
+command = "split.set_layout"
+description = "Split Window Right"
+args = { direction = "horizontal" }
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ww"
+command = "split.next"
+description = "Next Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wp"
+command = "split.last"
+description = "Last Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wf"
+command = "split.pick"
+description = "Pick Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wt"
+command = "split.remove_tab"
+description = "Move Window to Its Own Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wo"
+command = "split.unsplit"
+description = "Close Other Windows"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wm"
+command = "split.zoom"
+description = "Maximize Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>w="
+command = "split.equalize"
+description = "Equalize Windows"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wx"
+command = "split.swap"
+description = "Swap with Last Used Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wr"
+command = "split.rotate"
+description = "Rotate Windows"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wR"
+command = "split.rotate_back"
+description = "Rotate Windows Backward"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wH"
+command = "split.edge_left"
+description = "Move Window to Left Edge"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wJ"
+command = "split.edge_down"
+description = "Move Window to Bottom Edge"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wK"
+command = "split.edge_up"
+description = "Move Window to Top Edge"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wL"
+command = "split.edge_right"
+description = "Move Window to Right Edge"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wg"
+command = "split.grab"
+description = "Move Window..."
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wa"
+command = "split.new_empty"
+description = "Add Tab to Split..."
+
+[[bindings]]
+mode = "n"
+keys = "<leader>w<Space>"
+command = "window.mode"
+description = "Window Mode"
+
+# ---------------------------------------------------------------------------
+# Normal mode — library
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = "<leader>oo"
+command = "library.toggle"
+description = "Toggle Library"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>oh"
+command = "library.open"
+description = "History"
+args = { section = "history" }
+
+[[bindings]]
+mode = "n"
+keys = "<leader>od"
+command = "library.open"
+description = "Downloads"
+args = { section = "downloads" }
+
+[[bindings]]
+mode = "n"
+keys = "<leader>os"
+command = "library.open"
+description = "Spaces"
+args = { section = "spaces" }
+
+[[bindings]]
+mode = "n"
+keys = "<leader>om"
+command = "library.open"
+description = "Media"
+args = { section = "media" }
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ob"
+command = "library.open"
+description = "Boosts"
+args = { section = "boosts" }
+
+[[bindings]]
+mode = "n"
+keys = "<leader>or"
+command = "library.open"
+description = "Space Routing"
+args = { section = "routing" }
+
+# ---------------------------------------------------------------------------
+# Normal mode — AI agent & web chat
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = "<leader>aa"
+command = "agent.ask"
+description = "Ask Agent About This Tab"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ap"
+command = "agent.toggle"
+description = "Toggle Agent"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>aA"
+command = "agent.list"
+description = "Toggle Agents Panel"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>as"
+command = "agent.select"
+description = "Select Agent"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>am"
+command = "agent.model"
+description = "Select Agent Model"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ax"
+command = "agent.stop"
+description = "Stop Agent"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>an"
+command = "agent.new"
+description = "New Agent Conversation"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>al"
+command = "agent.log"
+description = "Open Agent Log"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>aw"
+command = "webchat.toggle"
+description = "Toggle Web Chat"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ac"
+command = "webchat.select"
+description = "Select Web Chat Site"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>aN"
+command = "webchat.new_chat_all"
+description = "New Chat on Every Web Chat Site"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ak"
+command = "webchat.ask"
+description = "Ask Web Chat About the Selection or Page"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>aS"
+command = "webchat.summarize_page"
+description = "Summarize the Page in Web Chat"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ai"
+command = "webchat.ask_image"
+description = "Ask Web Chat About an Image"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ar"
+command = "webchat.ask_region"
+description = "Ask Web Chat About Part of the Screen"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>aT"
+command = "webchat.ask_tabs"
+description = "Ask Web Chat About the Selected Tabs"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>aR"
+command = "webchat.put_reply"
+description = "Put the Web Chat's Reply Back in the Field"
+
+# ---------------------------------------------------------------------------
+# Normal mode — extensions, UI, which-key & session
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "n"
+keys = "<leader>x"
+command = "extensions.pick"
+description = "Extensions"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>?"
+command = "which_key.show_all"
+description = "Keymaps (which-key)"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>e"
+command = "explorer.toggle"
+description = "Explorer"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>E"
+command = "sidebar.toggle_expanded"
+description = "Explorer Expand/Collapse"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>m"
+command = "toolbar.open"
+description = "Toolbar and Main Menu"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>uc"
+command = "layout.toggle_compact_mode"
+description = "Toggle Compact Mode"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>uR"
+command = "layout.reset"
+description = "Reset Layout to Defaults"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ub"
+command = "theme.toggle_dark"
+description = "Toggle Dark Background"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>uz"
+command = "site.reader_mode.toggle"
+description = "Toggle Reader Mode"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>un"
+command = "notification.dismiss_all"
+description = "Dismiss All Notifications"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>qq"
+command = "app.quit"
+description = "Quit"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>qs"
+command = "session.restore"
+description = "Restore Last Session"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>qm"
+command = "window.minimize"
+description = "Minimize Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>qM"
+command = "window.toggle_maximize"
+description = "Maximize/Restore Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>qw"
+command = "window.close"
+description = "Close Window"
+
+# ---------------------------------------------------------------------------
+# Visual mode
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "v"
+keys = ["<Esc>", "v"]
+command = "visual.exit"
+description = "Leave Visual Mode"
+
+[[bindings]]
+mode = "v"
+keys = "y"
+command = "visual.yank"
+description = "Yank Selection"
+
+[[bindings]]
+mode = "v"
+keys = "o"
+command = "visual.swap_ends"
+description = "Other End of Selection"
+
+[[bindings]]
+mode = "v"
+keys = ["h", "<Left>"]
+command = "visual.left"
+description = "Cursor Left"
+
+[[bindings]]
+mode = "v"
+keys = ["l", "<Right>"]
+command = "visual.right"
+description = "Cursor Right"
+
+[[bindings]]
+mode = "v"
+keys = ["j", "<Down>"]
+command = "visual.down"
+description = "Cursor Down"
+
+[[bindings]]
+mode = "v"
+keys = ["k", "<Up>"]
+command = "visual.up"
+description = "Cursor Up"
+
+[[bindings]]
+mode = "v"
+keys = ["w", "e"]
+command = "visual.word_forward"
+description = "Word Forward"
+
+[[bindings]]
+mode = "v"
+keys = "b"
+command = "visual.word_backward"
+description = "Word Backward"
+
+[[bindings]]
+mode = "v"
+keys = ["0", "^"]
+command = "visual.line_start"
+description = "Line Start"
+
+[[bindings]]
+mode = "v"
+keys = "$"
+command = "visual.line_end"
+description = "Line End"
+
+[[bindings]]
+mode = "v"
+keys = "}"
+command = "visual.paragraph_forward"
+description = "Paragraph Forward"
+
+[[bindings]]
+mode = "v"
+keys = "{"
+command = "visual.paragraph_backward"
+description = "Paragraph Backward"
+
+[[bindings]]
+mode = "v"
+keys = "gg"
+command = "visual.top"
+description = "Top"
+
+[[bindings]]
+mode = "v"
+keys = "G"
+command = "visual.bottom"
+description = "Bottom"
+
+[[bindings]]
+mode = "v"
+keys = "s"
+command = "jump.words"
+description = "Label Every Word and Paragraph"
+
+[[bindings]]
+mode = "v"
+keys = "S"
+command = "jump.text"
+description = "Jump to a Word by its Letters"
+
+[[bindings]]
+mode = "v"
+keys = "<C-d>"
+command = "scroll.half_page_down"
+description = "Scroll Half Page Down"
+
+[[bindings]]
+mode = "v"
+keys = "<C-u>"
+command = "scroll.half_page_up"
+description = "Scroll Half Page Up"
+
+[[bindings]]
+mode = "v"
+keys = "<C-f>"
+command = "scroll.page_down"
+description = "Scroll Page Down"
+
+[[bindings]]
+mode = "v"
+keys = "<C-b>"
+command = "scroll.page_up"
+description = "Scroll Page Up"
+
+[[bindings]]
+mode = "v"
+keys = "?"
+command = "which_key.show_all"
+description = "Keymaps (which-key)"
+
+[[bindings]]
+mode = "v"
+keys = ["aw", "ap", "a(", "a)", "a[", "a]", "a{", "a}", "a\"", "a'", "a`", "a<lt>", "a>"]
+command = "visual.object"
+description = "Select Around Text Object"
+
+[[bindings]]
+mode = "v"
+keys = ["iw", "ip", "i(", "i)", "i[", "i]", "i{", "i}", "i\"", "i'", "i`", "i<lt>", "i>"]
+command = "visual.object"
+description = "Select Inside Text Object"
+
+[[bindings]]
+mode = "v"
+keys = "<leader>ak"
+command = "webchat.ask"
+description = "Ask Web Chat About the Selection or Page"
+
+[[bindings]]
+mode = "v"
+keys = "<leader>ae"
+command = "webchat.explain"
+description = "Explain Selection"
+
+[[bindings]]
+mode = "v"
+keys = "<leader>as"
+command = "webchat.summarize"
+description = "Summarize Selection"
+
+[[bindings]]
+mode = "v"
+keys = "<leader>at"
+command = "webchat.translate"
+description = "Translate Selection"
+
+[[bindings]]
+mode = "v"
+keys = "<leader>ad"
+command = "webchat.define"
+description = "Define Selection"
+
+[[bindings]]
+mode = "v"
+keys = "<leader>af"
+command = "webchat.fact_check"
+description = "Fact Check Selection"
+
+[[bindings]]
+mode = "v"
+keys = "<leader>aa"
+command = "webchat.ask_about"
+description = "Ask About Selection"
+
+# ---------------------------------------------------------------------------
+# Explorer mode
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "e"
+keys = ["j", "<Down>"]
+command = "explorer.down"
+description = "Next Row"
+
+[[bindings]]
+mode = "e"
+keys = ["k", "<Up>"]
+command = "explorer.up"
+description = "Prev Row"
+
+[[bindings]]
+mode = "e"
+keys = "gg"
+command = "explorer.first"
+description = "First Row"
+
+[[bindings]]
+mode = "e"
+keys = "G"
+command = "explorer.last"
+description = "Last Row"
+
+[[bindings]]
+mode = "e"
+keys = "<C-d>"
+command = "explorer.half_page_down"
+description = "Half Page Down"
+
+[[bindings]]
+mode = "e"
+keys = "<C-u>"
+command = "explorer.half_page_up"
+description = "Half Page Up"
+
+[[bindings]]
+mode = "e"
+keys = "<CR>"
+command = "explorer.open"
+description = "Open"
+
+[[bindings]]
+mode = "e"
+keys = "l"
+command = "explorer.right"
+description = "Open / Expand"
+
+[[bindings]]
+mode = "e"
+keys = "o"
+command = "explorer.preview"
+description = "Preview"
+
+[[bindings]]
+mode = "e"
+keys = "h"
+command = "explorer.collapse"
+description = "Collapse"
+
+[[bindings]]
+mode = "e"
+keys = "za"
+command = "explorer.fold_toggle"
+description = "Toggle Folder"
+
+[[bindings]]
+mode = "e"
+keys = "zo"
+command = "explorer.fold_open"
+description = "Open Folder"
+
+[[bindings]]
+mode = "e"
+keys = "zc"
+command = "explorer.fold_close"
+description = "Close Folder"
+
+[[bindings]]
+mode = "e"
+keys = "zR"
+command = "folder.expand_all"
+description = "Expand All Folders"
+
+[[bindings]]
+mode = "e"
+keys = ["zM", "Z"]
+command = "folder.collapse_all"
+description = "Collapse All Folders"
+
+[[bindings]]
+mode = "e"
+keys = "s"
+command = "explorer.jump"
+description = "Jump Hints"
+
+[[bindings]]
+mode = "e"
+keys = "/"
+command = "explorer.find"
+description = "Filter Rows"
+
+[[bindings]]
+mode = "e"
+keys = "a"
+command = "tab.new"
+description = "New Tab"
+
+[[bindings]]
+mode = "e"
+keys = "A"
+command = "folder.create"
+description = "New Folder"
+
+[[bindings]]
+mode = "e"
+keys = "d"
+command = "tab.close"
+description = "Close Tab"
+
+[[bindings]]
+mode = "e"
+keys = "u"
+command = "tab.reopen_closed"
+description = "Reopen Closed Tab"
+
+[[bindings]]
+mode = "e"
+keys = "r"
+command = "tab.start_rename"
+description = "Rename"
+
+[[bindings]]
+mode = "e"
+keys = "c"
+command = "tab.duplicate"
+description = "Duplicate"
+
+[[bindings]]
+mode = "e"
+keys = "y"
+command = "explorer.yank"
+description = "Yank URL"
+
+[[bindings]]
+mode = "e"
+keys = "Y"
+command = "explorer.yank_markdown"
+description = "Yank Markdown Link"
+
+[[bindings]]
+mode = "e"
+keys = "p"
+command = "tab.toggle_pin"
+description = "Toggle Pin"
+
+[[bindings]]
+mode = "e"
+keys = "e"
+command = "tab.toggle_essential"
+description = "Toggle Essential"
+
+[[bindings]]
+mode = "e"
+keys = ">"
+command = "tab.move_to_folder"
+description = "Move to Folder"
+
+[[bindings]]
+mode = "e"
+keys = "<lt>"
+command = "explorer.move_out_of_folder"
+description = "Move Out of Folder"
+
+[[bindings]]
+mode = "e"
+keys = "<A-j>"
+command = "explorer.move_down"
+description = "Move Down"
+
+[[bindings]]
+mode = "e"
+keys = "<A-k>"
+command = "explorer.move_up"
+description = "Move Up"
+
+[[bindings]]
+mode = "e"
+keys = "<C-v>"
+command = "explorer.split_vertical"
+description = "Split Right"
+
+[[bindings]]
+mode = "e"
+keys = "<C-s>"
+command = "explorer.split_horizontal"
+description = "Split Below"
+
+[[bindings]]
+mode = "e"
+keys = "R"
+command = "navigation.reload"
+description = "Reload Tab"
+
+[[bindings]]
+mode = "e"
+keys = "U"
+command = "tab.unload"
+description = "Unload Tab"
+
+[[bindings]]
+mode = "e"
+keys = "M"
+command = "tab.toggle_mute"
+description = "Toggle Mute"
+
+[[bindings]]
+mode = "e"
+keys = "m"
+command = "explorer.menu"
+description = "Context Menu"
+
+[[bindings]]
+mode = "e"
+keys = "+"
+command = "explorer.create"
+description = "New"
+
+[[bindings]]
+mode = "e"
+keys = "<Tab>"
+command = "explorer.toggle_select"
+description = "Toggle Selection"
+
+[[bindings]]
+mode = "e"
+keys = "V"
+command = "explorer.visual"
+description = "Visual Select"
+
+[[bindings]]
+mode = "e"
+keys = "gt"
+command = "space.next"
+description = "Next Space"
+
+[[bindings]]
+mode = "e"
+keys = "gT"
+command = "space.previous"
+description = "Prev Space"
+
+[[bindings]]
+mode = "e"
+keys = "?"
+command = "which_key.show_all"
+description = "Keymaps (which-key)"
+
+[[bindings]]
+mode = "e"
+keys = ["q", "<Esc>", "<leader>e"]
+command = "explorer.quit"
+description = "Leave Explorer"
+
+# ---------------------------------------------------------------------------
+# Toolbar mode
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "t"
+keys = ["h", "<Left>"]
+command = "toolbar.left"
+description = "Previous Button"
+
+[[bindings]]
+mode = "t"
+keys = ["l", "<Right>"]
+command = "toolbar.right"
+description = "Next Button"
+
+[[bindings]]
+mode = "t"
+keys = ["0", "^"]
+command = "toolbar.first"
+description = "First Button"
+
+[[bindings]]
+mode = "t"
+keys = "$"
+command = "toolbar.last"
+description = "Last Button"
+
+[[bindings]]
+mode = "t"
+keys = ["<CR>", "o"]
+command = "toolbar.press"
+description = "Activate Button"
+
+[[bindings]]
+mode = "t"
+keys = "m"
+command = "toolbar.menu"
+description = "Button Menu"
+
+[[bindings]]
+mode = "t"
+keys = "s"
+command = "toolbar.jump"
+description = "Jump Hints"
+
+[[bindings]]
+mode = "t"
+keys = "i"
+command = "location.focus"
+description = "Focus Address Bar"
+
+[[bindings]]
+mode = "t"
+keys = "?"
+command = "which_key.show_all"
+description = "Keymaps (which-key)"
+
+[[bindings]]
+mode = "t"
+keys = ["q", "<Esc>", "<leader>m"]
+command = "toolbar.quit"
+description = "Leave Toolbar"
+
+# ---------------------------------------------------------------------------
+# Library mode
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "l"
+keys = ["j", "<Down>"]
+command = "library.down"
+description = "Down"
+
+[[bindings]]
+mode = "l"
+keys = ["k", "<Up>"]
+command = "library.up"
+description = "Up"
+
+[[bindings]]
+mode = "l"
+keys = ["h", "<Left>"]
+command = "library.left"
+description = "Left"
+
+[[bindings]]
+mode = "l"
+keys = ["l", "<Right>"]
+command = "library.right"
+description = "Right"
+
+[[bindings]]
+mode = "l"
+keys = "gg"
+command = "library.first"
+description = "First Item"
+
+[[bindings]]
+mode = "l"
+keys = "G"
+command = "library.last"
+description = "Last Item"
+
+[[bindings]]
+mode = "l"
+keys = "<C-d>"
+command = "library.half_page_down"
+description = "Half Page Down"
+
+[[bindings]]
+mode = "l"
+keys = "<C-u>"
+command = "library.half_page_up"
+description = "Half Page Up"
+
+[[bindings]]
+mode = "l"
+keys = ["<CR>", "o"]
+command = "library.open"
+description = "Open"
+
+[[bindings]]
+mode = "l"
+keys = "m"
+command = "library.menu"
+description = "Menu"
+
+[[bindings]]
+mode = "l"
+keys = "d"
+command = "library.delete"
+description = "Delete"
+
+[[bindings]]
+mode = "l"
+keys = "y"
+command = "library.yank"
+description = "Yank"
+
+[[bindings]]
+mode = "l"
+keys = "s"
+command = "library.jump"
+description = "Jump"
+
+[[bindings]]
+mode = "l"
+keys = ["/", "i"]
+command = "library.search"
+description = "Search"
+
+[[bindings]]
+mode = "l"
+keys = "f"
+command = "library.filter"
+description = "Filter"
+
+[[bindings]]
+mode = "l"
+keys = "a"
+command = "library.add"
+description = "Add Space or Route"
+
+[[bindings]]
+mode = "l"
+keys = "r"
+command = "library.rename_space"
+description = "Rename Space"
+
+[[bindings]]
+mode = "l"
+keys = "t"
+command = "library.space_theme"
+description = "Space Theme"
+
+[[bindings]]
+mode = "l"
+keys = "I"
+command = "library.space_icon"
+description = "Space Icon"
+
+[[bindings]]
+mode = "l"
+keys = "<A-h>"
+command = "library.move_space_left"
+description = "Move Space Left"
+
+[[bindings]]
+mode = "l"
+keys = "<A-l>"
+command = "library.move_space_right"
+description = "Move Space Right"
+
+[[bindings]]
+mode = "l"
+keys = "<Tab>"
+command = "library.next_section"
+description = "Next Section"
+
+[[bindings]]
+mode = "l"
+keys = "<S-Tab>"
+command = "library.prev_section"
+description = "Previous Section"
+
+[[bindings]]
+mode = "l"
+keys = "gh"
+command = "library.goto_history"
+description = "History"
+
+[[bindings]]
+mode = "l"
+keys = "gd"
+command = "library.goto_downloads"
+description = "Downloads"
+
+[[bindings]]
+mode = "l"
+keys = "gs"
+command = "library.goto_spaces"
+description = "Spaces"
+
+[[bindings]]
+mode = "l"
+keys = "gm"
+command = "library.goto_media"
+description = "Media"
+
+[[bindings]]
+mode = "l"
+keys = "gb"
+command = "library.goto_boosts"
+description = "Boosts"
+
+[[bindings]]
+mode = "l"
+keys = "gr"
+command = "library.goto_routing"
+description = "Space Routing"
+
+[[bindings]]
+mode = "l"
+keys = "?"
+command = "which_key.show_all"
+description = "Keymaps (which-key)"
+
+[[bindings]]
+mode = "l"
+keys = ["q", "<Esc>"]
+command = "library.quit"
+description = "Close"
+
+# ---------------------------------------------------------------------------
+# Window mode
+# ---------------------------------------------------------------------------
+
+[[bindings]]
+mode = "w"
+keys = "h"
+command = "split.focus_left"
+description = "Go to Left Window"
+
+[[bindings]]
+mode = "w"
+keys = "j"
+command = "split.focus_down"
+description = "Go to Lower Window"
+
+[[bindings]]
+mode = "w"
+keys = "k"
+command = "split.focus_up"
+description = "Go to Upper Window"
+
+[[bindings]]
+mode = "w"
+keys = "l"
+command = "split.focus_right"
+description = "Go to Right Window"
+
+[[bindings]]
+mode = "w"
+keys = "w"
+command = "split.next"
+description = "Next Window"
+
+[[bindings]]
+mode = "w"
+keys = "p"
+command = "split.last"
+description = "Last Window"
+
+[[bindings]]
+mode = "w"
+keys = "f"
+command = "split.pick"
+description = "Pick Window"
+
+[[bindings]]
+mode = "w"
+keys = "s"
+command = "split.set_layout"
+description = "Split Window Below"
+args = { direction = "vertical" }
+
+[[bindings]]
+mode = "w"
+keys = "v"
+command = "split.set_layout"
+description = "Split Window Right"
+args = { direction = "horizontal" }
+
+[[bindings]]
+mode = "w"
+keys = "t"
+command = "split.remove_tab"
+description = "Move Window to Its Own Tab"
+
+[[bindings]]
+mode = "w"
+keys = "o"
+command = "split.unsplit"
+description = "Close Other Windows"
+
+[[bindings]]
+mode = "w"
+keys = "m"
+command = "split.zoom"
+description = "Maximize Window"
+
+[[bindings]]
+mode = "w"
+keys = "="
+command = "split.equalize"
+description = "Equalize Windows"
+
+[[bindings]]
+mode = "w"
+keys = "x"
+command = "split.swap"
+description = "Swap with Last Used Window"
+
+[[bindings]]
+mode = "w"
+keys = "r"
+command = "split.rotate"
+description = "Rotate Windows"
+
+[[bindings]]
+mode = "w"
+keys = "R"
+command = "split.rotate_back"
+description = "Rotate Windows Backward"
+
+[[bindings]]
+mode = "w"
+keys = "H"
+command = "split.edge_left"
+description = "Move Window to Left Edge"
+
+[[bindings]]
+mode = "w"
+keys = "J"
+command = "split.edge_down"
+description = "Move Window to Bottom Edge"
+
+[[bindings]]
+mode = "w"
+keys = "K"
+command = "split.edge_up"
+description = "Move Window to Top Edge"
+
+[[bindings]]
+mode = "w"
+keys = "L"
+command = "split.edge_right"
+description = "Move Window to Right Edge"
+
+[[bindings]]
+mode = "w"
+keys = "+"
+command = "split.grow_height"
+description = "Increase Window Height"
+
+[[bindings]]
+mode = "w"
+keys = "-"
+command = "split.shrink_height"
+description = "Decrease Window Height"
+
+[[bindings]]
+mode = "w"
+keys = ">"
+command = "split.grow_width"
+description = "Increase Window Width"
+
+[[bindings]]
+mode = "w"
+keys = "<lt>"
+command = "split.shrink_width"
+description = "Decrease Window Width"
+
+[[bindings]]
+mode = "w"
+keys = "g"
+command = "split.grab"
+description = "Move Window..."
+
+[[bindings]]
+mode = "w"
+keys = "a"
+command = "split.new_empty"
+description = "Add Tab to Split..."
+
+[[bindings]]
+mode = "w"
+keys = "<CR>"
+command = "window.drop"
+description = "Drop Here"
+
+[[bindings]]
+mode = "w"
+keys = "<Esc>"
+command = "window.escape"
+description = "Cancel / Leave Window Mode"
+
+[[bindings]]
+mode = "w"
+keys = "q"
+command = "window.quit"
+description = "Leave Window Mode"
+
+[[bindings]]
+mode = "w"
+keys = "?"
+command = "which_key.show_all"
+description = "Keymaps (which-key)"

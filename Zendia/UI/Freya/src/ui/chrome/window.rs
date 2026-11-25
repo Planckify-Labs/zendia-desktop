@@ -21,10 +21,11 @@ use crate::ui::chrome::toolbar::TopToolbar;
 use crate::ui::core_view::use_core;
 use crate::ui::theme::CHROME_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedScheme, motion, use_theme};
+use crate::ui::vim::vim_mode_backdrop_endpoints;
 use freya::animation::*;
 use freya::prelude::*;
 use std::time::Duration;
-use zendia_browser_core::model::{SidebarSide, SpaceId};
+use zendia_browser_core::model::{InputMode, SidebarSide, SpaceId};
 
 /// How close to the window edge the pointer must come to slide hidden chrome out.
 const COMPACT_EDGE: f32 = 8.0;
@@ -79,17 +80,28 @@ impl Component for WindowShell {
         let mut shell_area = use_state(|| (0.0f32, 0.0f32, 0.0f32, 0.0f32));
         let mut toolbar_revealed = use_state(|| false);
 
-        let (layout, active_space, toolbar_items) = {
+        let (layout, active_space, toolbar_items, vim_mode_enabled, input_mode) = {
             let model = core.model().read();
             (
                 model.layout.clone(),
                 model.active_space().cloned(),
                 model.contributions.toolbar_items.clone(),
+                model.vim_mode_enabled,
+                model.input_mode,
             )
         };
 
-        let target_endpoints = window_backdrop_endpoints(active_space.as_ref(), theme.scheme);
-        let gradient_key: (Option<SpaceId>, ResolvedScheme) = (active_space.as_ref().map(|s| s.id), theme.scheme);
+        let target_endpoints = if vim_mode_enabled {
+            vim_mode_backdrop_endpoints(input_mode, theme.scheme, &theme)
+        } else {
+            window_backdrop_endpoints(active_space.as_ref(), theme.scheme)
+        };
+        let gradient_key: (Option<SpaceId>, ResolvedScheme, bool, InputMode) = (
+            active_space.as_ref().map(|s| s.id),
+            theme.scheme,
+            vim_mode_enabled,
+            input_mode,
+        );
 
         let mut from_endpoints = use_state(|| target_endpoints);
         let mut to_endpoints = use_state(|| target_endpoints);

@@ -18,6 +18,7 @@ use crate::contributions::{
     SidePanelSide, ToolbarArea, ToolbarItem, ToolbarItemKind, ToolbarPlacement, ToolbarPlacementRules,
 };
 use crate::events::{Event, EventBus, Subscription};
+use crate::input_state::StatuslineSettings;
 use crate::menus::{APP_MENU_VIM_MODE_ID, builtin_menu_entries};
 use crate::model::{
     Agent, AgentId, Bookmark, BookmarkId, BrowserModel, ChatSite, ChatSiteId, Conversation, ConversationId,
@@ -25,8 +26,8 @@ use crate::model::{
     HistoryEntry, HistoryEntryId, InputMode, LayoutSettings, MediaSession, ModelEffort, ModelId, ModelInfo,
     NotificationId, PinnedTab, ServiceId, ServiceState, ServiceStatus, SidebarNotification, SidebarNotificationLink,
     SidebarSide, Space, SpaceGradient, SpaceId, SplitDirection, SplitGroup, SplitGroupId, StepId, StepKind, StepStatus,
-    Tab, TabId, TabKind, TabMoveTarget, ThemeOverrides, ThemeScheme, ThemeSettings, ToolbarLayout, WhichKeyEntry,
-    WhichKeyState, Window, WindowId,
+    Tab, TabId, TabKind, TabMoveTarget, ThemeOverrides, ThemeScheme, ThemeSettings, ToolbarLayout, WhichKeyState,
+    Window, WindowId,
 };
 use crate::site_info::{
     PermissionState, SiteDataSummary, SiteExtension, SiteInfo, SitePermission, SitePermissionKind, origin_for_url,
@@ -35,6 +36,7 @@ use crate::tab_source::{TabSource, TabUpdate};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+mod input_state;
 mod page_layouts;
 
 const MAX_ESSENTIALS: usize = 12;
@@ -383,72 +385,7 @@ impl StubBackend {
     /// Cycles through sample InputServer states (modes, pending keys, and which-key candidates) for UI development
     /// and testing before InputServer is wired in.
     pub fn cycle_sample_input_state(&self) {
-        let step = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            state.debug_input_step = (state.debug_input_step + 1) % 8;
-            state.debug_input_step
-        };
-
-        let (mode, pending, which_key): (InputMode, Vec<String>, Option<WhichKeyState>) = match step {
-            1 => (
-                InputMode::Normal,
-                vec!["<Space>".to_string()],
-                Some(WhichKeyState {
-                    title: "Leader".to_string(),
-                    entries: vec![
-                        WhichKeyEntry {
-                            key: "f".to_string(),
-                            description: "+find".to_string(),
-                            is_group: true,
-                        },
-                        WhichKeyEntry {
-                            key: "w".to_string(),
-                            description: "+window".to_string(),
-                            is_group: true,
-                        },
-                        WhichKeyEntry {
-                            key: "a".to_string(),
-                            description: "Open agent chat".to_string(),
-                            is_group: false,
-                        },
-                    ],
-                }),
-            ),
-            2 => (
-                InputMode::Normal,
-                vec!["<Space>".to_string(), "f".to_string()],
-                Some(WhichKeyState {
-                    title: "Find".to_string(),
-                    entries: vec![
-                        WhichKeyEntry {
-                            key: "f".to_string(),
-                            description: "Command palette".to_string(),
-                            is_group: false,
-                        },
-                        WhichKeyEntry {
-                            key: "t".to_string(),
-                            description: "Switch tab".to_string(),
-                            is_group: false,
-                        },
-                        WhichKeyEntry {
-                            key: "h".to_string(),
-                            description: "Browse history".to_string(),
-                            is_group: false,
-                        },
-                    ],
-                }),
-            ),
-            3 => (InputMode::Insert, Vec::new(), None),
-            4 => (InputMode::Visual, Vec::new(), None),
-            5 => (InputMode::Explorer, vec!["g".to_string()], None),
-            6 => (InputMode::Toolbar, Vec::new(), None),
-            7 => (InputMode::Window, Vec::new(), None),
-            _ => (InputMode::Normal, Vec::new(), None),
-        };
-
-        self.set_input_mode(mode);
-        self.set_pending_keys(pending);
-        self.set_which_key(which_key);
+        self.cycle_sample_input_state_impl();
     }
 
     fn adjacent_tab_id(&self, delta: isize) -> Option<TabId> {
@@ -2300,6 +2237,11 @@ impl BrowserCore for StubBackend {
                 self.cycle_sample_input_state();
                 Ok(())
             }
+            command @ (Command::StatuslineSetShow { .. }
+            | Command::StatuslineAnnounce { .. }
+            | Command::StatuslineClearAnnouncement
+            | Command::WhichKeyShowAll
+            | Command::WhichKeyHide) => self.handle_input_state_command(command),
             Command::VimSetEnabled { enabled } => self.handle_vim_set_enabled(enabled),
             Command::ZoomIn { tab_id } => {
                 if let Some(source) = tab_source {
@@ -3465,7 +3407,10 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         services,
         input_mode: InputMode::Normal,
         pending_keys: Vec::new(),
+        pending_count: None,
         which_key: None,
+        statusline: StatuslineSettings::default(),
+        statusline_announcement: None,
         theme: ThemeSettings::default(),
         layout: LayoutSettings::default(),
         vim_mode_enabled: false,

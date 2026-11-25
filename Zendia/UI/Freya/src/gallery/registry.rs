@@ -533,6 +533,80 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
             },
         ],
     },
+    GallerySectionSpec {
+        id: "vim-statusline",
+        title: "Vim statusline & which-key",
+        phase: 5,
+        icon: "bolt",
+        summary: "Animated six-cell mascot, per-mode window tint, typed keys and counts, announcements, shrunk badge, and which-key popups.",
+        states: &[
+            GalleryStateSpec {
+                id: "normal-pending",
+                label: "NORMAL 3g",
+                description: "NORMAL mode (pink) with count 3, pending key g, and the goto which-key popup.",
+            },
+            GalleryStateSpec {
+                id: "insert",
+                label: "INSERT",
+                description: "INSERT mode (green) with tilted antenna, caret eye, and green window frame tint.",
+            },
+            GalleryStateSpec {
+                id: "visual",
+                label: "VISUAL",
+                description: "VISUAL mode (purple) with split antenna, wide eyes, and purple window frame tint.",
+            },
+            GalleryStateSpec {
+                id: "explorer",
+                label: "EXPLORER",
+                description: "EXPLORER mode (blue) with sidebar-turned eyes and blue window frame tint.",
+            },
+            GalleryStateSpec {
+                id: "toolbar",
+                label: "TOOLBAR",
+                description: "TOOLBAR mode (yellow) with perked-up antenna and yellow window frame tint.",
+            },
+            GalleryStateSpec {
+                id: "window",
+                label: "WINDOW",
+                description: "WINDOW mode (orange) wearing NORMAL's pose in orange with orange window frame tint.",
+            },
+            GalleryStateSpec {
+                id: "library",
+                label: "LIBRARY",
+                description: "LIBRARY mode (teal) with lowered eyes and teal window frame tint.",
+            },
+            GalleryStateSpec {
+                id: "shrunk",
+                label: "Shrunk Badge",
+                description: "Resting shrunk corner badge after the quiet timeout (zendia.statusline.show = shrink).",
+            },
+            GalleryStateSpec {
+                id: "which-key-leader",
+                label: "Which-Key Leader",
+                description: "Which-key helix popup after <Space> showing sorted mappings and colored +group entries.",
+            },
+            GalleryStateSpec {
+                id: "which-key-subgroup",
+                label: "Subgroup +ai",
+                description: "Which-key subgroup popup after <Space> a (SPC » a +ai) with the mascot dodging clear.",
+            },
+            GalleryStateSpec {
+                id: "which-key-all",
+                label: "All Keymaps",
+                description: "Scrollable all-keymaps view (<leader>?) listing every top-level binding in NORMAL mode.",
+            },
+            GalleryStateSpec {
+                id: "announcement",
+                label: "Announcement",
+                description: "Transient announcement pill shown beside the mascot in the statusline.",
+            },
+            GalleryStateSpec {
+                id: "ducked",
+                label: "Scroll Ducked",
+                description: "Statusline ducked down and faded while the page scrolls.",
+            },
+        ],
+    },
 ];
 
 /// Looks up a registered gallery section by its stable `id`.

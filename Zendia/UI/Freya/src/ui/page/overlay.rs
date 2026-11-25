@@ -5,13 +5,11 @@
  */
 
 //! Page stage and overlay layer sitting above all [`PageSurface`](crate::ui::page::PageSurface)s for panels,
-//! Glance cards, hints, and InputServer overlays.
+//! Glance cards, hints, and vim surfaces.
 
-use crate::ui::core_view::use_core;
-use crate::ui::kit::{GlassPanel, KeyLabel, Pill};
-use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
-use zendia_browser_core::model::InputMode;
+
+pub use crate::ui::vim::VimOverlayLayer;
 
 /// Transparent overlay container positioned above all page surfaces.
 ///
@@ -154,88 +152,5 @@ impl Component for PageStage {
 
     fn render_key(&self) -> DiffKey {
         self.key.clone().or(self.default_key())
-    }
-}
-
-fn mode_badge_label(mode: InputMode) -> (&'static str, ThemeRole) {
-    match mode {
-        InputMode::Normal => ("NORMAL", ThemeRole::ModeNormal),
-        InputMode::Insert => ("INSERT", ThemeRole::ModeInsert),
-        InputMode::Visual => ("VISUAL", ThemeRole::ModeVisual),
-        InputMode::Explorer => ("EXPLORER", ThemeRole::ModeExplorer),
-        InputMode::Toolbar => ("TOOLBAR", ThemeRole::ModeToolbar),
-        InputMode::Library => ("LIBRARY", ThemeRole::ModeLibrary),
-        InputMode::Window => ("WINDOW", ThemeRole::ModeWindow),
-    }
-}
-
-/// Minimal debug overlay rendered on [`PageOverlayLayer`] when InputServer events (mode, pending keys, or which-key)
-/// are active. Renders nothing in the default standard state (`Normal`, no pending keys, no which-key popup).
-#[derive(Clone, PartialEq)]
-pub struct DebugInputOverlay;
-
-impl Component for DebugInputOverlay {
-    fn render(&self) -> impl IntoElement {
-        let core = use_core();
-        let theme = use_theme();
-        let (mode, pending_keys, which_key) = {
-            let model = core.model().read();
-            (model.input_mode, model.pending_keys.clone(), model.which_key.clone())
-        };
-
-        let active = mode != InputMode::Normal || !pending_keys.is_empty() || which_key.is_some();
-        if !active {
-            return rect().width(Size::px(0.)).height(Size::px(0.));
-        }
-
-        let (mode_name, mode_role) = mode_badge_label(mode);
-        let pending_text = pending_keys.join("");
-
-        rect()
-            .position(Position::new_absolute().right(14.).bottom(14.))
-            .interactive(Interactive::No)
-            .spacing(theme.spacing.sm)
-            .cross_align(Alignment::End)
-            .maybe_child(which_key.map(|wk| {
-                let rows = wk.entries.into_iter().enumerate().map(|(index, entry)| {
-                    let desc_color = if entry.is_group {
-                        theme.color(ThemeRole::WhichKeyGroup)
-                    } else {
-                        theme.color(ThemeRole::Text)
-                    };
-                    rect()
-                        .key(index)
-                        .direction(Direction::Horizontal)
-                        .cross_align(Alignment::center())
-                        .spacing(theme.spacing.md)
-                        .child(KeyLabel::new(entry.key))
-                        .child(
-                            label()
-                                .text(entry.description)
-                                .font_size(theme.font_sizes.sm)
-                                .color(desc_color),
-                        )
-                });
-
-                GlassPanel::new()
-                    .padding(Gaps::new_all(theme.spacing.md))
-                    .spacing(theme.spacing.xs)
-                    .child(
-                        label()
-                            .text(wk.title)
-                            .font_size(theme.font_sizes.sm)
-                            .font_weight(FontWeight::BOLD)
-                            .color(theme.color(ThemeRole::WhichKeyKey)),
-                    )
-                    .children(rows)
-            }))
-            .child(
-                rect()
-                    .direction(Direction::Horizontal)
-                    .cross_align(Alignment::center())
-                    .spacing(theme.spacing.sm)
-                    .child(Pill::new(mode_name).dot(mode_role))
-                    .maybe_child((!pending_text.is_empty()).then(|| KeyLabel::new(pending_text))),
-            )
     }
 }

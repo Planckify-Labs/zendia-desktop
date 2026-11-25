@@ -23,6 +23,7 @@ use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
 use crate::ui::page::download_arc::use_provide_download_arc;
 use crate::ui::page::use_provide_keymap;
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_provide_theme, use_theme};
+use crate::ui::vim::use_provide_vim_statusline_state;
 use freya::prelude::*;
 use std::sync::Arc;
 use zendia_browser_core::BrowserCore;
@@ -59,6 +60,7 @@ impl App for GalleryApp {
         let sidebar_state = use_provide_sidebar_state();
         let address_bar_state = use_provide_address_bar_state();
         let download_arc = use_provide_download_arc();
+        let vim_statusline_state = use_provide_vim_statusline_state();
         let core = use_provide_core_with_observer(Arc::clone(&gallery_core) as Arc<dyn BrowserCore>, {
             let gallery_core = Arc::clone(&gallery_core);
             move |event| match event {
@@ -109,6 +111,14 @@ impl App for GalleryApp {
                     if let Some(folder) = gallery_core.model().folder(*folder_id) {
                         sidebar_state.start_folder_rename(*folder_id, folder.name.clone());
                     }
+                }
+                CoreEvent::WhichKeyAllRequested { mode } => {
+                    vim_statusline_state.open_all_keymaps(*mode);
+                }
+                CoreEvent::ModeChanged { .. }
+                | CoreEvent::WhichKeyChanged { .. }
+                | CoreEvent::VimModeChanged { .. } => {
+                    vim_statusline_state.close_all_keymaps();
                 }
                 _ => {}
             }

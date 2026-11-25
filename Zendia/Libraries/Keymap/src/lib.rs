@@ -21,4 +21,7 @@ pub mod table;
 
 pub use notation::{KeyCode, KeyModifiers, KeySequence, KeyStroke, NotationError};
 pub use resolver::{KeyResolver, NextKeyHint, Resolution};
-pub use table::{ArgValue, Binding, CommandInvocation, KeyTable, Profile, STANDARD_PROFILE_TOML, TableError};
+pub use table::{
+    ArgValue, Binding, CommandInvocation, GroupSpec, KeyTable, Profile, STANDARD_PROFILE_TOML, TableError, TrieChild,
+    VIM_PROFILE_TOML,
+};

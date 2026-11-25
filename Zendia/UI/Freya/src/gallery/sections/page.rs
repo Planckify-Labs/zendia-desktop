@@ -10,7 +10,7 @@
 use crate::gallery::registry::GalleryCore;
 use crate::ui::core_view::use_core;
 use crate::ui::kit::{GlassPanel, Icon, IconButton, KeyLabel, KitChip, Pill};
-use crate::ui::page::{DebugInputOverlay, PageStage};
+use crate::ui::page::{PageStage, VimOverlayLayer};
 use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
 use std::sync::Arc;
@@ -31,6 +31,7 @@ impl PartialEq for PageSection {
 
 fn apply_leader_sample(gallery_core: &Arc<GalleryCore>) {
     let stub = gallery_core.stub();
+    let _ = zendia_browser_core::BrowserCore::invoke(stub.as_ref(), Command::VimSetEnabled { enabled: true });
     stub.set_input_mode(InputMode::Normal);
     stub.set_pending_keys(vec!["<Space>".to_string()]);
     stub.set_which_key(Some(WhichKeyState {
@@ -57,6 +58,7 @@ fn apply_leader_sample(gallery_core: &Arc<GalleryCore>) {
 
 fn apply_find_sample(gallery_core: &Arc<GalleryCore>) {
     let stub = gallery_core.stub();
+    let _ = zendia_browser_core::BrowserCore::invoke(stub.as_ref(), Command::VimSetEnabled { enabled: true });
     stub.set_input_mode(InputMode::Normal);
     stub.set_pending_keys(vec!["<Space>".to_string(), "f".to_string()]);
     stub.set_which_key(Some(WhichKeyState {
@@ -83,6 +85,7 @@ fn apply_find_sample(gallery_core: &Arc<GalleryCore>) {
 
 fn apply_mode_sample(gallery_core: &Arc<GalleryCore>, mode: InputMode, pending: Vec<String>) {
     let stub = gallery_core.stub();
+    let _ = zendia_browser_core::BrowserCore::invoke(stub.as_ref(), Command::VimSetEnabled { enabled: true });
     stub.set_input_mode(mode);
     stub.set_pending_keys(pending);
     stub.set_which_key(None);
@@ -407,7 +410,7 @@ impl Component for PageSection {
         if self.state_id == "overlay" && glance_open() {
             stage = stage.overlay(glance_card_overlay(move |_| glance_open.set(false)));
         }
-        stage = stage.overlay(DebugInputOverlay);
+        stage = stage.overlay(VimOverlayLayer::new());
 
         rect()
             .width(Size::fill())
