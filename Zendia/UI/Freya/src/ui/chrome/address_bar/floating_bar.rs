@@ -8,7 +8,7 @@
 //! component and backed by `BrowserCore`'s result providers and command registry.
 
 use crate::ui::chrome::address_bar::state::{
-    AddressBarMode, compute_floating_bar_geometry, step_highlight, use_address_bar_state,
+    AddressBarMode, compute_floating_bar_geometry, step_highlight, try_use_address_bar_state, use_address_bar_state,
 };
 use crate::ui::chrome::sidebar::state::favicon_badge_colors;
 use crate::ui::core_view::{CoreView, use_core};
@@ -301,6 +301,10 @@ impl Component for FloatingAddressBarCard {
         let key_table = use_hook(KeyTable::standard);
         let fallback_a11y_id = use_hook(AccessibilityId::new_unique);
         let input_a11y_id = self.input_a11y_id.unwrap_or(fallback_a11y_id);
+        let bar_state = try_use_address_bar_state();
+        if let Some(state) = bar_state {
+            state.settle_prefill();
+        }
 
         let is_actions = matches!(self.mode, AddressBarMode::Actions);
         let new_tab = matches!(self.mode, AddressBarMode::Normal { new_tab: true });
@@ -420,6 +424,19 @@ impl Component for FloatingAddressBarCard {
 
         let on_pre_key_down = move |e: Event<KeyboardEventData>| {
             let ctrl_or_alt = e.modifiers.contains(Modifiers::CONTROL) || e.modifiers.contains(Modifiers::ALT);
+            if let Some(state) = bar_state {
+                match &e.key {
+                    Key::Named(NamedKey::Backspace | NamedKey::Delete) if state.clear_prefill() => {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        return false;
+                    }
+                    Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Home | NamedKey::End) => {
+                        state.keep_prefill();
+                    }
+                    _ => {}
+                }
+            }
             match &e.key {
                 Key::Named(NamedKey::Escape) => {
                     e.stop_propagation();

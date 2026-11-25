@@ -38,6 +38,9 @@ pub struct AddressBarViewState {
     pub input_a11y_id: AccessibilityId,
     pub site_panel_open: State<bool>,
     pub site_panel_anchor: State<AnchorRect>,
+    /// The page URL the bar opened with, while it stands unedited. Like selected text, it gives way to what the user
+    /// types (Freya's input cannot select text from outside).
+    pub prefill: State<Option<String>>,
 }
 
 impl AddressBarViewState {
@@ -63,6 +66,8 @@ impl AddressBarViewState {
         self.close_site_panel();
         let text = initial_query.unwrap_or_default();
         let initial_highlight = if text.trim().is_empty() { None } else { Some(0) };
+        let mut prefill = self.prefill;
+        prefill.set((!new_tab && !text.trim().is_empty()).then(|| text.clone()));
         mode.set(AddressBarMode::Normal { new_tab });
         query.set(text);
         highlighted.set(initial_highlight);
@@ -88,6 +93,8 @@ impl AddressBarViewState {
 
         self.close_site_panel();
         let text = initial_query.unwrap_or_default();
+        let mut prefill = self.prefill;
+        prefill.set_if_modified(None);
         mode.set(AddressBarMode::Actions);
         query.set(text);
         highlighted.set(Some(0));
@@ -119,7 +126,45 @@ impl AddressBarViewState {
         let mut highlighted = self.highlighted;
         open.set_if_modified(false);
         highlighted.set(None);
+        let mut prefill = self.prefill;
+        prefill.set_if_modified(None);
         self.input_a11y_id.request_unfocus();
+    }
+
+    /// Replaces an unedited prefilled URL with what was typed into it. The input inserts the first character in front
+    /// of the URL, so a query that is the URL with text before it becomes just that text.
+    pub fn settle_prefill(&self) {
+        let Some(original) = self.prefill.peek().clone() else {
+            return;
+        };
+        let current = self.query.peek().clone();
+        if current == original {
+            return;
+        }
+        let mut prefill = self.prefill;
+        prefill.set(None);
+        if current.len() > original.len() && current.ends_with(&original) {
+            let mut query = self.query;
+            query.set(current[..current.len() - original.len()].to_string());
+        }
+    }
+
+    /// Clears an unedited prefilled URL, as Backspace clears selected text. Returns whether it did.
+    pub fn clear_prefill(&self) -> bool {
+        if self.prefill.peek().is_none() {
+            return false;
+        }
+        let mut prefill = self.prefill;
+        prefill.set(None);
+        let mut query = self.query;
+        query.set(String::new());
+        true
+    }
+
+    /// Keeps the prefilled URL as ordinary text, once the user moves the cursor into it.
+    pub fn keep_prefill(&self) {
+        let mut prefill = self.prefill;
+        prefill.set_if_modified(None);
     }
 
     /// Returns whether the floating address bar is currently open.
@@ -163,6 +208,7 @@ pub fn use_provide_address_bar_state() -> AddressBarViewState {
     let open_seq = use_state(|| 0u64);
     let input_a11y_id = use_hook(AccessibilityId::new_unique);
     let site_panel_open = use_state(|| false);
+    let prefill = use_state(|| None::<String>);
     let site_panel_anchor = use_state(|| AnchorRect {
         x: 152.0,
         y: 44.0,
@@ -179,6 +225,7 @@ pub fn use_provide_address_bar_state() -> AddressBarViewState {
         input_a11y_id,
         site_panel_open,
         site_panel_anchor,
+        prefill,
     })
 }
 

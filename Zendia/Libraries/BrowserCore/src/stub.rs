@@ -607,7 +607,8 @@ impl StubBackend {
             };
             (url, state.model.active_tab)
         };
-        if new_tab {
+        // A space with no tabs has no active tab, so the address bar opens the page in a new tab there, as Zen does.
+        if new_tab || active_tab.is_none() {
             if let Some(source) = tab_source {
                 source.new_tab(Some(&resolved), active_tab, true)
             } else {
@@ -4717,6 +4718,28 @@ mod tests {
         assert!(!model.contributions.menu_entries.is_empty());
         assert!(!model.contributions.palette_entries.is_empty());
         assert!(!model.contributions.side_panels.is_empty());
+    }
+
+    #[test]
+    fn address_bar_submit_in_an_empty_space_opens_a_new_tab_there() {
+        let core = StubBackend::new();
+        core.invoke(Command::SpaceCreate {
+            name: Some("Empty".to_string()),
+            icon: None,
+        })
+        .unwrap();
+        let empty_space = core.model().spaces.last().unwrap().id;
+        core.invoke(Command::SpaceSwitch { space_id: empty_space }).unwrap();
+        assert_eq!(core.model().active_tab, None);
+
+        core.invoke(Command::AddressBarSubmit {
+            input: "https://example.org/".to_string(),
+            new_tab: false,
+        })
+        .unwrap();
+        let active = core.model().active_tab().cloned().unwrap();
+        assert_eq!(active.url, "https://example.org/");
+        assert_eq!(active.space_id, Some(empty_space));
     }
 
     #[test]
