@@ -612,6 +612,15 @@ void ConnectionFromClient::update_system_theme(Web::PageId page_id, Core::Anonym
     page->set_palette_impl(*impl);
 }
 
+void ConnectionFromClient::set_user_style(Web::PageId page_id, String source)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    page->page().set_user_style(Utf16String::from_utf8(source));
+}
+
 void ConnectionFromClient::set_site_compatibility_data(JsonValue data)
 {
     auto parsed_data = Web::SiteCompatibilityData::from_json(data);

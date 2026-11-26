@@ -413,6 +413,8 @@ public:
     void send_system_theme_to_page(WebContentPage&);
     // Sends the theme to every page hosting documents of the tab, including the pages of out-of-process iframes.
     void update_system_theme(Core::AnonymousBuffer const&);
+    // A style sheet of the user origin that every page of the view gets, as the embedder's own styles.
+    void set_user_style(String source);
 
     void notify_cookies_changed(HashTable<String> const& changed_domains, ReadonlySpan<HTTP::Cookie::Cookie> page_cookies, ReadonlySpan<HTTP::Cookie::Cookie> host_cookies);
     void listen_for_host_cookie_changes(DevTools::DevToolsDelegate::OnHostCookieChange);
@@ -1133,6 +1135,7 @@ protected:
     Optional<Gfx::IntSize> m_window_size;
     Web::CSS::PreferredContrast m_preferred_contrast { Web::CSS::PreferredContrast::Auto };
     Web::CSS::PreferredMotion m_preferred_motion { Web::CSS::PreferredMotion::Auto };
+    String m_user_style;
 
     HistoryVisitTransition m_history_visit_transition_for_current_load { HistoryVisitTransition::Link };
     HistoryVisitTransition m_history_visit_transition_for_next_load { HistoryVisitTransition::Link };

@@ -63,7 +63,11 @@ become the generic module-schemes and network-hook seams.
 
 ### Extension messages in the Hub and WebContent
 
-The extension_* IPC messages and their handlers. To be replaced by the one generic embedder channel.
+The extension_* IPC messages and their handlers. To be replaced by the one generic embedder channel. Two small additions
+for the embedder's look and vim mode: `view_set_user_style` / `set_user_style` give every page of a view a user style
+sheet (Zendia's scrollbar colors), resent with the other preferences when a view gets a new page, and `PageClient`
+reports the input method state after a rendering update that moved the focus, so a field a page focuses by itself
+(autofocus) reaches the UI too.
 
 - `Services/Hub/Application.cpp`
 - `Services/Hub/Application.h`

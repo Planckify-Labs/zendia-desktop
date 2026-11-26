@@ -185,6 +185,8 @@ public:
     void publish_accessibility_tree(bool whole_tree_requested);
 
 private:
+    void report_focused_area_change();
+
     struct PendingDOMMutation {
         GC::Ref<Web::DOM::Node> target;
         WebView::Mutation mutation;
@@ -531,6 +533,7 @@ private:
     u64 m_accessibility_tree_sequence { 0 };
     RefPtr<Core::Timer> m_accessibility_focus_timer;
     Optional<i64> m_pending_accessibility_focus;
+    Optional<i64> m_reported_focused_area_id;
 
     bool m_has_devtools_client { false };
     NonnullRefPtr<Web::Fetch::Engine::NetworkActivityObservers> m_network_activity_observers;

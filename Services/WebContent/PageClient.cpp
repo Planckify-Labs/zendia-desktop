@@ -916,12 +916,31 @@ bool PageClient::has_rendering_opportunity() const
 
 void PageClient::did_finish_rendering_update()
 {
+    report_focused_area_change();
     m_rendering_opportunity_for_current_update = false;
     if (m_rendering_opportunity_granted) {
         deliver_granted_rendering_opportunity();
         return;
     }
     request_rendering_opportunity_if_needed();
+}
+
+// The UI hears about the focused field with the input method state, which input events send. A page that moves the
+// focus by itself (autofocus, focus() from a script) sends none, so the focus is checked once each rendering update has
+// run: every focus move asks for one, and the autofocus candidates are focused during it.
+void PageClient::report_focused_area_change()
+{
+    Optional<i64> focused_area_id;
+    if (auto navigable = page().hosted_focused_navigable()) {
+        if (auto document = navigable->active_document()) {
+            if (auto focused_area = document->focused_area())
+                focused_area_id = static_cast<i64>(focused_area->unique_id().value());
+        }
+    }
+    if (focused_area_id == m_reported_focused_area_id)
+        return;
+    m_reported_focused_area_id = focused_area_id;
+    client().update_input_method_state(m_id);
 }
 
 void PageClient::set_manual_rendering_opportunities(bool enabled)

@@ -163,6 +163,7 @@ private:
     virtual void destroy_view(u64 view_id) override;
     virtual void view_set_viewport(u64 view_id, Web::DevicePixelSize size, double device_pixel_ratio) override;
     virtual void view_set_system_theme(u64 view_id, Core::AnonymousBuffer theme) override;
+    virtual void view_set_user_style(u64 view_id, String source) override;
     virtual void view_set_screen_rects(u64 view_id, WebView::ViewImplementation::ScreenRects screen_rects) override;
     virtual void view_set_page_background_color_to_system_canvas(u64 view_id, bool dark) override;
     virtual void release_backing_store(u64 page_id, i32 bitmap_id) override;

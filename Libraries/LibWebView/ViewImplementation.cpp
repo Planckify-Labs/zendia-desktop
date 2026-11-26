@@ -1241,6 +1241,14 @@ void ViewImplementation::update_system_theme(Core::AnonymousBuffer const& theme)
     });
 }
 
+void ViewImplementation::set_user_style(String source)
+{
+    m_user_style = move(source);
+    traversable().for_each_hosting_page([&](WebContentPage& page) {
+        page.async_set_user_style(m_user_style);
+    });
+}
+
 void ViewImplementation::send_system_theme_to_page(WebContentPage& page)
 {
     if (auto theme = system_theme(); theme.is_valid())
@@ -1937,6 +1945,8 @@ static void send_force_dark(WebContentPage const& page)
 void ViewImplementation::send_preferences_to_page(WebContentPage& page)
 {
     send_system_theme_to_page(page);
+    if (!m_user_style.is_empty())
+        page.async_set_user_style(m_user_style);
     page.async_set_preferred_color_scheme(preferred_color_scheme_for_page(page));
     page.async_set_preferred_contrast(contrast_for_pages(m_preferred_contrast));
     page.async_set_preferred_motion(motion_for_pages(m_preferred_motion));

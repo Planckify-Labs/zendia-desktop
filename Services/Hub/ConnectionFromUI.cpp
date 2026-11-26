@@ -954,6 +954,12 @@ void ConnectionFromUI::view_set_system_theme(u64 view_id, Core::AnonymousBuffer 
         view->set_system_theme(move(theme));
 }
 
+void ConnectionFromUI::view_set_user_style(u64 view_id, String source)
+{
+    if (auto* view = find_view(view_id))
+        view->set_user_style(move(source));
+}
+
 void ConnectionFromUI::view_set_screen_rects(u64 view_id, WebView::ViewImplementation::ScreenRects screen_rects)
 {
     if (auto* view = find_view(view_id))

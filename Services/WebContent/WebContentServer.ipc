@@ -104,6 +104,7 @@ endpoint WebContentServer routed by Web::PageId page_id
     set_permission_snapshot(Web::Permissions::PermissionSnapshot snapshot) =|
 
     update_system_theme(Web::PageId page_id, Core::AnonymousBuffer theme_buffer) =|
+    set_user_style(Web::PageId page_id, String source) =|
     update_screen_rects(Web::PageId page_id, Vector<Web::DevicePixelRect> rects, Vector<Web::DevicePixelRect> available_rects, u32 main_screen_index) =|
 
     populate_navigation(Web::PageId page_id, Web::HTML::NavigationPopulationRequest request, Web::HTML::NavigationPopulationResult result) =|

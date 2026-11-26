@@ -126,6 +126,7 @@ private:
     virtual void set_permission_snapshot(Web::Permissions::PermissionSnapshot snapshot) override;
     virtual void compositor_process_reconnected() override;
     virtual void update_system_theme(Web::PageId page_id, Core::AnonymousBuffer) override;
+    virtual void set_user_style(Web::PageId page_id, String source) override;
     virtual void update_screen_rects(Web::PageId page_id, Vector<Web::DevicePixelRect>, Vector<Web::DevicePixelRect>, u32) override;
     virtual void populate_navigation(Web::PageId page_id, Web::HTML::NavigationPopulationRequest, Web::HTML::NavigationPopulationResult) override;
     virtual void stop_loading(Web::PageId page_id) override;
