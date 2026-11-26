@@ -101,7 +101,6 @@ impl StubBackend {
             AutomationResponse::ExplicitInsert => {
                 let _ = self.invoke(Command::Vim(VimCommand::ModeInsert));
             }
-            AutomationResponse::FocusRefused { .. } => {}
             AutomationResponse::Put { ok, text, flash } => {
                 if ok {
                     self.flash_page(tab_id, flash);

@@ -172,8 +172,6 @@ pub enum AutomationRequest {
     },
     /// The focused field gives up the focus.
     BlurField,
-    /// A field the page focused before the user did anything gives the focus back.
-    RefuseFocus,
     VisualEnter,
     VisualExit,
     VisualYank,
@@ -250,9 +248,6 @@ pub enum AutomationResponse {
     },
     /// No field to type in: insert mode until `<Esc>`, as with `I`.
     ExplicitInsert,
-    FocusRefused {
-        refused: bool,
-    },
     Put {
         ok: bool,
         text: String,

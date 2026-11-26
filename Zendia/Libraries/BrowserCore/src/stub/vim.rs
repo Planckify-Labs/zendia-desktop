@@ -114,7 +114,8 @@ impl StubBackend {
         self.report_pending_keys(Vec::new(), None);
     }
 
-    /// A field took the focus: normal and visual mode become insert mode ("clicking into a field ends visual mode").
+    /// A field took the focus, the user's or the page's: normal and visual mode become insert mode ("clicking into a field
+    /// ends visual mode").
     /// It lost the focus: insert mode becomes normal mode, unless insert mode was asked for with `I`.
     fn follow_field_focus(&self, editing: bool) {
         let (enabled, mode, explicit_insert) = {
@@ -129,11 +130,9 @@ impl StubBackend {
             return;
         }
         match (editing, mode) {
-            (true, InputMode::Normal) => {
-                self.set_page_mode(InputMode::Insert);
-                // A page that focuses a field before the user did anything (a search box on load) gets it refused.
-                let _ = self.ask_page(AutomationRequest::RefuseFocus);
-            }
+            // A field the page focused by itself (a search box on load) is typed into at once, as in the standard
+            // keys.
+            (true, InputMode::Normal) => self.set_page_mode(InputMode::Insert),
             // Clicking into a field ends visual mode.
             (true, InputMode::Visual) => {
                 self.set_visual_caret(None);

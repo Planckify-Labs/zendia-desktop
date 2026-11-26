@@ -457,8 +457,97 @@
   // The most labels at once: two letters of the alphabet make 576.
   const MAX_WORD_TARGETS = 560;
 
-  // Every paragraph and word on screen: a word label puts the cursor there (`land`) or grows the selection to it,
-  // and a paragraph label selects the paragraph.
+  // The part of an element that its scrolling and clipping ancestors leave to be seen, as the fork's visibleRect.
+  function clippedRect(element, cache) {
+    if (cache.has(element)) return cache.get(element);
+    const rect = element.getBoundingClientRect();
+    let left = rect.left;
+    let top = rect.top;
+    let right = rect.right;
+    let bottom = rect.bottom;
+    let level = 0;
+    for (let each = composedParent(element); each && level < 12; each = composedParent(each), level++) {
+      if (each.nodeType !== 1) continue;
+      const style = getComputedStyle(each);
+      if (style.overflowX === "visible" && style.overflowY === "visible") continue;
+      const box = each.getBoundingClientRect();
+      if (style.overflowX !== "visible") {
+        left = Math.max(left, box.left);
+        right = Math.min(right, box.right);
+      }
+      if (style.overflowY !== "visible") {
+        top = Math.max(top, box.top);
+        bottom = Math.min(bottom, box.bottom);
+      }
+    }
+    const clipped = { left, top, right, bottom };
+    cache.set(element, clipped);
+    return clipped;
+  }
+
+  const PAINTED_ELEMENTS = new Set(["img", "video", "canvas", "iframe", "svg", "embed", "object", "picture"]);
+
+  // Whether an element draws something that hides what is under it: a picture, or a background that is mostly opaque.
+  function paintsOver(element) {
+    if (PAINTED_ELEMENTS.has(element.localName)) return true;
+    const style = getComputedStyle(element);
+    if (style.backgroundImage && style.backgroundImage !== "none") return true;
+    const color = style.backgroundColor || "";
+    if (!color || color === "transparent") return false;
+    const parts = /\(([^)]*)\)/.exec(color);
+    const values = parts ? parts[1].split(/[\s,/]+/).filter(Boolean) : [];
+    if (values.length < 4) return true;
+    const alpha = values[3].endsWith("%") ? parseFloat(values[3]) / 100 : parseFloat(values[3]);
+    return alpha >= 0.5;
+  }
+
+  // Whether what the pointer hits over an element hides it: something between the hit and the element's nearest
+  // shared ancestor draws over it. A link laid over a whole card to make it clickable draws nothing, so the text under
+  // it still shows.
+  function coveredBy(hit, element) {
+    for (let each = hit; each && !composedContains(each, element); each = composedParent(each)) {
+      if (each.nodeType === 1 && paintsOver(each)) return true;
+    }
+    return false;
+  }
+
+  // Whether a word of a text shows where it is: inside what clips its element, and not under something drawn over
+  // it, such as a popup or a banner over the page.
+  function wordShows(node, rect, clips, hits) {
+    const element = composedParent(node);
+    if (!element || element.nodeType !== 1) return false;
+    if (rect.width < 2 || rect.height < 4) return false;
+    const x = Math.min(Math.max(rect.left + rect.width / 2, 0), innerWidth - 1);
+    const y = Math.min(Math.max(rect.top + rect.height / 2, 0), innerHeight - 1);
+    const clip = clippedRect(element, clips);
+    if (x < clip.left || x > clip.right || y < clip.top || y > clip.bottom) return false;
+    const key = Math.round(y);
+    let byLine = hits.get(element);
+    if (!byLine) hits.set(element, (byLine = new Map()));
+    if (!byLine.has(key)) {
+      const hit = deepElementFromPoint(x, y);
+      byLine.set(key, !hit || composedContains(element, hit) || !coveredBy(hit, element));
+    }
+    return byLine.get(key);
+  }
+
+  // The lines a paragraph's words that show are on, from its first: a block's text set apart elsewhere on the page
+  // (a caption, a badge placed far away) is not part of its bar.
+  function paragraphRect(rects) {
+    if (!rects.length) return null;
+    let { left, top, right, bottom } = rects[0];
+    for (const rect of rects.slice(1)) {
+      if (rect.top > bottom + Math.max(rect.height, 8)) break;
+      left = Math.min(left, rect.left);
+      top = Math.min(top, rect.top);
+      right = Math.max(right, rect.right);
+      bottom = Math.max(bottom, rect.bottom);
+    }
+    return { left, top, width: right - left, height: bottom - top, right, bottom };
+  }
+
+  // Every paragraph and word on screen that shows: a word label puts the cursor there (`land`) or grows the selection
+  // to it, and a paragraph label selects the paragraph.
   function wordTargets() {
     const page = new PageText();
     const from = caretPoint() || center();
@@ -471,6 +560,8 @@
       range.setEnd(last.node, last.offset);
       return range;
     };
+    const clips = new Map();
+    const hits = new Map();
     const paragraphs = [];
     const words = [];
     const offered = new Map();
@@ -482,19 +573,23 @@
       const lineRange = rangeOf(start, start + line.length);
       const lineRect = lineRange ? lineRange.getBoundingClientRect() : null;
       if (!lineRect || !onScreen(lineRect)) continue;
-      const pid = "p" + start;
-      offered.set(pid, { paragraph: lineRange });
-      paragraphs.push(target(pid, lineRect, "paragraph", { distance: distance(lineRect, from) }));
+      const shown = [];
       WORD.lastIndex = 0;
       for (const match of line.matchAll(WORD)) {
         const range = rangeOf(start + match.index, start + match.index + match[0].length);
         const rect = range ? range.getBoundingClientRect() : null;
-        if (rect && onScreen(rect)) {
-          const wid = "w" + (start + match.index);
-          offered.set(wid, { caret: { node: range.startContainer, offset: range.startOffset } });
-          words.push(target(wid, rect, "word", { distance: distance(rect, from) }));
-        }
+        if (!rect || !onScreen(rect) || !wordShows(range.startContainer, rect, clips, hits)) continue;
+        shown.push(rect);
+        const wid = "w" + (start + match.index);
+        offered.set(wid, { caret: { node: range.startContainer, offset: range.startOffset } });
+        words.push(target(wid, rect, "word", { distance: distance(rect, from) }));
       }
+      // A paragraph none of whose words show is not there to pick.
+      const rect = paragraphRect(shown);
+      if (!rect) continue;
+      const pid = "p" + start;
+      offered.set(pid, { paragraph: lineRange });
+      paragraphs.push(target(pid, rect, "paragraph", { distance: distance(rect, from) }));
     }
     pickable = offered;
     words.sort((a, b) => a.distance - b.distance);
@@ -1163,10 +1258,6 @@
   const ROW_TOLERANCE = 4;
   let lastField = null;
   let lastPut = null;
-  let refusedFocus = 0;
-  // The field the keys asked for: its focus is the user's, not one the page stole.
-  let askedField = null;
-  const MAX_REFUSED_FOCUS = 3;
 
   document.addEventListener(
     "focusin",
@@ -1204,7 +1295,6 @@
 
   // Continue typing after what is there, as `A` would in vim.
   function focusField(element) {
-    askedField = element;
     element.focus();
     try {
       const end = element.value === undefined ? undefined : element.value.length;
@@ -1259,19 +1349,6 @@
     const active = deepActiveElement();
     if (isEditable(active)) active.blur();
     return { kind: "ok" };
-  }
-
-  // A page that focuses a field before the user did anything (a search box on load) would put the page in insert
-  // mode by itself. The field loses the focus again, unless the page keeps insisting.
-  function refuseFocus() {
-    const active = deepActiveElement();
-    const activated = navigator.userActivation ? navigator.userActivation.hasBeenActive : true;
-    if (isEditable(active) && active !== askedField && !activated && refusedFocus < MAX_REFUSED_FOCUS) {
-      refusedFocus++;
-      active.blur();
-      return { kind: "focus_refused", refused: true };
-    }
-    return { kind: "focus_refused", refused: false };
   }
 
   function isTextField(element) {
@@ -1440,9 +1517,6 @@
           break;
         case "blur_field":
           response = blurField();
-          break;
-        case "refuse_focus":
-          response = refuseFocus();
           break;
         case "visual_enter":
           response = visualEnter();
