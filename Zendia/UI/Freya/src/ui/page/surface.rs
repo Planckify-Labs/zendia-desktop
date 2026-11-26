@@ -31,6 +31,31 @@ pub enum SurfaceTarget {
     View(u64),
 }
 
+/// The command a clipboard key runs on a page: cut, copy, paste, paste as plain text and select all, with Ctrl, or
+/// with Cmd on macOS.
+fn clipboard_command(e: &KeyboardEventData, tab_id: TabId) -> Option<Command> {
+    let accel = e.modifiers.contains(Modifiers::CONTROL) || e.modifiers.contains(Modifiers::META);
+    if !accel || e.modifiers.contains(Modifiers::ALT) {
+        return None;
+    }
+    let shift = e.modifiers.contains(Modifiers::SHIFT);
+    let tab_id = Some(tab_id);
+    match (e.code, shift) {
+        (Code::KeyX, false) => Some(Command::PageCut { tab_id }),
+        (Code::KeyC, false) => Some(Command::PageCopy { tab_id }),
+        (Code::KeyV, false) => Some(Command::PagePaste {
+            tab_id,
+            match_style: false,
+        }),
+        (Code::KeyV, true) => Some(Command::PagePaste {
+            tab_id,
+            match_style: true,
+        }),
+        (Code::KeyA, false) => Some(Command::PageSelectAll { tab_id }),
+        _ => None,
+    }
+}
+
 fn device_point(location: CursorPoint, device_pixel_ratio: f64) -> Web_DevicePixelPoint {
     Web_DevicePixelPoint {
         x: (location.x * device_pixel_ratio).round() as i32,
@@ -290,6 +315,13 @@ impl Component for PageSurface {
                 }
                 drop(model);
                 let Some(view_id) = view_id else { return };
+                // The page leaves the clipboard keys to the browser, as Ladybird's own windows bind them to their Edit
+                // actions: they act on the page that has the keys, in any mode a keymap leaves them to.
+                if let Some(command) = clipboard_command(&e, TabId(view_id)) {
+                    keymap.consume_key_up(e.code);
+                    core.invoke_or_log(command);
+                    return;
+                }
                 let event = input::key_event(true, &e.key, e.code, e.modifiers);
                 tracker.borrow().send_key(view_id, event);
             }

@@ -269,6 +269,22 @@ fn handle_message(
                 text: libipc_rust::wire::Utf16String::from(text.as_str()),
             });
         }
+        // A paste asks for the clipboard as an item of all its forms; the system clipboard gives its text.
+        HubMessage::AppReadClipboardItem(client::AppReadClipboardItem { request_id }) => {
+            let text = freya::clipboard::Clipboard::get().unwrap_or_default();
+            let item = if text.is_empty() {
+                Web_Clipboard_SystemClipboardItem::default()
+            } else {
+                Web_Clipboard_SystemClipboardItem::plain_text(&text)
+            };
+            hub.post_or_log(server::AnswerClipboardItem { request_id, item });
+        }
+        // What a page puts on the clipboard (a copy it handles itself, navigator.clipboard.write): its text.
+        HubMessage::AppInsertClipboardItem(client::AppInsertClipboardItem { item }) => {
+            if let Some(text) = item.plain_text_of() {
+                let _ = freya::clipboard::Clipboard::set(text);
+            }
+        }
         HubMessage::AppQuitForSignal(_) => Platform::get().exit(),
         HubMessage::ViewRequestContextMenu(client::ViewRequestContextMenu { view_id, request }) => {
             let caps = adapter.view_capabilities(view_id);

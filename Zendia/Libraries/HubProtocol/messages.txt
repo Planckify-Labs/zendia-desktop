@@ -13,6 +13,7 @@ view_description
 ui_did_start
 active_view_changed
 answer_clipboard_text
+answer_clipboard_item
 destroy_view
 view_set_viewport
 view_set_screen_rects
@@ -59,7 +60,9 @@ app_open_url_in_new_tab
 app_open_url_in_new_window
 app_open_view_in_new_tab
 app_set_clipboard_text
+app_insert_clipboard_item
 app_read_clipboard_text
+app_read_clipboard_item
 app_quit_for_signal
 view_open_new_view
 view_activate_tab

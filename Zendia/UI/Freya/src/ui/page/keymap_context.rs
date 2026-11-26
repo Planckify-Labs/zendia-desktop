@@ -156,6 +156,12 @@ impl KeymapController {
         consumed
     }
 
+    /// Marks a `KeyDown` for `code` as used by the browser rather than the page, so its `KeyUp` stays away from the
+    /// page too.
+    pub fn consume_key_up(&self, code: Code) {
+        self.inner.borrow_mut().consumed_key_codes.insert(code);
+    }
+
     /// Returns true if the corresponding `KeyDown` for `code` was consumed by the keymap, preventing a stray `KeyUp`
     /// from reaching the page.
     pub fn take_consumed_key_up(&self, code: Code) -> bool {

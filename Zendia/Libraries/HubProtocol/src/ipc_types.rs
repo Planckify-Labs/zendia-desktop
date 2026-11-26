@@ -685,3 +685,64 @@ pub struct Web_HTML_PreparedNavigationDescriptor {
 }
 
 include!(concat!(env!("OUT_DIR"), "/HubProtocol.rs"));
+
+/// `Web::HTML::SelectedFile`'s contents: an `AK::Variant` of a descriptor of the file and its bytes, which go as a
+/// `ByteBuffer`, the way a `ByteString` does.
+#[derive(Debug, Encode, Decode)]
+pub enum Web_HTML_SelectedFileContents {
+    File(File),
+    Bytes(ByteString),
+}
+
+/// `Web::HTML::SelectedFile`: a file the user picked or copied, its name and then its contents.
+#[derive(Debug, Encode, Decode)]
+pub struct Web_HTML_SelectedFile {
+    pub name: Utf16String,
+    pub contents: Web_HTML_SelectedFileContents,
+}
+
+/// What a `Web::Clipboard::SystemClipboardRepresentation` holds: an `AK::Variant` of bytes (text, or what a page
+/// wrote) and a file.
+#[derive(Debug, Encode, Decode)]
+pub enum Web_Clipboard_SystemClipboardData {
+    Bytes(ByteString),
+    File(Web_HTML_SelectedFile),
+}
+
+/// `Web::Clipboard::SystemClipboardRepresentation`: one form of a clipboard item, named by its MIME type.
+#[derive(Debug, Encode, Decode)]
+pub struct Web_Clipboard_SystemClipboardRepresentation {
+    pub name: Utf8String,
+    pub data: Web_Clipboard_SystemClipboardData,
+}
+
+/// `Web::Clipboard::SystemClipboardItem`: the forms of what is on the clipboard.
+#[derive(Debug, Default, Encode, Decode)]
+pub struct Web_Clipboard_SystemClipboardItem {
+    pub system_clipboard_representations: Vec<Web_Clipboard_SystemClipboardRepresentation>,
+}
+
+impl Web_Clipboard_SystemClipboardItem {
+    /// An item of plain text, as the system clipboard's text is to a page.
+    pub fn plain_text(text: &str) -> Self {
+        Self {
+            system_clipboard_representations: vec![Web_Clipboard_SystemClipboardRepresentation {
+                name: Utf8String::from("text/plain"),
+                data: Web_Clipboard_SystemClipboardData::Bytes(ByteString(text.as_bytes().to_vec())),
+            }],
+        }
+    }
+
+    /// The item's plain text, if it has any.
+    pub fn plain_text_of(&self) -> Option<String> {
+        self.system_clipboard_representations.iter().find_map(|each| {
+            let name = String::from_utf8_lossy(each.name.as_bytes());
+            match &each.data {
+                Web_Clipboard_SystemClipboardData::Bytes(bytes) if name.split(';').next() == Some("text/plain") => {
+                    Some(String::from_utf8_lossy(&bytes.0).into_owned())
+                }
+                _ => None,
+            }
+        })
+    }
+}
