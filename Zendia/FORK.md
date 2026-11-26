@@ -14,15 +14,14 @@ same.
 
 The design (`Zendia/Documentation/Architecture.md`) keeps changes to upstream to three generic seams: isolated worlds
 and module schemes in `Libraries/LibWeb/`, one embedder channel in `Services/Hub/` and `Services/WebContent/`, and a
-network hook in `Services/RequestServer/`. The cgx-webext integration below predates the design. Each group says what
-it turns into.
+network hook in `Services/RequestServer/`.
 
 ## Current changes
 
 ### Isolated worlds (seam)
 
-Script contexts for extension content scripts, with realm-scoped CSP, Trusted Types, error reporting and timers. To
-become the generic isolated-worlds seam that the Automation World and plugins also use.
+Script contexts for the Automation World, plugin page scripts and extension content scripts, with realm-scoped CSP,
+Trusted Types, error reporting and timers.
 
 - `Libraries/LibWeb/Bindings/MainThreadVM.cpp`
 - `Libraries/LibWeb/Bindings/Wrappable.cpp`
@@ -47,8 +46,7 @@ become the generic isolated-worlds seam that the Automation World and plugins al
 
 ### Module schemes and network hook (seams)
 
-Extension origins, CORS-free extension fetches, and the hook for declarativeNetRequest, webRequest and webNavigation. To
-become the generic module-schemes and network-hook seams.
+Extension origins, CORS-free extension fetches, and the hook for declarativeNetRequest, webRequest and webNavigation.
 
 - `Libraries/LibURL/Rust/src/origin.rs`
 - `Libraries/LibWeb/Fetch/Fetching/Fetching.cpp`
@@ -61,16 +59,26 @@ become the generic module-schemes and network-hook seams.
 - `Libraries/LibWebCommon/Loader/SiteCompatibility.h`
 - `Libraries/LibWebCommon/SecureContexts/AbstractOperations.cpp`
 
-### Extension messages in the Hub and WebContent
+### Embedder channel in the Hub, LibWebView and WebContent (seam)
 
-The extension_* IPC messages and their handlers. To be replaced by the one generic embedder channel. Two small additions
-for the embedder's look and vim mode: `view_set_user_style` / `set_user_style` give every page of a view a user style
-sheet (Zendia's scrollbar colors), resent with the other preferences when a view gets a new page, and `PageClient`
-reports the input method state after a rendering update that moved the focus, so a field a page focuses by itself
-(autofocus) reaches the UI too.
+Generic embedder channel (`view_embedder_message` / `view_embedder_reply` for Automation World, and
+`connect_embedder_channel` forwarding engine extension hooks to Zendia's sandboxed `ExtensionServer` process). No
+`cgx-webext` code or C ABI lives in upstream C++. Two small additions for the embedder's look and vim mode:
+`view_set_user_style` / `set_user_style` give every page of a view a user style sheet (Zendia's scrollbar colors),
+resent with the other preferences when a view gets a new page, and `PageClient` reports the input method state after
+a rendering update that moved the focus, so a field a page focuses by itself (autofocus) reaches the UI too.
 
-- `Services/Hub/Application.cpp`
-- `Services/Hub/Application.h`
+- `Libraries/LibWebView/Application.cpp`
+- `Libraries/LibWebView/Application.h`
+- `Libraries/LibWebView/CMakeLists.txt`
+- `Libraries/LibWebView/EmbedderExtensionBridge.cpp`
+- `Libraries/LibWebView/EmbedderExtensionBridge.h`
+- `Libraries/LibWebView/ViewImplementation.cpp`
+- `Libraries/LibWebView/ViewImplementation.h`
+- `Libraries/LibWebView/WebContentClient.cpp`
+- `Libraries/LibWebView/WebContentClient.h`
+- `Libraries/LibWebView/WebContentPage.cpp`
+- `Libraries/LibWebView/WebContentPage.h`
 - `Services/Hub/ConnectionFromUI.cpp`
 - `Services/Hub/ConnectionFromUI.h`
 - `Services/Hub/HubClient.ipc`
@@ -82,53 +90,6 @@ reports the input method state after a rendering update that moved the focus, so
 - `Services/WebContent/PageClient.h`
 - `Services/WebContent/WebContentClient.ipc`
 - `Services/WebContent/WebContentServer.ipc`
-
-### cgx-webext host in LibWebView
-
-The C++ adapter over cgx-webext's C ABI, the store installer and the extension delegate. Moves into ExtensionServer
-(build order step 8), then these files go back to upstream's version.
-
-- `Libraries/LibWebView/Application.cpp`
-- `Libraries/LibWebView/Application.h`
-- `Libraries/LibWebView/CMakeLists.txt`
-- `Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.cpp`
-- `Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.h`
-- `Libraries/LibWebView/Extensions/ExtensionManager.cpp`
-- `Libraries/LibWebView/Extensions/ExtensionManager.h`
-- `Libraries/LibWebView/Extensions/StoreInstaller.cpp`
-- `Libraries/LibWebView/Extensions/StoreInstaller.h`
-- `Libraries/LibWebView/Options.h`
-- `Libraries/LibWebView/ViewImplementation.cpp`
-- `Libraries/LibWebView/ViewImplementation.h`
-- `Libraries/LibWebView/WebContentClient.cpp`
-- `Libraries/LibWebView/WebContentClient.h`
-- `Libraries/LibWebView/WebContentPage.cpp`
-- `Libraries/LibWebView/WebContentPage.h`
-
-### Extension UI in Qt
-
-The extensions toolbar, panel and popups of the Qt UI. Reverted to upstream's version once Qt is no longer built (build
-order step 10).
-
-- `UI/Qt/Actions.h`
-- `UI/Qt/Application.cpp`
-- `UI/Qt/Application.h`
-- `UI/Qt/CMakeLists.txt`
-- `UI/Qt/ExtensionsUI.cpp`
-- `UI/Qt/ExtensionsUI.h`
-- `UI/Qt/HubConnection.cpp`
-- `UI/Qt/HubConnection.h`
-- `UI/Qt/RemoteView.h`
-- `UI/Qt/WindowToolbar.cpp`
-- `UI/Qt/WindowToolbar.h`
-
-### Build option
-
-ENABLE_WEBEXT and WEBEXT_SOURCE_DIR, which build cgx-webext into LibWebView. Removed once ExtensionServer hosts the
-core.
-
-- `CMakeLists.txt`
-- `Meta/CMake/cmake_options.cmake`
 
 ### Web compatibility data
 

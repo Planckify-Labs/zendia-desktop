@@ -649,19 +649,63 @@ impl Component for ToolbarItemView {
             self.item.badge.clone()
         };
 
-        let badge = effective_badge.map(|badge| {
-            let (badge_bg, badge_fg) = match badge.tone {
-                BadgeTone::Neutral => (theme.color(ThemeRole::SurfaceRaised), theme.color(ThemeRole::Text)),
-                BadgeTone::Accent => (theme.color(ThemeRole::Accent), theme.color(ThemeRole::TextOnAccent)),
-                BadgeTone::Warning => (theme.color(ThemeRole::Warning), theme.color(ThemeRole::Ink)),
-                BadgeTone::Error => (theme.color(ThemeRole::Danger), Color::WHITE),
+        let ext_info = match &self.item.source {
+            ContributionSource::Extension { extension_id } => core
+                .model()
+                .read()
+                .extension(&zendia_browser_core::modules::ExtensionId::new(extension_id.clone()))
+                .cloned(),
+            _ => None,
+        };
+        let is_extension_item = ext_info.is_some();
+
+        let badge: Option<Element> = effective_badge.map(|badge| {
+            let (badge_bg, badge_fg) = if !extension_paused
+                && let Some(ext) = &ext_info
+                && let Some([r, g, b, a]) = ext.badge_bg
+            {
+                let bg = Color::from_argb(a, r, g, b);
+                let fg = ext
+                    .badge_fg
+                    .map(|[fr, fg, fb, fa]| Color::from_argb(fa, fr, fg, fb))
+                    .unwrap_or(Color::WHITE);
+                (bg, fg)
+            } else {
+                match badge.tone {
+                    BadgeTone::Neutral => (theme.color(ThemeRole::SurfaceRaised), theme.color(ThemeRole::Text)),
+                    BadgeTone::Accent => (theme.color(ThemeRole::Accent), theme.color(ThemeRole::TextOnAccent)),
+                    BadgeTone::Warning => (theme.color(ThemeRole::Warning), theme.color(ThemeRole::Ink)),
+                    BadgeTone::Error => (theme.color(ThemeRole::Danger), Color::WHITE),
+                }
             };
-            ToolbarPulseBadge {
-                text: badge.text,
-                bg: badge_bg,
-                fg: badge_fg,
-                pulsing: is_agents_button && badge.tone == BadgeTone::Warning && !static_snapshot,
-                key: DiffKey::from(&format!("tb-badge-{}", self.item.id.as_str())),
+            if is_extension_item {
+                // Compact Firefox/Zen `.toolbarbutton-badge` tucked cleanly inside the top-right corner of the button.
+                rect()
+                    .position(Position::new_absolute().top(1.0).right(1.0))
+                    .min_width(Size::px(14.0))
+                    .height(Size::px(13.0))
+                    .padding(Gaps::new(0.0, 3.0, 0.0, 3.0))
+                    .corner_radius(CornerRadius::new_all(3.0))
+                    .background(badge_bg)
+                    .center()
+                    .interactive(Interactive::No)
+                    .child(
+                        label()
+                            .text(badge.text)
+                            .font_size(8.5)
+                            .font_weight(FontWeight::BOLD)
+                            .color(badge_fg),
+                    )
+                    .into_element()
+            } else {
+                ToolbarPulseBadge {
+                    text: badge.text,
+                    bg: badge_bg,
+                    fg: badge_fg,
+                    pulsing: is_agents_button && badge.tone == BadgeTone::Warning && !static_snapshot,
+                    key: DiffKey::from(&format!("tb-badge-{}", self.item.id.as_str())),
+                }
+                .into_element()
             }
         });
 
@@ -733,6 +777,15 @@ impl Component for ToolbarItemView {
                     .center()
                     .child(if self.item.id.as_str() == LIBRARY_ITEM_ID {
                         LibrarySprite::new(theme.color(icon_role), feedback.is_hovered()).into_element()
+                    } else if let Some(ext) = &ext_info {
+                        crate::ui::extensions::ExtensionIconView::new(
+                            format!("tb-ext-{}", ext.id.as_str()),
+                            effective_icon,
+                            ext.icon_data.clone(),
+                            if self.tight { 14.0 } else { 16.0 },
+                            icon_role,
+                        )
+                        .into_element()
                     } else {
                         Icon::new(effective_icon).size(icon_size).role(icon_role).into_element()
                     }),
@@ -935,13 +988,13 @@ impl Component for LocationBar {
         } else {
             Color::TRANSPARENT
         };
-        // TB-05: Single-toolbar sidebar URL bar omits the duplicate right-side sliders button;
-        // Multiple/Collapsed top bar shows Copy Link on the left next to identity and sliders on the right.
-        let site_button = (!floating_open && !self.compact_sidebar).then(|| {
+        // Matches Zen's `#zen-site-data-icon-button`: present at the right end of the URL bar in both single-toolbar
+        // and multiple-toolbar layouts so the user always has a direct button for Site Data and Extensions.
+        let site_button = (!floating_open).then(|| {
             rect()
                 .a11y_focusable(true)
                 .a11y_role(AccessibilityRole::Button)
-                .a11y_alt("Site Data and Permissions")
+                .a11y_alt("Site Data and Extensions")
                 .width(Size::px(22.0))
                 .height(Size::px(22.0))
                 .corner_radius(CornerRadius::new_all(5.0))
@@ -968,7 +1021,6 @@ impl Component for LocationBar {
         });
 
         let id_core = core.clone();
-        let compact_anchor_on_id = self.compact_sidebar;
         let identity_icon = (!floating_open).then(|| {
             let role = if site_info.security.is_warning() {
                 ThemeRole::Danger
@@ -984,12 +1036,6 @@ impl Component for LocationBar {
                 .corner_radius(CornerRadius::new_all(5.0))
                 .center()
                 .cursor(CursorIcon::Pointer)
-                .on_sized(move |e: Event<SizedEventData>| {
-                    if compact_anchor_on_id && let Some(state) = addr_state {
-                        let mut anchor = state.site_panel_anchor;
-                        anchor.set_if_modified(AnchorRect::from_area(e.area));
-                    }
-                })
                 .on_press(move |e: Event<PressEventData>| {
                     e.stop_propagation();
                     id_core.invoke_or_log(Command::SitePanelToggle);

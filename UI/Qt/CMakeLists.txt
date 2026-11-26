@@ -81,11 +81,6 @@ add_library(ladybird_impl STATIC
     WindowScreenObserver.cpp
     WindowToolbar.cpp
 )
-
-# AD-HOC (cgx-webext): extension toolbar buttons, the extensions panel and extension popups.
-if (ENABLE_WEBEXT)
-    target_sources(ladybird_impl PRIVATE ExtensionsUI.cpp ExtensionsUI.h)
-endif()
 if (NOT APPLE AND NOT WIN32 AND NOT ANDROID)
     target_sources(ladybird_impl PRIVATE
         AccessibilityInterface.cpp

@@ -45,11 +45,6 @@
 #include <LibWebView/URL.h>
 #include <LibWebView/UserAgent.h>
 #include <LibWebView/ViewImplementation.h>
-#if defined(ENABLE_WEBEXT)
-#    include <AK/JsonArray.h>
-#    include <AK/JsonObject.h>
-#    include <LibWebView/Extensions/ExtensionManager.h>
-#endif
 #include <LibWebView/WebContentClient.h>
 #include <LibWebView/WebDriverBiDi.h>
 #include <math.h>

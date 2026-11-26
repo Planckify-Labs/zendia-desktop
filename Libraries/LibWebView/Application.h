@@ -81,10 +81,7 @@ namespace WebView {
 
 struct ApplicationSettingsObserver;
 struct ApplicationPermissionManagerObserver;
-class ApplicationExtensionDelegate;
-class ExtensionManager;
-class HeadlessWebView;
-class StoreInstaller;
+class EmbedderExtensionBridge;
 
 class WEBVIEW_API Application : public DevTools::DevToolsDelegate {
     AK_MAKE_NONCOPYABLE(Application);
@@ -194,43 +191,9 @@ public:
     String user_agent_string() const;
     Web::NavigatorCompatibilityMode navigator_compatibility_mode() const;
 
-#if defined(ENABLE_WEBEXT)
-    // Null if extension support could not start, or once the application is shutting down (pages and views are destroyed
-    // after it, and must not reach for it then).
-    static ExtensionManager* extension_manager() { return s_the ? s_the->m_extension_manager.ptr() : nullptr; }
-    static StoreInstaller* store_installer() { return s_the ? s_the->m_store_installer.ptr() : nullptr; }
-
-    // A yes/no question about installing or removing an extension, asked by the browser (not by a page).
-    struct ExtensionPrompt {
-        String title;
-        String message;
-        Vector<String> details;
-        String accept_label;
-    };
-    // Calls `on_answer` exactly once. Without a UI (headless) the answer is no, unless --auto-accept-extension-prompts.
-    virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const;
-
-    // The browser UI's part of extensions. The defaults suit a browser without windows (headless).
-    // A host.* primitive of the extension core that needs windows and tabs (host.tabs.create, host.windows.update, ...).
-    virtual void extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply);
-    // Whether the default extension_host_call above answers this primitive itself, without windows (cookies, ...).
-    static bool extension_host_call_works_without_ui(StringView function);
-    // An extension's toolbar button, menu items or shortcuts changed ("action", "commands").
-    virtual void extension_ui_changed(StringView extension_id, StringView what) { (void)extension_id, (void)what; }
-    // Whether the view shows an extension's popup (which is not a tab).
-    virtual bool is_extension_popup_view(u64 view_id) const { (void)view_id; return false; }
-    // "__ui.popupSize" [width, height] and "__ui.closePopup" from a popup page.
-    virtual void extension_popup_request(u64 view_id, StringView name, StringView args_json) { (void)view_id, (void)name, (void)args_json; }
-    // Whether the view hosts an extension's background page (which is not a tab either).
-    bool is_extension_background_view(u64 view_id) const;
-    // The stages of a network request extensions care about (Web::ExtensionNetwork::Stage bits); every renderer is told.
-    void extension_network_interest_changed();
-    u32 extension_network_interest() const { return m_extension_network_interest; }
-    // runtime.reload: restarts the background context and reloads the extension's open pages.
-    void reload_extension(ByteString const& extension_id);
-    // Removes an extension (asking the user first) and everything it stored.
-    void remove_extension(ByteString const& extension_id);
-#endif
+    static EmbedderExtensionBridge* extension_bridge() { return s_the ? s_the->m_extension_bridge.ptr() : nullptr; }
+    void connect_extension_bridge(int socket_fd);
+    CookieJar* default_cookie_jar() const;
 
     void background_networking_settings_changed(Badge<ApplicationSettingsObserver>);
 
@@ -482,17 +445,6 @@ protected:
     explicit Application(Optional<ByteString> ladybird_binary_path = {});
 
     ErrorOr<void> initialize(Main::Arguments const&);
-#if defined(ENABLE_WEBEXT)
-    void initialize_extensions();
-    void start_extension_background_pages();
-    enum class ExtensionStartReason {
-        Startup,   // Loaded from the profile.
-        Install,   // --load-extension, or freshly installed from a store.
-        Update,    // Replaced an installed version.
-    };
-    void start_extension_background_page(ByteString const& extension_id, ExtensionStartReason);
-    void stop_extension_background_page(ByteString const& extension_id);
-#endif
 
     virtual void process_did_exit(Process&&, Optional<int> exit_status);
 
@@ -681,20 +633,7 @@ private:
     RefPtr<Core::Timer> m_permission_expiry_timer;
 
     MediaSessionCoordinator m_media_session_coordinator;
-
-#if defined(ENABLE_WEBEXT)
-    OwnPtr<ApplicationExtensionDelegate> m_extension_delegate;
-    OwnPtr<ExtensionManager> m_extension_manager;
-    // Hidden views hosting extensions' background pages; not tabs, and never shown.
-    HashMap<ByteString, NonnullOwnPtr<HeadlessWebView>> m_extension_background_views;
-    OwnPtr<StoreInstaller> m_store_installer;
-    u32 m_extension_network_interest { 0 };
-    bool m_extension_network_interest_update_pending { false };
-    bool m_extensions_started { false };
-    // Extensions to start once the event loop runs, and why.
-    Vector<ByteString> m_loaded_extension_ids;
-    Vector<ByteString> m_kept_extension_ids;
-#endif
+    OwnPtr<EmbedderExtensionBridge> m_extension_bridge;
 
     Main::Arguments m_arguments;
     OwnPtr<Core::StatsLog> m_stats_log;

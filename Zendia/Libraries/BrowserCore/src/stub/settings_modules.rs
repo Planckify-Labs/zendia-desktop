@@ -112,6 +112,35 @@ pub(crate) fn parse_command(name: &str, args: &[(String, String)]) -> Result<Opt
         "extension.remove" => Ok(Some(Command::ExtensionRemove {
             extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
         })),
+        "extension.reload" => Ok(Some(Command::ExtensionReload {
+            extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
+        })),
+        "extension.install_path" => Ok(Some(Command::ExtensionInstallPath {
+            path: parse_required_string(name, args, "path")?,
+        })),
+        "extension.open_options" => Ok(Some(Command::ExtensionOpenOptions {
+            extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
+        })),
+        "extension.prompt_answer" => {
+            let raw_token = parse_required_string(name, args, "token")?;
+            let token = raw_token.parse::<u64>().map_err(|_| CommandError::InvalidArgument {
+                command: name.to_string(),
+                message: format!("argument `token` expected u64, got `{raw_token}`"),
+            })?;
+            Ok(Some(Command::ExtensionPromptAnswer {
+                token,
+                accepted: parse_bool_arg(name, args, "accepted", false)?,
+            }))
+        }
+        "extension.context_menu_click" => Ok(Some(Command::ExtensionContextMenuClick {
+            extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
+            item_id: parse_required_string(name, args, "item_id")?,
+            target_json: find_arg(args, "target_json").unwrap_or("{}").to_string(),
+        })),
+        "extension.invoke_command" => Ok(Some(Command::ExtensionInvokeCommand {
+            extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
+            name: parse_required_string(name, args, "name")?,
+        })),
         "extensions.menu.toggle" => Ok(Some(Command::ExtensionsMenuToggle)),
         "service.set_state" => {
             let raw_service = parse_required_string(name, args, "service")?;
@@ -298,6 +327,67 @@ pub(crate) fn command_descriptors() -> Vec<CommandDescriptor> {
             )],
         },
         CommandDescriptor {
+            name: "extension.reload".to_string(),
+            title: "Reload Extension".to_string(),
+            description: "Reload an installed WebExtension".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "extension_id",
+                ArgumentType::String,
+                true,
+                "Extension id",
+            )],
+        },
+        CommandDescriptor {
+            name: "extension.install_path".to_string(),
+            title: "Install Extension From Path".to_string(),
+            description: "Install an unpacked extension folder or .crx/.xpi/.zip package".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "path",
+                ArgumentType::String,
+                true,
+                "Path to extension directory or package",
+            )],
+        },
+        CommandDescriptor {
+            name: "extension.open_options".to_string(),
+            title: "Open Extension Options".to_string(),
+            description: "Open an installed WebExtension's options page in a new tab".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "extension_id",
+                ArgumentType::String,
+                true,
+                "Extension id",
+            )],
+        },
+        CommandDescriptor {
+            name: "extension.prompt_answer".to_string(),
+            title: "Answer Extension Prompt".to_string(),
+            description: "Accept or cancel a pending WebExtension consent prompt".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("token", ArgumentType::Integer, true, "Prompt token"),
+                ArgumentSchema::new("accepted", ArgumentType::Bool, true, "Whether user accepted"),
+            ],
+        },
+        CommandDescriptor {
+            name: "extension.context_menu_click".to_string(),
+            title: "Click Extension Context Menu Item".to_string(),
+            description: "Invoke an extension-registered page context menu item".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("extension_id", ArgumentType::String, true, "Extension id"),
+                ArgumentSchema::new("item_id", ArgumentType::String, true, "Context menu item id"),
+                ArgumentSchema::new("target_json", ArgumentType::String, false, "Serialized click target"),
+            ],
+        },
+        CommandDescriptor {
+            name: "extension.invoke_command".to_string(),
+            title: "Invoke Extension Command".to_string(),
+            description: "Invoke a manifest-declared extension keyboard command".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("extension_id", ArgumentType::String, true, "Extension id"),
+                ArgumentSchema::new("name", ArgumentType::String, true, "Command name"),
+            ],
+        },
+        CommandDescriptor {
             name: "extensions.menu.toggle".to_string(),
             title: "Extensions Menu".to_string(),
             description: "Open the menu listing every installed extension".to_string(),
@@ -394,13 +484,20 @@ pub fn sync_module_contributions(model: &mut BrowserModel) {
 }
 
 impl StubBackend {
-    /// Initializes live module contributions (sample extension button + sample plugin panel) and marks PluginHost and
-    /// ExtensionServer as running for the real browser window (`new_for_external_tabs`).
+    /// Initializes live module contributions for the real browser window (`new_for_external_tabs`).
+    ///
+    /// Clears the gallery's sample WebExtension and sets `ExtensionServer` to `Starting` so the real
+    /// `ExtensionServer` process owns installed extensions and service status.
     pub(crate) fn enable_live_modules(&self) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.model.extensions.clear();
+        state.model.extension_commands.clear();
+        state.model.pending_extension_prompt = None;
         for svc in &mut state.model.services {
-            if matches!(svc.service, ServiceId::PluginHost | ServiceId::ExtensionServer) {
+            if svc.service == ServiceId::PluginHost {
                 svc.status = ServiceStatus::Running;
+            } else if svc.service == ServiceId::ExtensionServer {
+                svc.status = ServiceStatus::Starting;
             }
         }
         sync_module_contributions(&mut state.model);
@@ -620,6 +717,9 @@ impl StubBackend {
                 })
             }
             Command::ExtensionSetEnabled { extension_id, enabled } => {
+                if let Some(source) = self.current_extension_source() {
+                    return source.set_enabled(&extension_id, enabled);
+                }
                 let (extensions, contributions) = {
                     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                     let Some(ext) = state.model.extensions.iter_mut().find(|e| e.id == extension_id) else {
@@ -634,6 +734,9 @@ impl StubBackend {
                 Ok(())
             }
             Command::ExtensionSetToolbarPinned { extension_id, pinned } => {
+                if let Some(source) = self.current_extension_source() {
+                    return source.set_toolbar_pinned(&extension_id, pinned);
+                }
                 let (extensions, contributions) = {
                     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                     let Some(ext) = state.model.extensions.iter_mut().find(|e| e.id == extension_id) else {
@@ -648,6 +751,31 @@ impl StubBackend {
                 Ok(())
             }
             Command::ExtensionInvokeAction { extension_id } => {
+                if let Some(source) = self.current_extension_source() {
+                    let status = {
+                        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                        service_status_in(&state.model.services, ServiceId::ExtensionServer)
+                    };
+                    if !matches!(status, ServiceStatus::Running) {
+                        let ext_name = {
+                            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                            state
+                                .model
+                                .extensions
+                                .iter()
+                                .find(|e| e.id == extension_id)
+                                .map(|e| e.name.clone())
+                                .unwrap_or_else(|| extension_id.0.clone())
+                        };
+                        self.show_toast(
+                            format!("{ext_name} is paused — ExtensionServer is not running"),
+                            None,
+                            Some(2800),
+                        );
+                        return Ok(());
+                    }
+                    return source.invoke_action(&extension_id);
+                }
                 let (ext_name, service_status) = {
                     let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                     let name = state
@@ -669,6 +797,9 @@ impl StubBackend {
                 Ok(())
             }
             Command::ExtensionRemove { extension_id } => {
+                if let Some(source) = self.current_extension_source() {
+                    return source.remove(&extension_id);
+                }
                 let (extensions, contributions) = {
                     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                     let before = state.model.extensions.len();
@@ -679,12 +810,72 @@ impl StubBackend {
                     sync_module_contributions(&mut state.model);
                     (state.model.extensions.clone(), state.model.contributions.clone())
                 };
-                eprintln!(
-                    "zendia: stub extension.remove `{}` — ExtensionServer not connected yet",
-                    extension_id.0
-                );
                 self.bus.publish(Event::ExtensionsChanged { extensions });
                 self.bus.publish(Event::ContributionsChanged { contributions });
+                Ok(())
+            }
+            Command::ExtensionReload { extension_id } => {
+                if let Some(source) = self.current_extension_source() {
+                    return source.reload(&extension_id);
+                }
+                self.show_toast(format!("Reloaded extension {}", extension_id.0), None, Some(2000));
+                Ok(())
+            }
+            Command::ExtensionInstallPath { path } => {
+                if let Some(source) = self.current_extension_source() {
+                    return source.install_path(&path);
+                }
+                self.show_toast(
+                    format!("Extension install requires ExtensionServer ({path})"),
+                    None,
+                    Some(2600),
+                );
+                Ok(())
+            }
+            Command::ExtensionOpenOptions { extension_id } => {
+                let options_url = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state
+                        .model
+                        .extensions
+                        .iter()
+                        .find(|e| e.id == extension_id)
+                        .and_then(|e| e.options_url.clone())
+                };
+                let Some(url) = options_url else {
+                    return Err(CommandError::Failed(format!(
+                        "extension `{}` has no options page",
+                        extension_id.0
+                    )));
+                };
+                use crate::BrowserCore;
+                self.invoke(Command::TabNew {
+                    url: Some(url),
+                    after: None,
+                    activate: true,
+                })
+            }
+            Command::ExtensionPromptAnswer { token, accepted } => {
+                self.feed_extension_prompt(None);
+                if let Some(source) = self.current_extension_source() {
+                    return source.answer_prompt(token, accepted);
+                }
+                Ok(())
+            }
+            Command::ExtensionContextMenuClick {
+                extension_id,
+                item_id,
+                target_json,
+            } => {
+                if let Some(source) = self.current_extension_source() {
+                    return source.context_menu_clicked(&extension_id, &item_id, &target_json);
+                }
+                Ok(())
+            }
+            Command::ExtensionInvokeCommand { extension_id, name } => {
+                if let Some(source) = self.current_extension_source() {
+                    return source.invoke_command(&extension_id, &name);
+                }
                 Ok(())
             }
             Command::ExtensionsMenuToggle => {
@@ -708,12 +899,24 @@ impl StubBackend {
                 Ok(())
             }
             Command::ServiceRestart { service } => {
+                if service == ServiceId::ExtensionServer
+                    && let Some(source) = self.current_extension_source()
+                {
+                    self.apply_service_status(service, ServiceStatus::Restarting);
+                    source.restart_service()?;
+                    self.show_toast("Restarting ExtensionServer…".to_string(), None, Some(2200));
+                    return Ok(());
+                }
                 self.apply_service_status(service, ServiceStatus::Running);
                 self.show_toast(format!("{} restarted", service_label(service)), None, Some(2200));
                 Ok(())
             }
             _ => unreachable!("non-settings/module command routed to settings_modules handler"),
         }
+    }
+
+    pub(crate) fn apply_service_status_pub(&self, service: ServiceId, status: ServiceStatus) {
+        self.apply_service_status(service, status);
     }
 
     fn apply_service_status(&self, service: ServiceId, status: ServiceStatus) {

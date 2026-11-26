@@ -95,6 +95,43 @@ pub struct PluginInfo {
     pub settings: Vec<PluginSetting>,
 }
 
+/// Decoded or raw image payload for a WebExtension icon sent by `ExtensionServer`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionIcon {
+    Encoded { mime: String, bytes: Vec<u8> },
+    Rgba { width: u32, height: u32, bytes: Vec<u8> },
+}
+
+/// Pending modal consent prompt requested by `ExtensionServer` (install, permissions, or removal).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionPrompt {
+    pub token: u64,
+    pub title: String,
+    pub message: String,
+    pub details: Vec<String>,
+    pub accept_label: String,
+}
+
+/// Manifest-declared keyboard shortcut command registered by an installed WebExtension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionCommand {
+    pub extension_id: ExtensionId,
+    pub name: String,
+    pub shortcut: String,
+    pub description: String,
+}
+
+/// One page context-menu item (or submenu) registered by an installed WebExtension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionContextMenuItem {
+    pub extension_id: ExtensionId,
+    pub item_id: String,
+    pub title: String,
+    pub enabled: bool,
+    pub is_separator: bool,
+    pub children: Vec<ExtensionContextMenuItem>,
+}
+
 /// Metadata and toolbar contribution settings for an installed WebExtension.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionInfo {
@@ -103,11 +140,17 @@ pub struct ExtensionInfo {
     pub version: String,
     pub description: String,
     pub icon: String,
+    pub icon_data: Option<ExtensionIcon>,
     pub enabled: bool,
     pub pinned_to_toolbar: bool,
     pub has_site_access: bool,
+    pub site_access: Option<String>,
     pub permissions: Vec<String>,
     pub badge_text: Option<String>,
+    pub badge_bg: Option<[u8; 4]>,
+    pub badge_fg: Option<[u8; 4]>,
+    pub options_url: Option<String>,
+    pub popup_url: Option<String>,
     pub toolbar_item_id: ContributionId,
     pub command: String,
 }
@@ -358,11 +401,17 @@ pub fn sample_extensions() -> Vec<ExtensionInfo> {
         description: "Efficient wide-spectrum content blocker running through ExtensionServer (cgx-webext)."
             .to_string(),
         icon: "tracking-protection-fill".to_string(),
+        icon_data: None,
         enabled: true,
         pinned_to_toolbar: false,
         has_site_access: true,
+        site_access: Some("granted".to_string()),
         permissions: vec!["webRequest".to_string(), "storage".to_string(), "tabs".to_string()],
         badge_text: Some("4".to_string()),
+        badge_bg: None,
+        badge_fg: None,
+        options_url: None,
+        popup_url: None,
         toolbar_item_id: ContributionId::new(SAMPLE_EXTENSION_TOOLBAR_ID),
         command: "extension.invoke_action".to_string(),
     }]
@@ -403,7 +452,7 @@ pub fn extension_to_toolbar_item(ext: &ExtensionInfo, service_status: &ServiceSt
             multiple_toolbars: Some(ToolbarArea::TopBarEnd),
             collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
         },
-        order: -5,
+        order: -40,
         badge,
         visible: ext.enabled && ext.pinned_to_toolbar,
         enabled: ext.enabled && !paused,
@@ -476,12 +525,21 @@ pub fn build_extension_context_menu(ext: &ExtensionInfo) -> Vec<crate::menus::Re
     remove.icon = Some("trash".to_string());
     remove.command_args = vec![("extension_id".to_string(), ext_id.clone())];
 
-    vec![
-        pin,
-        manage,
-        ResolvedMenuItem::separator(format!("ext.ctx.sep.{ext_id}")),
-        remove,
-    ]
+    let mut items = vec![pin];
+    if ext.options_url.is_some() {
+        let mut options = ResolvedMenuItem::action(
+            format!("ext.ctx.options.{ext_id}"),
+            "Extension Options",
+            "extension.open_options",
+        );
+        options.icon = Some("sliders".to_string());
+        options.command_args = vec![("extension_id".to_string(), ext_id.clone())];
+        items.push(options);
+    }
+    items.push(manage);
+    items.push(ResolvedMenuItem::separator(format!("ext.ctx.sep.{ext_id}")));
+    items.push(remove);
+    items
 }
 
 /// Builds a [`SidePanelEntry`] contribution for a plugin that declares a side panel.

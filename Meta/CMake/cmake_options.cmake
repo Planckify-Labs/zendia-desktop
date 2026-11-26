@@ -34,9 +34,6 @@ endif()
 
 option(ENABLE_GUI_TARGETS "Enable building GUI targets" ON)
 option(LADYBIRD_BUILD_QT "Build and bundle Qt with vcpkg on Linux" OFF)
-
-option(ENABLE_WEBEXT "Enable WebExtensions (Chrome/Firefox extension) support using cgx-webext" OFF)
-set(WEBEXT_SOURCE_DIR "" CACHE PATH "Path to a checkout of cgx-webext. Required when ENABLE_WEBEXT is ON")
 option(ENABLE_INSTALL_HEADERS "Enable installing headers" ON)
 option(ENABLE_INSTALL_FREEDESKTOP_FILES "Enable installing .desktop and .service files" ${freedesktop_files_default})
 option(LADYBIRD_ENABLE_CPPTRACE "Enable use of cpptrace as the default library for stacktraces. If not available falls back to backtrace.h" ON)

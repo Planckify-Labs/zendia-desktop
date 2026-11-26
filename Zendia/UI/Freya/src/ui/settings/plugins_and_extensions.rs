@@ -498,6 +498,9 @@ pub struct ExtensionsAndServicesGroup;
 impl Component for ExtensionsAndServicesGroup {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
+        let theme = use_theme();
+        let palette = SettingsPalette::for_scheme(theme.scheme);
+        let mut install_path = use_state(String::new);
         let (extensions, services) = {
             let model = core.model().read();
             (model.extensions.clone(), model.services.clone())
@@ -506,6 +509,8 @@ impl Component for ExtensionsAndServicesGroup {
         let ext_status = service_status_in(&services, ServiceId::ExtensionServer);
         let ext_down = !matches!(ext_status, ServiceStatus::Running);
         let core_restart_ext = core.clone();
+        let core_install = core.clone();
+        let core_install_submit = core.clone();
 
         let ext_cards: Vec<Element> = extensions
             .iter()
@@ -533,6 +538,59 @@ impl Component for ExtensionsAndServicesGroup {
             })
             .collect();
 
+        let install_bar = rect()
+            .width(Size::fill())
+            .direction(Direction::Horizontal)
+            .content(Content::Flex)
+            .cross_align(Alignment::center())
+            .spacing(8.0)
+            .child(
+                crate::ui::kit::TextField::new(install_path)
+                    .placeholder("Path to unpacked extension folder or .crx / .xpi / .zip package")
+                    .width(Size::flex(1.0))
+                    .padding(Gaps::new(7.0, 10.0, 7.0, 10.0))
+                    .corner_radius(CornerRadius::new_all(8.0))
+                    .background(palette.menulist_bg)
+                    .focus_background(palette.menulist_bg)
+                    .border(palette.card_border, 1.0)
+                    .focus_border(theme.color(ThemeRole::Accent), 1.0)
+                    .on_submit(move |raw: String| {
+                        let trimmed = raw.trim().to_string();
+                        if !trimmed.is_empty() {
+                            core_install_submit.invoke_or_log(Command::ExtensionInstallPath { path: trimmed });
+                            install_path.set(String::new());
+                        }
+                    }),
+            )
+            .child(
+                SettingsButton::new("Load Extension", move |_| {
+                    let trimmed = install_path.peek().trim().to_string();
+                    if !trimmed.is_empty() {
+                        core_install.invoke_or_log(Command::ExtensionInstallPath { path: trimmed });
+                        install_path.set(String::new());
+                    }
+                })
+                .icon("plus")
+                .disabled(ext_down)
+                .key("load-extension-path"),
+            );
+
+        let ext_list: Element = if ext_cards.is_empty() {
+            settings_card(vec![
+                label()
+                    .text("No WebExtensions installed. Load an unpacked folder or .crx/.xpi package above, or install from the Chrome Web Store or Firefox Add-ons.")
+                    .font_size(12.5)
+                    .color(theme.color(ThemeRole::TextMuted))
+                    .into_element(),
+            ])
+        } else {
+            rect()
+                .width(Size::fill())
+                .spacing(12.0)
+                .children(ext_cards)
+                .into_element()
+        };
+
         rect()
             .width(Size::fill())
             .spacing(22.0)
@@ -549,7 +607,8 @@ impl Component for ExtensionsAndServicesGroup {
                     });
                 }),
             }))
-            .child(rect().width(Size::fill()).spacing(12.0).children(ext_cards))
+            .child(install_bar)
+            .child(ext_list)
             .child(section_heading(
                 "Background Services",
                 Some("Each Zendia feature runs in its own sandboxed process. Cycle a service to inspect its service-down state."),
@@ -589,9 +648,15 @@ impl Component for ExtensionCard {
         let eid_en = self.extension.id.clone();
         let eid_pin = self.extension.id.clone();
         let eid_act = self.extension.id.clone();
+        let eid_opt = self.extension.id.clone();
+        let eid_reload = self.extension.id.clone();
+        let eid_remove = self.extension.id.clone();
         let core_en = core.clone();
         let core_pin = core.clone();
         let core_act = core.clone();
+        let core_opt = core.clone();
+        let core_reload = core.clone();
+        let core_remove = core.clone();
 
         let perm_pills: Vec<Element> = self
             .extension
@@ -643,11 +708,13 @@ impl Component for ExtensionCard {
                                             .to_color(),
                                     )
                                     .center()
-                                    .child(Icon::new(self.extension.icon.clone()).size(16.0).role(if paused {
-                                        ThemeRole::Warning
-                                    } else {
-                                        ThemeRole::Accent
-                                    })),
+                                    .child(crate::ui::extensions::ExtensionIconView::new(
+                                        format!("settings-ext-{}", self.extension.id.as_str()),
+                                        self.extension.icon.clone(),
+                                        self.extension.icon_data.clone(),
+                                        18.0,
+                                        if paused { ThemeRole::Warning } else { ThemeRole::Accent },
+                                    )),
                             )
                             .child(
                                 rect()
@@ -711,6 +778,7 @@ impl Component for ExtensionCard {
                 rect()
                     .width(Size::fill())
                     .direction(Direction::Horizontal)
+                    .content(Content::wrap())
                     .spacing(8.0)
                     .child(
                         SettingsButton::new("Trigger Action", move |_| {
@@ -721,6 +789,36 @@ impl Component for ExtensionCard {
                         .icon("bolt")
                         .disabled(!self.extension.enabled || paused)
                         .key("ext-trigger-action"),
+                    )
+                    .maybe_child(self.extension.options_url.is_some().then(|| {
+                        SettingsButton::new("Options", move |_| {
+                            core_opt.invoke_or_log(Command::ExtensionOpenOptions {
+                                extension_id: eid_opt.clone(),
+                            });
+                        })
+                        .icon("sliders")
+                        .disabled(!self.extension.enabled || paused)
+                        .key("ext-open-options")
+                    }))
+                    .child(
+                        SettingsButton::new("Reload", move |_| {
+                            core_reload.invoke_or_log(Command::ExtensionReload {
+                                extension_id: eid_reload.clone(),
+                            });
+                        })
+                        .icon("reload")
+                        .disabled(paused)
+                        .key("ext-reload"),
+                    )
+                    .child(
+                        SettingsButton::new("Remove", move |_| {
+                            core_remove.invoke_or_log(Command::ExtensionRemove {
+                                extension_id: eid_remove.clone(),
+                            });
+                        })
+                        .icon("trash")
+                        .danger(true)
+                        .key("ext-remove"),
                     ),
             )
     }

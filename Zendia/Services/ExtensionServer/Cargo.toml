@@ -14,3 +14,9 @@ name = "zendia-extension-server"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+webext = { workspace = true }
+zendia-sandbox = { workspace = true }
+zendia-service = { workspace = true }

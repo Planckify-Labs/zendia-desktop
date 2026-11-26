@@ -52,6 +52,7 @@ view_find_in_page_next_match
 view_find_in_page_previous_match
 view_find_in_page_end
 view_embedder_message
+connect_embedder_channel
 
 [HubClient]
 app_open_new_tab

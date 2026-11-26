@@ -148,7 +148,6 @@ public:
     void zoom_in() { HubConnection::the().async_view_zoom_in(view_id()); }
     void zoom_out() { HubConnection::the().async_view_zoom_out(view_id()); }
     void reset_zoom() { HubConnection::the().async_view_reset_zoom(view_id()); }
-    void set_zoom(double zoom_level) { HubConnection::the().async_view_set_zoom(view_id(), zoom_level); }
     double zoom_level() const { return m_state.zoom_level; }
     double device_pixel_ratio() const { return m_device_pixel_ratio; }
     Optional<u64> display_id() const { return m_display_id; }

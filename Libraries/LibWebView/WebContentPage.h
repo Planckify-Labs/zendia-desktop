@@ -7,9 +7,6 @@
 #pragma once
 
 #include <AK/HashTable.h>
-#if defined(ENABLE_WEBEXT)
-#    include <LibWebView/Extensions/ExtensionManager.h>
-#endif
 #include <AK/Noncopyable.h>
 #include <AK/Optional.h>
 #include <AK/RefCounted.h>
@@ -35,16 +32,16 @@
 
 namespace WebView {
 
-#if defined(ENABLE_WEBEXT)
-// Sends a message from the extension core to the extension page (context) it is addressed to.
+// Sends a message from ExtensionServer to the extension page (context) it is addressed to.
 void deliver_to_extension_context(u64 context_id, StringView json);
+// Sends an API reply from ExtensionServer to the extension context that called it.
+void deliver_api_reply_to_extension_context(u64 context_id, u64 request_id, bool ok, String const& json);
 // Sends a browser event (storage.onChanged, alarms.onAlarm, ...) to every page of an extension.
 void deliver_event_to_extension(StringView extension_id, StringView json);
 // host.tabs.frames: the frames of the tab (view) with this id, as [{frameId, parentFrameId, url, documentId}].
 ErrorOr<ByteString> extension_tab_frames(u64 tab_id);
 // host.scripting.inject: runs code an extension injects in frames of a tab; replies with [{frameId, documentId, result|error}].
 void run_extension_injection_in_tab(StringView extension_id, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply);
-#endif
 
 // A reply a page owes its traversable for a message the traversable sent it.
 struct OwedReply {
@@ -88,13 +85,10 @@ class WEBVIEW_API WebContentPage final
     friend class WebContentTestClient;
 
 public:
-#if defined(ENABLE_WEBEXT)
     struct ExtensionContextRecord {
         u64 context_id { 0 };
         ByteString extension_id;
-        ExtensionManager::ContextKind kind { ExtensionManager::ContextKind::Other };
     };
-#endif
     WebContentPage(WebContentClient&, Web::PageId, CanonicalTraversable&);
     virtual ~WebContentPage() override;
 
@@ -423,23 +417,15 @@ private:
     virtual void did_call_extension_api(Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, String name, String args_json) override;
     virtual void did_report_extension_network_stage(u64 token, String stage, Optional<Web::HTML::CrossProcessId> navigable_id, String details_json) override;
 
-#if defined(ENABLE_WEBEXT)
-    // AD-HOC (cgx-webext): extension pages and content scripts in documents this page hosts. `extension_id_or_empty` is
-    // empty for an extension's own page and names the extension for content scripts.
     Optional<String> extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty);
     Optional<String> call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty, String const& name, String const& args_json);
     String content_script_programs(Web::HTML::CrossProcessId document_id);
 public:
-    // Runs code an extension injects in one of this page's documents, which may then start the extension's content-script
-    // context there although no content script of it matches.
     void run_extension_injection(Web::HTML::CrossProcessId document_id, ByteString const& extension_id, String const& setup_program, String const& kind, String const& code, String const& binding, String const& run_at, String const& world, u64 token);
 
 private:
     void extension_contexts_destroyed(Web::HTML::CrossProcessId document_id);
-    // Ends the contexts of documents this page no longer hosts (navigated away, frame removed).
     void sweep_extension_contexts();
-
-#endif
     Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints, Web::HTML::CrossProcessId current_navigable_id, Utf16String name, bool no_opener, Optional<URL::URL> current_document_base_url);
     void did_close_browsing_context();
     virtual void did_complete_close_preflight(u64 request_id, bool approved) override;
@@ -510,14 +496,9 @@ private:
     };
     Vector<FilePermissionGrant> m_file_permission_grants;
 
-#if defined(ENABLE_WEBEXT)
-    // Extension contexts this page hosts: document -> bridge key ("" for the extension's page, extension id for content scripts).
     HashMap<Web::HTML::CrossProcessId, HashMap<ByteString, ExtensionContextRecord>> m_extension_contexts;
-    // Extensions that injected code into a document (scripting.executeScript, ...), which may have a content-script context
-    // there.
     HashMap<Web::HTML::CrossProcessId, Vector<ByteString>> m_extension_injection_grants;
     Optional<ExtensionContextRecord> verified_extension_context(Web::HTML::CrossProcessId document_id, ByteString const& bridge_key) const;
-#endif
 };
 
 }

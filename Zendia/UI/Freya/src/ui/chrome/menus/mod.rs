@@ -107,6 +107,8 @@ pub fn open_hub_context_menu(
     can_view_source: bool,
     can_report_website_issue: bool,
     search_engine_name: Option<String>,
+    extension_items: Vec<zendia_browser_core::modules::ExtensionContextMenuItem>,
+    extension_target_json: &str,
 ) {
     let model = core.model();
     let tab = model.tab_by_view_id(view_id);
@@ -185,7 +187,15 @@ pub fn open_hub_context_menu(
     };
 
     let key_table = KeyTable::standard();
-    let items = build_page_context_menu(&core_request, &model.contributions.menu_entries, Some(&key_table));
+    let mut items = build_page_context_menu(&core_request, &model.contributions.menu_entries, Some(&key_table));
+    if !extension_items.is_empty() {
+        if !items.is_empty() {
+            items.push(zendia_browser_core::menus::ResolvedMenuItem::separator(
+                "ext.page.ctx.sep",
+            ));
+        }
+        items.extend(convert_extension_menu_items(&extension_items, extension_target_json));
+    }
     if !items.is_empty() {
         menu_state.open_context_menu(OpenContextMenu {
             position: window_pos,
@@ -194,6 +204,39 @@ pub fn open_hub_context_menu(
             open_submenu: None,
         });
     }
+}
+
+fn convert_extension_menu_items(
+    items: &[zendia_browser_core::modules::ExtensionContextMenuItem],
+    target_json: &str,
+) -> Vec<zendia_browser_core::menus::ResolvedMenuItem> {
+    use zendia_browser_core::contributions::MenuEntryKind;
+    use zendia_browser_core::menus::ResolvedMenuItem;
+    items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let id = format!("ext.ctx.{}.{}.{}", item.extension_id.as_str(), item.item_id, idx);
+            if item.is_separator {
+                return ResolvedMenuItem::separator(id);
+            }
+            if !item.children.is_empty() {
+                let mut sub = ResolvedMenuItem::action(id, item.title.clone(), "");
+                sub.kind = MenuEntryKind::Submenu;
+                sub.enabled = item.enabled;
+                sub.children = convert_extension_menu_items(&item.children, target_json);
+                return sub;
+            }
+            let mut action = ResolvedMenuItem::action(id, item.title.clone(), "extension.context_menu_click");
+            action.enabled = item.enabled;
+            action.command_args = vec![
+                ("extension_id".to_string(), item.extension_id.0.clone()),
+                ("item_id".to_string(), item.item_id.clone()),
+                ("target_json".to_string(), target_json.to_string()),
+            ];
+            action
+        })
+        .collect()
 }
 
 /// Converts a Hub `view_request_select_dropdown` payload into [`OpenSelectDropdown`] and opens it in `menu_state`.

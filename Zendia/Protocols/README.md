@@ -1,10 +1,8 @@
 # Protocols
 
-The `.ipc` files of Zendia's own processes, in the same format as upstream's, generated into Rust with upstream's
-`Meta/Generators/generate_ipc_definitions.py`:
+The service and embedder-channel protocols of Zendia's own processes:
 
-- `InputServer.ipc`: the UI process and InputServer (keys, compiled key tables, commands).
-- `AgentServer.ipc`, `PluginHost.ipc`, `ExtensionServer.ipc`: each service and the UI process's browser core.
-- `Embedder.ipc`: the one generic message pair our processes use to reach pages through the Hub and WebContent.
-
-None exist yet. Each is added with the service that speaks it.
+- `ExtensionServer.md`: versioned protocol (`PROTOCOL_VERSION = 1`) for `ExtensionServer`:
+  - UI process <-> `ExtensionServer` over `ZENDIA_UI_FD` (handshake, Module API UI contributions, browser state snapshots, host calls, user prompts, popup requests, install/remove/enable/pin/reload).
+  - Hub <-> `ExtensionServer` over `ZENDIA_EMBEDDER_FD`, attached through `HubServer::connect_embedder_channel("extensions", socket)` (serving `chrome-extension://` and `moz-extension://` resources, content script programs, context lifecycle, API calls, network stage hooks, background pages, Hub cookies/browsingData, and RequestServer package downloads).
+- Future services (`InputServer`, `AgentServer`, `PluginHost`) share the same framed transport and version handshake from `Zendia/Libraries/Service`.

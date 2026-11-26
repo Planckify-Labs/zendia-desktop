@@ -38,3 +38,6 @@ zendia-keymap = { path = "Libraries/Keymap" }
 zendia-module-api = { path = "Libraries/ModuleApi" }
 zendia-sandbox = { path = "Libraries/Sandbox" }
 zendia-service = { path = "Libraries/Service" }
+
+# cgx-webext core, linked directly as Rust inside ExtensionServer.
+webext = { path = "../../cgx-webext/crates/webext" }

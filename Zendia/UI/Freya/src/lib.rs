@@ -8,6 +8,7 @@
 //! `zendia-gallery` component viewer.
 
 pub mod browser;
+pub mod extensions;
 pub mod frames;
 pub mod gallery;
 pub mod hub;

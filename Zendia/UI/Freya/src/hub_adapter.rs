@@ -208,6 +208,66 @@ impl HubTabAdapter {
         Some(view_id)
     }
 
+    /// Creates an auxiliary Hub view for a WebExtension HTML popup, invokes `before_load(view_id)` so
+    /// `ExtensionServer` can mark the view as a popup before WebContent initializes its extension context, and then
+    /// navigates it to `url`.
+    pub fn create_extension_popup_view(&self, url: &str, before_load: impl FnOnce(u64)) -> Option<u64> {
+        let (_, device_pixel_ratio) = self.viewport();
+        let hub = hub::connection();
+        let created = match hub.send_sync(server::CreateView {
+            request: Hub_NewViewRequest {
+                is_private: WebView_IsPrivate::No,
+                device_pixel_ratio,
+                maximum_frames_per_second: 60.0,
+                display_id: None,
+                screen_shows_high_dynamic_range: false,
+                system_theme: Core_AnonymousBuffer::default(),
+                screen_rects: None,
+                owner_view_id: None,
+                websites_prefer_dark: false,
+                is_tab: false,
+            },
+        }) {
+            Ok(created) => created,
+            Err(error) => {
+                eprintln!("zendia: Unable to create extension popup view for `{url}`: {error}");
+                return None;
+            }
+        };
+
+        let view_id = created.view_id;
+        self.auxiliary_views
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(view_id);
+        self.auxiliary_loading
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(view_id, true);
+        self.set_up_view(view_id);
+        self.record_capabilities(view_id, &created.state);
+        before_load(view_id);
+        load_in_hub(view_id, URL_URL::from_serialization(url.to_string()));
+        Some(view_id)
+    }
+
+    /// Destroys an auxiliary Hub view (such as a closed WebExtension popup).
+    pub fn destroy_auxiliary_view(&self, view_id: u64) {
+        self.auxiliary_views
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
+        self.auxiliary_loading
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
+        self.capabilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
+        hub::connection().post_or_log(server::DestroyView { view_id });
+    }
+
     /// Reloads an auxiliary Hub view (e.g. an active Web chat site).
     pub fn reload_auxiliary_view(&self, view_id: u64) {
         if !self.has_view(view_id) {
@@ -366,8 +426,14 @@ impl HubTabAdapter {
         }
     }
 
-    /// Creates a new Hub view, adopts it as a tab, and loads `url` (or the configured new tab page).
-    pub fn open_url_tab(&self, url: Option<URL_URL>, after: Option<TabId>, activate_tab: bool) -> CommandResult {
+    /// Creates a new Hub view, adopts it as a tab, and loads `url` (or the configured new tab page), returning its
+    /// [`TabId`].
+    pub fn open_url_tab_returning_id(
+        &self,
+        url: Option<URL_URL>,
+        after: Option<TabId>,
+        activate_tab: bool,
+    ) -> Result<TabId, CommandError> {
         let (_, device_pixel_ratio) = self.viewport();
         let hub = hub::connection();
         let created = hub
@@ -393,7 +459,12 @@ impl HubTabAdapter {
         self.adopt_view(created.view_id, &created.state, after, activate_tab);
         let url = url.unwrap_or_else(|| URL_URL::from_serialization(startup().settings.new_tab_page_url.clone()));
         load_in_hub(created.view_id, url);
-        Ok(())
+        Ok(TabId(created.view_id))
+    }
+
+    /// Creates a new Hub view, adopts it as a tab, and loads `url` (or the configured new tab page).
+    pub fn open_url_tab(&self, url: Option<URL_URL>, after: Option<TabId>, activate_tab: bool) -> CommandResult {
+        self.open_url_tab_returning_id(url, after, activate_tab).map(|_| ())
     }
 
     /// Destroys a closed Hub view, removes the tab from the core, and activates the next tab if needed.

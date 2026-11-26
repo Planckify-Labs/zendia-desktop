@@ -995,6 +995,34 @@ pub enum Command {
     ExtensionRemove {
         extension_id: ExtensionId,
     },
+    /// Reloads an installed WebExtension.
+    ExtensionReload {
+        extension_id: ExtensionId,
+    },
+    /// Installs an unpacked directory or `.crx`/`.xpi`/`.zip` package from disk.
+    ExtensionInstallPath {
+        path: String,
+    },
+    /// Opens an installed WebExtension's options page in a new tab.
+    ExtensionOpenOptions {
+        extension_id: ExtensionId,
+    },
+    /// Answers a pending WebExtension install, permission, or removal prompt.
+    ExtensionPromptAnswer {
+        token: u64,
+        accepted: bool,
+    },
+    /// Invokes an extension-registered page context menu item.
+    ExtensionContextMenuClick {
+        extension_id: ExtensionId,
+        item_id: String,
+        target_json: String,
+    },
+    /// Invokes a manifest-declared extension keyboard command.
+    ExtensionInvokeCommand {
+        extension_id: ExtensionId,
+        name: String,
+    },
     /// Opens or closes the extensions menu, which lists every installed extension.
     ExtensionsMenuToggle,
     /// Sets a background service's health state.
@@ -1385,6 +1413,12 @@ impl Command {
             Self::ExtensionSetToolbarPinned { .. } => "extension.set_toolbar_pinned",
             Self::ExtensionInvokeAction { .. } => "extension.invoke_action",
             Self::ExtensionRemove { .. } => "extension.remove",
+            Self::ExtensionReload { .. } => "extension.reload",
+            Self::ExtensionInstallPath { .. } => "extension.install_path",
+            Self::ExtensionOpenOptions { .. } => "extension.open_options",
+            Self::ExtensionPromptAnswer { .. } => "extension.prompt_answer",
+            Self::ExtensionContextMenuClick { .. } => "extension.context_menu_click",
+            Self::ExtensionInvokeCommand { .. } => "extension.invoke_command",
             Self::ExtensionsMenuToggle => "extensions.menu.toggle",
             Self::ServiceSetState { .. } => "service.set_state",
             Self::ServiceCycleState { .. } => "service.cycle_state",

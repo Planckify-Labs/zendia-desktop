@@ -8,6 +8,7 @@
 
 use crate::settings::Settings;
 use hub_protocol::{HubConnection, Incoming, URL_URL};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 pub struct Startup {
@@ -15,6 +16,10 @@ pub struct Startup {
     pub incoming: async_channel::Receiver<Incoming>,
     pub settings: Settings,
     pub initial_urls: Vec<URL_URL>,
+    pub data_directory: PathBuf,
+    pub locale: String,
+    pub load_extensions: Vec<String>,
+    pub auto_accept_extension_prompts: bool,
 }
 
 static STARTUP: OnceLock<Startup> = OnceLock::new();

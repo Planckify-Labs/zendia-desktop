@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod chrome;
 pub mod core_view;
+pub mod extensions;
 pub mod kit;
 pub mod library;
 pub mod onboarding;

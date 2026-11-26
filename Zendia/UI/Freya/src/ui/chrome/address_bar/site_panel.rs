@@ -422,9 +422,9 @@ impl Component for SiteDataPanelCard {
         };
 
         let ext_manage_opacity = if *manage_hovered.read() {
-            0.85
+            0.95
         } else {
-            ext_link_anim.get().value().clamp(0.0, 1.0)
+            (0.55 + ext_link_anim.get().value().clamp(0.0, 0.4)).clamp(0.55, 0.95)
         };
         let extensions_section = rect()
             .width(Size::fill())
@@ -1002,14 +1002,28 @@ impl Component for SiteDataPanelCard {
         // Anchored right-click context menu for an extension tile (`#unified-extensions-context-menu`).
         let ext_menu_popup = ext_ctx_menu.read().clone().map(|(ext_id, _ext_name, anchor)| {
             let pin_core = core.clone();
+            let opt_core = core.clone();
             let manage_core = core.clone();
             let remove_core = core.clone();
             let pin_id = ext_id.clone();
-            let remove_id = ext_id;
+            let opt_id = ext_id.clone();
+            let remove_id = ext_id.clone();
+            let has_options = core
+                .model()
+                .peek()
+                .extension(&ext_id)
+                .and_then(|e| e.options_url.as_ref())
+                .is_some();
+            let close_on_opt = self.on_close.clone();
             let close_on_manage = self.on_close.clone();
+            let menu_height = if has_options {
+                EXT_MENU_HEIGHT + 30.0
+            } else {
+                EXT_MENU_HEIGHT
+            };
             let (ox, oy) = anchor_popup_origin(
                 anchor,
-                (EXT_MENU_WIDTH, EXT_MENU_HEIGHT),
+                (EXT_MENU_WIDTH, menu_height),
                 window_size,
                 PopupHorizontalAlign::Auto,
                 4.0,
@@ -1043,6 +1057,20 @@ impl Component for SiteDataPanelCard {
                         ext_ctx_menu.set(None);
                     }),
                 })
+                .maybe_child(has_options.then(|| SitePopupMenuRow {
+                    icon: "sliders",
+                    label: "Extension Options",
+                    danger: false,
+                    on_press: EventHandler::new(move |_| {
+                        opt_core.invoke_or_log(Command::ExtensionOpenOptions {
+                            extension_id: opt_id.clone(),
+                        });
+                        ext_ctx_menu.set(None);
+                        if let Some(close) = &close_on_opt {
+                            close.call(());
+                        }
+                    }),
+                }))
                 .child(SitePopupMenuRow {
                     icon: "settings",
                     label: "Manage Extension",
@@ -1423,8 +1451,24 @@ impl Component for SiteExtensionTile {
             }
         };
 
+        let core = use_core();
+        let ext_info = self
+            .extension
+            .extension_id()
+            .and_then(|id| core.model().read().extension(&id).cloned());
         let icon_color = extension_icon_color(&self.extension, &theme);
-        let glyph: Element = if let Some((canonical, bytes)) = prepared_icon_bytes(&self.extension.icon) {
+        let glyph: Element = if let Some(ext) = &ext_info
+            && ext.icon_data.is_some()
+        {
+            crate::ui::extensions::ExtensionIconView::new(
+                format!("site-ext-{}", ext.id.as_str()),
+                self.extension.icon.clone(),
+                ext.icon_data.clone(),
+                16.0,
+                ThemeRole::Text,
+            )
+            .into_element()
+        } else if let Some((canonical, bytes)) = prepared_icon_bytes(&self.extension.icon) {
             SvgViewer::new((("zendia-icon", canonical), bytes))
                 .width(Size::px(16.0))
                 .height(Size::px(16.0))
@@ -1461,6 +1505,16 @@ impl Component for SiteExtensionTile {
         } else if self.usable
             && let Some(text) = self.extension.badge_text.as_ref().filter(|t| !t.is_empty())
         {
+            let badge_bg = ext_info
+                .as_ref()
+                .and_then(|e| e.badge_bg)
+                .map(|[r, g, b, a]| Color::from_argb(a, r, g, b))
+                .unwrap_or_else(|| Color::from_rgb(96, 96, 102));
+            let badge_fg = ext_info
+                .as_ref()
+                .and_then(|e| e.badge_fg)
+                .map(|[r, g, b, a]| Color::from_argb(a, r, g, b))
+                .unwrap_or(Color::WHITE);
             Some(
                 rect()
                     .position(Position::new_absolute().top(2.0).right(4.0))
@@ -1468,14 +1522,14 @@ impl Component for SiteExtensionTile {
                     .height(Size::px(13.0))
                     .padding(Gaps::new(0.0, 3.0, 0.0, 3.0))
                     .corner_radius(CornerRadius::new_all(3.0))
-                    .background(Color::from_rgb(96, 96, 102))
+                    .background(badge_bg)
                     .center()
                     .child(
                         label()
                             .text(text.clone())
                             .font_size(9.0)
                             .font_weight(FontWeight::BOLD)
-                            .color(Color::WHITE),
+                            .color(badge_fg),
                     )
                     .into_element(),
             )

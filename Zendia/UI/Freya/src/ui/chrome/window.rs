@@ -351,6 +351,8 @@ impl Component for WindowShell {
         let context_menu_open = menu_state.is_some_and(|m| m.context_menu.read().is_some());
         let address_bar_open = address_bar_state.is_some_and(|a| *a.open.read());
         let site_panel_open = address_bar_state.is_some_and(|a| *a.site_panel_open.read());
+        let extension_popup_open =
+            crate::ui::extensions::try_use_extension_popup_state().is_some_and(|p| p.open.read().is_some());
         let space_editor_open =
             space_editing.is_some_and(|se| *se.create_form_open.read() || *se.theme_picker_open.read());
         let sidebar_renaming =
@@ -363,10 +365,10 @@ impl Component for WindowShell {
             || sidebar_dragging
             || space_editor_open
             || create_new_open
-            || (!layout.has_top_toolbar() && (app_or_ext_menu_open || site_panel_open));
+            || (!layout.has_top_toolbar() && (app_or_ext_menu_open || site_panel_open || extension_popup_open));
         let sidebar_keep_open = sidebar_force_open || context_menu_open;
         let toolbar_force_open = self.location_a11y_id.is_focused()
-            || (layout.has_top_toolbar() && (app_or_ext_menu_open || site_panel_open));
+            || (layout.has_top_toolbar() && (app_or_ext_menu_open || site_panel_open || extension_popup_open));
         let toolbar_keep_open = toolbar_force_open || context_menu_open;
 
         let sidebar_pinned = sidebar_state.is_some_and(|state| *state.compact_pinned.read());

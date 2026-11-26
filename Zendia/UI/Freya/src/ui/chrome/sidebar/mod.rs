@@ -480,30 +480,37 @@ impl Component for SidebarFrame {
                 .filter(|item| matches!(item.source, ContributionSource::Extension { .. }))
                 .cloned()
                 .collect();
-            // Matches Zen's `#zen-overflow-extensions-list`: pinned extensions in single-toolbar mode render in a
-            // compact horizontal strip directly beneath the sidebar URL bar instead of crowding the bottom bar.
+            // Matches Zen's `#zen-overflow-extensions-list` (`zen-overflowing-addons.css`):
+            // `display: grid; gap: 8px; padding: 8px 2px 0 2px; grid-template-columns: repeat(auto-fit, minmax(32px, 1fr))`
+            // with single unified `height: 26px`, `border-radius: 6px`, `14px` icon pill buttons.
             let pinned_ext_strip = (!pinned_exts.is_empty()).then(|| {
+                let avail_w = (displayed_width - 20.0).max(40.0);
+                let max_cols = ((avail_w + 8.0) / 40.0).floor().clamp(1.0, 5.0) as usize;
+                let rows: Vec<Element> = pinned_exts
+                    .chunks(max_cols)
+                    .enumerate()
+                    .map(|(row_idx, chunk)| {
+                        rect()
+                            .key(format!("pinned-ext-row-{row_idx}"))
+                            .width(Size::fill())
+                            .direction(Direction::Horizontal)
+                            .content(Content::Flex)
+                            .spacing(8.0)
+                            .children(chunk.iter().map(|item| {
+                                SidebarPinnedExtensionTile {
+                                    item: item.clone(),
+                                    key: DiffKey::from(&format!("sb-ext-{}", item.id.as_str())),
+                                }
+                                .into_element()
+                            }))
+                            .into_element()
+                    })
+                    .collect();
                 rect()
                     .width(Size::fill())
-                    .padding(Gaps::new(6.0, 2.0, 0.0, 2.0))
-                    .spacing(6.0)
-                    .direction(Direction::Horizontal)
-                    .content(Content::wrap())
-                    .cross_align(Alignment::center())
-                    .children(pinned_exts.into_iter().map(|item| {
-                        rect()
-                            .height(Size::px(26.0))
-                            .min_width(Size::px(32.0))
-                            .corner_radius(CornerRadius::new_all(6.0))
-                            .background(palette.surface_pill)
-                            .center()
-                            .child(
-                                ToolbarItemView::new(item.clone(), location, location_a11y_id)
-                                    .dense(true)
-                                    .key(item.id.as_str().to_string()),
-                            )
-                            .into_element()
-                    }))
+                    .padding(Gaps::new(8.0, 2.0, 0.0, 2.0))
+                    .spacing(8.0)
+                    .children(rows)
             });
             rect()
                 .width(Size::fill())
@@ -1498,6 +1505,205 @@ impl Component for SidebarResizeHandle {
                     .background(theme.color(ThemeRole::Accent))
                     .opacity(bar_opacity)
             }))
+    }
+}
+
+/// Single-toolbar pinned extension tile matching Zen's `#zen-overflow-extensions-list .unified-extensions-item-action-button`
+/// (`zen-overflowing-addons.css`): equal-width stretched pill (`height: 26px`, `min-width: 32px`, `border-radius: 6px`),
+/// centered `14px` extension icon, compact `3px`-radius badge, and right-click context menu.
+#[derive(Clone, PartialEq)]
+struct SidebarPinnedExtensionTile {
+    item: zendia_browser_core::contributions::ToolbarItem,
+    key: DiffKey,
+}
+
+impl KeyExt for SidebarPinnedExtensionTile {
+    fn key_mut(&mut self) -> &mut DiffKey {
+        &mut self.key
+    }
+}
+
+impl Component for SidebarPinnedExtensionTile {
+    fn render(&self) -> impl IntoElement {
+        use zendia_browser_core::contributions::ContributionSource;
+        use zendia_browser_core::model::{ServiceId, ServiceStatus};
+        use zendia_browser_core::modules::{ExtensionId, service_status_in};
+
+        let core = use_core();
+        let theme = use_theme();
+        let palette = ChromePalette::for_scheme(theme.scheme);
+        let menu_state = crate::ui::chrome::menus::try_use_menu_state();
+        let a11y_id = use_a11y();
+        let focus = use_focus(a11y_id);
+
+        let ext_id = match &self.item.source {
+            ContributionSource::Extension { extension_id } => Some(extension_id.clone()),
+            _ => None,
+        };
+        let (ext_info, paused) = {
+            let model = core.model().read();
+            let info = ext_id
+                .as_ref()
+                .and_then(|id| model.extension(&ExtensionId::new(id.clone())).cloned());
+            let is_paused = !matches!(
+                service_status_in(&model.services, ServiceId::ExtensionServer),
+                ServiceStatus::Running
+            );
+            (info, is_paused)
+        };
+
+        let effective_enabled = self.item.enabled && !paused;
+        let feedback = use_interactive_feedback(effective_enabled);
+
+        let bg = feedback.background(
+            palette.surface_pill,
+            palette.surface_pill_hover,
+            palette.surface_pill_hover,
+        );
+        let icon_role = if paused {
+            ThemeRole::Warning
+        } else if effective_enabled {
+            ThemeRole::Text
+        } else {
+            ThemeRole::TextMuted
+        };
+
+        let badge: Option<Element> = if paused {
+            Some(
+                rect()
+                    .position(Position::new_absolute().top(-2.0).right(-5.0))
+                    .min_width(Size::px(14.0))
+                    .height(Size::px(13.0))
+                    .padding(Gaps::new(0.0, 2.5, 0.0, 2.5))
+                    .corner_radius(CornerRadius::new_all(3.0))
+                    .background(theme.color(ThemeRole::Warning))
+                    .center()
+                    .interactive(Interactive::No)
+                    .child(
+                        label()
+                            .text("II")
+                            .font_size(8.5)
+                            .font_weight(FontWeight::BOLD)
+                            .color(theme.color(ThemeRole::Ink)),
+                    )
+                    .into_element(),
+            )
+        } else if let Some(ext) = &ext_info
+            && let Some(text) = ext.badge_text.as_ref().filter(|t| !t.is_empty())
+        {
+            let badge_bg = ext
+                .badge_bg
+                .map(|[r, g, b, a]| Color::from_argb(a, r, g, b))
+                .unwrap_or_else(|| theme.color(ThemeRole::Accent));
+            let badge_fg = ext
+                .badge_fg
+                .map(|[r, g, b, a]| Color::from_argb(a, r, g, b))
+                .unwrap_or_else(|| theme.color(ThemeRole::TextOnAccent));
+            Some(
+                rect()
+                    .position(Position::new_absolute().top(-2.0).right(-5.0))
+                    .min_width(Size::px(14.0))
+                    .height(Size::px(13.0))
+                    .padding(Gaps::new(0.0, 3.0, 0.0, 3.0))
+                    .corner_radius(CornerRadius::new_all(3.0))
+                    .background(badge_bg)
+                    .center()
+                    .interactive(Interactive::No)
+                    .child(
+                        label()
+                            .text(text.clone())
+                            .font_size(8.5)
+                            .font_weight(FontWeight::BOLD)
+                            .color(badge_fg),
+                    )
+                    .into_element(),
+            )
+        } else {
+            None
+        };
+
+        let tooltip = self.item.tooltip.clone().unwrap_or_else(|| self.item.title.clone());
+
+        let press_core = core.clone();
+        let press_ext_id = ext_id.clone();
+        let ctx_core = core.clone();
+        let ctx_ext_id = ext_id;
+
+        let tile = rect()
+            .a11y_id(a11y_id)
+            .a11y_focusable(effective_enabled)
+            .a11y_role(AccessibilityRole::Button)
+            .a11y_alt(tooltip.clone())
+            .width(Size::fill())
+            .min_width(Size::px(32.0))
+            .height(Size::px(26.0))
+            .corner_radius(CornerRadius::new_all(6.0))
+            .background(bg)
+            .border(crate::ui::kit::focus_ring_border(
+                focus() == Focus::Keyboard,
+                &theme,
+                Border::new(),
+            ))
+            .scale(feedback.scale())
+            .opacity(if paused {
+                0.58
+            } else if effective_enabled {
+                1.0
+            } else {
+                0.36
+            })
+            .center()
+            .cursor(if effective_enabled {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            })
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
+            .on_pointer_down(feedback.on_pointer_down())
+            .on_global_pointer_up(feedback.on_pointer_up())
+            .on_mouse_down(move |e: Event<MouseEventData>| {
+                if e.button == Some(MouseButton::Right)
+                    && let Some(id) = &ctx_ext_id
+                    && let Some(ms) = &menu_state
+                {
+                    e.stop_propagation();
+                    let model = ctx_core.model().peek().clone();
+                    let pos = (e.global_location.x as f32, e.global_location.y as f32);
+                    crate::ui::chrome::menus::open_extension_context_menu(ms, &model, id, pos);
+                }
+            })
+            .on_press(move |e: Event<PressEventData>| {
+                e.stop_propagation();
+                if effective_enabled && let Some(id) = &press_ext_id {
+                    press_core.invoke_or_log(Command::ExtensionInvokeAction {
+                        extension_id: ExtensionId::new(id.clone()),
+                    });
+                }
+            })
+            .child(
+                rect()
+                    .width(Size::px(22.0))
+                    .height(Size::px(18.0))
+                    .center()
+                    .child(crate::ui::extensions::ExtensionIconView::new(
+                        format!("sb-ext-{}", self.item.id.as_str()),
+                        self.item.icon.clone(),
+                        ext_info.as_ref().and_then(|e| e.icon_data.clone()),
+                        14.0,
+                        icon_role,
+                    ))
+                    .maybe_child(badge),
+            );
+
+        rect()
+            .width(Size::flex(1.0))
+            .min_width(Size::px(32.0))
+            .child(crate::ui::kit::KitTooltip::new(tooltip).child(tile))
+    }
+
+    fn render_key(&self) -> DiffKey {
+        self.key.clone().or(self.default_key())
     }
 }
 

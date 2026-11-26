@@ -266,7 +266,9 @@ impl App for GalleryApp {
                     | ViewRequest::WindowMinimize
                     | ViewRequest::WindowToggleMaximize
                     | ViewRequest::WindowClose
-                    | ViewRequest::LibraryVimAction { .. } => {}
+                    | ViewRequest::LibraryVimAction { .. }
+                    | ViewRequest::ExtensionPopupOpen { .. }
+                    | ViewRequest::ExtensionPopupClose => {}
                 },
                 _ => {}
             }

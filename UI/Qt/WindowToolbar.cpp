@@ -12,9 +12,6 @@
 #include <LibWebView/Application.h>
 #include <LibWebView/CrashReportOutbox.h>
 #include <LibWebView/WebCompatReport.h>
-#if defined(ENABLE_WEBEXT)
-#    include <UI/Qt/ExtensionsUI.h>
-#endif
 #include <UI/Qt/Application.h>
 #include <UI/Qt/ApplicationActions.h>
 #include <UI/Qt/BrowserWindow.h>
@@ -1440,12 +1437,6 @@ void WindowToolbar::lay_out_as_row()
     m_navigation_buttons->show();
     toolbar_layout->addWidget(&field_slot(), 1);
     toolbar_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
-#if defined(ENABLE_WEBEXT)
-    // The toolbar is laid out again when its layout changes; keep the one area rather than leaving an old one behind.
-    if (!m_extensions_area)
-        m_extensions_area = new ExtensionsToolbarArea(m_toolbar);
-    toolbar_layout->addWidget(m_extensions_area, 0, Qt::AlignVCenter);
-#endif
     if (m_feedback_button)
         toolbar_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
     toolbar_layout->addWidget(m_trailing_sidebar_slot, 0, Qt::AlignVCenter);
@@ -1484,12 +1475,6 @@ void WindowToolbar::lay_out_in_sidebar()
 
     auto* footer_layout = static_cast<QBoxLayout*>(m_sidebar_footer->layout());
     footer_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
-#if defined(ENABLE_WEBEXT)
-    // The extensions' buttons and the extensions menu, as in the toolbar of the other layouts.
-    if (!m_extensions_area)
-        m_extensions_area = new ExtensionsToolbarArea(m_toolbar);
-    footer_layout->addWidget(m_extensions_area, 0, Qt::AlignVCenter);
-#endif
     if (m_feedback_button)
         footer_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
     footer_layout->setContentsMargins(m_sidebar_footer_leading_room, 0, m_sidebar_inset, 0);
@@ -1771,10 +1756,6 @@ void WindowToolbar::bind(Tab* tab)
     if (m_tab)
         QObject::disconnect(m_tab, nullptr, this, nullptr);
     m_tab = tab;
-#if defined(ENABLE_WEBEXT)
-    if (m_extensions_area)
-        m_extensions_area->set_tab(tab);
-#endif
 
     // A tab that hasn't loaded has no page yet, so it is shown once it has one.
     if (!tab || !tab->is_loaded()) {

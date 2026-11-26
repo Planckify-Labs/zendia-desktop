@@ -475,9 +475,11 @@ impl StubBackend {
             let items = exts
                 .into_iter()
                 .map(|ext| {
-                    PickerItem::new(ext.id.0.clone(), ext.name.clone(), "extensions.menu.toggle")
+                    let mut item = PickerItem::new(ext.id.0.clone(), ext.name.clone(), "extension.invoke_action")
                         .detail(ext.version.clone())
-                        .icon("puzzle")
+                        .icon("extension");
+                    item.command_args.push(("extension_id".to_string(), ext.id.0.clone()));
+                    item
                 })
                 .collect();
             (state.model.vim_mode_enabled, items)

@@ -1306,68 +1306,10 @@ void ConnectionFromUI::view_set_zoom(u64 view_id, double zoom_level)
     }
 }
 
-Messages::HubServer::ExtensionCoreAvailableResponse ConnectionFromUI::extension_core_available()
+void ConnectionFromUI::connect_embedder_channel(String name, IPC::File socket)
 {
-#if defined(ENABLE_WEBEXT)
-    return Application::extension_manager() != nullptr;
-#else
-    return false;
-#endif
-}
-
-Messages::HubServer::ExtensionHostEventResponse ConnectionFromUI::extension_host_event([[maybe_unused]] ByteString name, [[maybe_unused]] ByteString args_json)
-{
-#if defined(ENABLE_WEBEXT)
-    if (auto* manager = Application::extension_manager())
-        return manager->host_event(name, args_json);
-#endif
-    return ByteString {};
-}
-
-Messages::HubServer::ExtensionReadFileResponse ConnectionFromUI::extension_read_file([[maybe_unused]] ByteString extension_id, [[maybe_unused]] ByteString path)
-{
-#if defined(ENABLE_WEBEXT)
-    if (auto* manager = Application::extension_manager())
-        return manager->read_file(extension_id, path);
-#endif
-    return OptionalNone {};
-}
-
-Messages::HubServer::ExtensionForUrlResponse ConnectionFromUI::extension_for_url([[maybe_unused]] ByteString url)
-{
-#if defined(ENABLE_WEBEXT)
-    if (auto* manager = Application::extension_manager())
-        return manager->extension_for_url(url);
-#endif
-    return OptionalNone {};
-}
-
-void ConnectionFromUI::extension_remove([[maybe_unused]] ByteString extension_id)
-{
-#if defined(ENABLE_WEBEXT)
-    Application::the().remove_extension(extension_id);
-#endif
-}
-
-void ConnectionFromUI::extension_host_call_finished([[maybe_unused]] u64 request_id, [[maybe_unused]] bool succeeded, [[maybe_unused]] ByteString payload)
-{
-#if defined(ENABLE_WEBEXT)
-    Application::the().extension_host_call_finished(request_id, succeeded, payload);
-#endif
-}
-
-void ConnectionFromUI::extension_prompt_answered([[maybe_unused]] u64 request_id, [[maybe_unused]] bool accepted)
-{
-#if defined(ENABLE_WEBEXT)
-    Application::the().extension_prompt_answered(request_id, accepted);
-#endif
-}
-
-void ConnectionFromUI::extension_set_popup_view([[maybe_unused]] u64 view_id, [[maybe_unused]] bool is_popup)
-{
-#if defined(ENABLE_WEBEXT)
-    Application::the().set_extension_popup_view(view_id, is_popup);
-#endif
+    if (name == "extensions"sv)
+        Application::the().connect_extension_bridge(socket.take_fd());
 }
 
 void ConnectionFromUI::view_set_display_metadata(u64 view_id, Optional<u64> display_id, double maximum_frames_per_second, bool screen_shows_high_dynamic_range)

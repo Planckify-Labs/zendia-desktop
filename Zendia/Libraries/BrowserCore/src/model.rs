@@ -19,7 +19,7 @@ use crate::contributions::{
 use crate::events::Event;
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
-use crate::modules::{ExtensionInfo, PluginInfo};
+use crate::modules::{ExtensionCommand, ExtensionId, ExtensionInfo, ExtensionPrompt, PluginInfo};
 use crate::onboarding::OnboardingState;
 use crate::settings::BrowserSettings;
 use crate::share::ShareSettings;
@@ -868,6 +868,8 @@ pub struct BrowserModel {
     pub plugins_enabled: bool,
     pub plugins: Vec<PluginInfo>,
     pub extensions: Vec<ExtensionInfo>,
+    pub extension_commands: Vec<ExtensionCommand>,
+    pub pending_extension_prompt: Option<ExtensionPrompt>,
     pub vim_mode_enabled: bool,
     pub shield_enabled: bool,
     pub onboarding: OnboardingState,
@@ -914,6 +916,10 @@ pub struct PageFlash {
 impl BrowserModel {
     pub fn tab(&self, tab_id: TabId) -> Option<&Tab> {
         self.tabs.iter().find(|tab| tab.id == tab_id)
+    }
+
+    pub fn extension(&self, extension_id: &ExtensionId) -> Option<&ExtensionInfo> {
+        self.extensions.iter().find(|ext| &ext.id == extension_id)
     }
 
     pub fn tab_by_view_id(&self, view_id: u64) -> Option<&Tab> {
@@ -1614,6 +1620,14 @@ impl BrowserModel {
             Event::ExtensionsChanged { extensions } => {
                 self.extensions = extensions.clone();
                 self.site_extensions = crate::modules::unpinned_site_extensions(extensions);
+                true
+            }
+            Event::ExtensionCommandsChanged { commands } => {
+                self.extension_commands = commands.clone();
+                true
+            }
+            Event::ExtensionPromptChanged { prompt } => {
+                self.pending_extension_prompt = prompt.clone();
                 true
             }
             Event::LayoutSettingsChanged { layout } => {

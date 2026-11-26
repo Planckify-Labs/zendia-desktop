@@ -26,7 +26,6 @@ namespace Ladybird {
 
 class BrowserWindow;
 class DownloadsButton;
-class ExtensionsToolbarArea;
 class DownloadsPopover;
 class FeedbackButton;
 class FeedbackPopover;
@@ -102,9 +101,6 @@ public:
     void show_downloads_popover();
     void update_downloads_button();
     void update_feedback_button();
-
-    // AD-HOC (cgx-webext): the extension buttons; null without extension support.
-    ExtensionsToolbarArea* extensions_area() const { return m_extensions_area; }
 
 private:
     virtual bool event(QEvent*) override;
@@ -184,7 +180,6 @@ private:
     ReloadButton* m_reload_button { nullptr };
 
     DownloadsButton* m_downloads_button { nullptr };
-    ExtensionsToolbarArea* m_extensions_area { nullptr };
     QPointer<DownloadsPopover> m_downloads_popover;
     size_t m_completed_download_count { 0 };
 

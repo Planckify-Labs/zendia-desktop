@@ -19,7 +19,7 @@ use crate::model::{
     ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings,
     WhichKeyState, WindowId,
 };
-use crate::modules::{ExtensionInfo, PluginInfo};
+use crate::modules::{ExtensionCommand, ExtensionId, ExtensionInfo, ExtensionPrompt, PluginInfo};
 use crate::onboarding::OnboardingState;
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
@@ -238,6 +238,12 @@ pub enum Event {
     ExtensionsChanged {
         extensions: Vec<ExtensionInfo>,
     },
+    ExtensionCommandsChanged {
+        commands: Vec<ExtensionCommand>,
+    },
+    ExtensionPromptChanged {
+        prompt: Option<ExtensionPrompt>,
+    },
     LayoutSettingsChanged {
         layout: LayoutSettings,
     },
@@ -360,6 +366,13 @@ pub enum ViewRequest {
     LibraryClose,
     /// Open the extensions menu, or close it if it is open.
     ExtensionsMenuToggle,
+    /// Open a WebExtension's HTML popup view anchored near its toolbar/site button.
+    ExtensionPopupOpen {
+        extension_id: ExtensionId,
+        popup_url: String,
+    },
+    /// Close any open WebExtension HTML popup view.
+    ExtensionPopupClose,
     /// Start renaming a space inline in the library's Spaces section.
     SpaceRename { space_id: SpaceId },
     /// Open the icon picker for a space in the library's Spaces section.

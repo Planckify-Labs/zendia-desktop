@@ -7,6 +7,7 @@
 
 //! The browser window: its tabs, its toolbar, and the page stage hosting one or more [`PageSurface`]s.
 
+use crate::extensions::{ExtensionAdapter, ExtensionUiEvent};
 use crate::hub::{self, startup};
 use crate::hub_adapter::HubTabAdapter;
 use crate::input;
@@ -17,6 +18,9 @@ use crate::ui::chrome::menus::{
 };
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::use_provide_core_with_observer;
+use crate::ui::extensions::{
+    ExtensionPopupOverlay, ExtensionPromptOverlay, match_extension_shortcut, use_provide_extension_popup_state,
+};
 use crate::ui::kit::{is_text_editing_key, use_provide_text_focus};
 use crate::ui::library::media_preview::{MediaPreviewOverlay, use_provide_media_preview_state};
 use crate::ui::library::sections::space_routing::use_provide_space_routing_view_state;
@@ -43,6 +47,7 @@ use std::sync::Arc;
 use zendia_browser_core::BrowserCore;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::events::{Event as CoreEvent, ViewRequest};
+use zendia_browser_core::extension_source::ExtensionSource;
 use zendia_browser_core::model::TabId;
 use zendia_browser_core::stub::StubBackend;
 use zendia_browser_core::tab_source::TabSource;
@@ -80,7 +85,7 @@ fn cursor_icon(cursor: &Gfx_Cursor) -> CursorIcon {
 
 /// Routes incoming Hub messages to the Hub tab adapter (browser state) or the view-local [`PageSurfaceContext`].
 fn handle_message(
-    core: &dyn BrowserCore,
+    core: &StubBackend,
     adapter: &HubTabAdapter,
     page_ctx: &PageSurfaceContext,
     menu_state: &MenuViewState,
@@ -288,6 +293,45 @@ fn handle_message(
         HubMessage::AppQuitForSignal(_) => Platform::get().exit(),
         HubMessage::ViewRequestContextMenu(client::ViewRequestContextMenu { view_id, request }) => {
             let caps = adapter.view_capabilities(view_id);
+            let page_url = core
+                .model()
+                .tab_by_view_id(view_id)
+                .map(|t| t.url.clone())
+                .unwrap_or_default();
+            let media_type = match request.kind {
+                WebView_ContextMenuKind::Image => Some("image"),
+                WebView_ContextMenuKind::Media => {
+                    if request.media.as_ref().is_some_and(|m| m.is_video) {
+                        Some("video")
+                    } else {
+                        Some("audio")
+                    }
+                }
+                _ => None,
+            };
+            let mut target = serde_json::json!({
+                "tabId": view_id as i64,
+                "pageUrl": page_url,
+                "editable": request.is_editable,
+            });
+            if let Some(link) = request.link_navigation.as_ref() {
+                target["linkUrl"] = serde_json::json!(link.url.as_str());
+            }
+            if let Some(sel) = request.selected_text.as_ref().and_then(|s| s.as_str().ok())
+                && !sel.is_empty()
+            {
+                target["selectionText"] = serde_json::json!(sel);
+            }
+            if let Some(mt) = media_type {
+                target["mediaType"] = serde_json::json!(mt);
+                if let Some(m) = request.media.as_ref().and_then(|m| m.media_url.as_ref()) {
+                    target["srcUrl"] = serde_json::json!(m.as_str());
+                } else if let Some(nav) = request.navigation.as_ref() {
+                    target["srcUrl"] = serde_json::json!(nav.url.as_str());
+                }
+            }
+            let target_json = target.to_string();
+            let extension_items = core.extension_context_menu_items(&target_json);
             open_hub_context_menu(
                 core,
                 page_ctx,
@@ -297,6 +341,8 @@ fn handle_message(
                 caps.can_view_source,
                 caps.can_report_website_issue,
                 adapter.search_engine_name(),
+                extension_items,
+                &target_json,
             );
         }
         HubMessage::ViewRequestSelectDropdown(client::ViewRequestSelectDropdown {
@@ -344,18 +390,30 @@ fn handle_message(
 }
 
 pub fn app() -> impl IntoElement {
-    let (stub_core, hub_adapter) = use_hook(|| {
+    let (stub_core, hub_adapter, ext_adapter) = use_hook(|| {
         let device_pixel_ratio = *Platform::get().current_window().scale_factor.peek();
         let stub = Arc::new(StubBackend::new_for_external_tabs());
         let adapter = Arc::new(HubTabAdapter::new(Arc::clone(&stub), device_pixel_ratio));
         stub.attach_tab_source(Arc::clone(&adapter) as Arc<dyn TabSource>);
+        let ext = ExtensionAdapter::new(Arc::clone(&stub), Arc::clone(&adapter));
+        stub.attach_extension_source(Arc::clone(&ext) as Arc<dyn ExtensionSource>);
+        if let Err(err) = ext.start() {
+            eprintln!("zendia: ExtensionServer failed to start: {err}");
+        }
         let onboarding_profile = zendia_browser_core::onboarding::onboarding_profile_path()
             .and_then(|path| zendia_browser_core::onboarding::load_profile_record_from(&path));
         stub.apply_onboarding_profile(onboarding_profile);
         let shell_profile = zendia_browser_core::shell_layout::shell_layout_profile_path()
             .and_then(|path| zendia_browser_core::shell_layout::load_shell_layout_from(&path));
         stub.apply_shell_layout_profile(shell_profile);
-        (stub, adapter)
+        (stub, adapter, ext)
+    });
+
+    use_drop({
+        let ext_adapter = Arc::clone(&ext_adapter);
+        move || {
+            ext_adapter.shutdown();
+        }
     });
 
     let mut viewport_known = use_state(|| false);
@@ -380,6 +438,19 @@ pub fn app() -> impl IntoElement {
     let media_preview_state = use_provide_media_preview_state();
     let space_editing_state = use_provide_space_editing_state();
     let share_state = use_provide_share_state();
+    let extension_popup_state = use_provide_extension_popup_state();
+    use_hook({
+        let hub_adapter = Arc::clone(&hub_adapter);
+        let ext_adapter = Arc::clone(&ext_adapter);
+        let page_ctx = page_ctx.clone();
+        move || {
+            extension_popup_state.set_close_callback(move |view_id| {
+                ext_adapter.set_popup_view(view_id, false);
+                page_ctx.remove_closed_view(view_id);
+                hub_adapter.destroy_auxiliary_view(view_id);
+            });
+        }
+    });
     let find_bar = crate::ui::page::find_bar::use_provide_find_bar();
     let webchat_views = use_provide_webchat_views(Some(Arc::clone(&hub_adapter)));
     let onboarding_state = use_provide_onboarding_state(false);
@@ -395,11 +466,17 @@ pub fn app() -> impl IntoElement {
 
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
+        let hub_adapter = Arc::clone(&hub_adapter);
+        let ext_adapter = Arc::clone(&ext_adapter);
         let page_ctx = page_ctx.clone();
         let keymap = keymap.clone();
         move |event| match event {
+            CoreEvent::TabOpened { .. } | CoreEvent::TabUpdated { .. } | CoreEvent::ZoomChanged { .. } => {
+                ext_adapter.push_browser_state();
+            }
             CoreEvent::TabClosed { tab_id } => {
                 page_ctx.remove_closed_view(tab_id.0);
+                ext_adapter.push_browser_state();
                 if stub_core.model().tabs.is_empty() {
                     Platform::get().exit();
                 }
@@ -419,6 +496,7 @@ pub fn app() -> impl IntoElement {
             CoreEvent::TabActivated { .. } => {
                 // NB: The vim mode follows whether a field of the newly active tab has the focus.
                 let _ = stub_core.invoke(Command::Vim(VimCommand::SyncPageMode));
+                ext_adapter.push_browser_state();
             }
             CoreEvent::RegionCaptured { .. } => {
                 region_picker_state.stop();
@@ -454,7 +532,27 @@ pub fn app() -> impl IntoElement {
                     address_bar_state.close();
                     menu_state.close_all();
                     share_state.close();
+                    extension_popup_state.request_close();
                     address_bar_state.toggle_site_panel(None);
+                }
+                ViewRequest::ExtensionPopupOpen {
+                    extension_id,
+                    popup_url,
+                } => {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    share_state.close();
+                    extension_popup_state.request_close();
+                    let ext_ref = Arc::clone(&ext_adapter);
+                    if let Some(view_id) = hub_adapter.create_extension_popup_view(popup_url, move |vid| {
+                        ext_ref.set_popup_view(vid, true);
+                    }) {
+                        extension_popup_state.open_popup(extension_id.clone(), view_id, *last_click_pos.peek());
+                    }
+                }
+                ViewRequest::ExtensionPopupClose => {
+                    extension_popup_state.request_close();
                 }
                 ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
                     library_state.handle_view_request(request);
@@ -740,6 +838,76 @@ pub fn app() -> impl IntoElement {
         }
     });
 
+    // NB: ExtensionServer events (popup lifecycle, host.* calls, crashes) arrive on its IPC reader thread and execute
+    //     on the UI thread here.
+    use_hook({
+        let stub_core = Arc::clone(&stub_core);
+        let ext_adapter = Arc::clone(&ext_adapter);
+        move || {
+            spawn_in_window(async move {
+                let rx = ext_adapter.receiver();
+                let mut consecutive_restarts = 0u32;
+                while let Ok(event) = rx.recv().await {
+                    match event {
+                        ExtensionUiEvent::OpenPopup {
+                            extension_id,
+                            popup_url,
+                        } => {
+                            stub_core.open_extension_popup(extension_id, popup_url);
+                        }
+                        ExtensionUiEvent::PopupSize { view_id, width, height } => {
+                            extension_popup_state.resize_popup(view_id, width, height);
+                        }
+                        ExtensionUiEvent::PopupReady { view_id } => {
+                            extension_popup_state.mark_ready(view_id);
+                        }
+                        ExtensionUiEvent::ClosePopup { view_id } => {
+                            let matches_open = extension_popup_state
+                                .open
+                                .peek()
+                                .as_ref()
+                                .is_some_and(|p| p.view_id == view_id);
+                            if matches_open {
+                                extension_popup_state.request_close();
+                            }
+                        }
+                        ExtensionUiEvent::HostCall {
+                            token,
+                            extension_id,
+                            function,
+                            args,
+                        } => {
+                            ext_adapter.handle_host_call(token, &extension_id, &function, &args);
+                        }
+                        ExtensionUiEvent::ServiceDisconnected { reason } => {
+                            extension_popup_state.request_close();
+                            let is_manual = reason == "Restarting ExtensionServer";
+                            if is_manual {
+                                consecutive_restarts = 0;
+                            } else {
+                                consecutive_restarts = consecutive_restarts.saturating_add(1);
+                            }
+                            if consecutive_restarts <= 5 {
+                                if !is_manual {
+                                    eprintln!(
+                                        "zendia: {reason}; restarting ExtensionServer (attempt {consecutive_restarts})"
+                                    );
+                                }
+                                if let Err(err) = ext_adapter.start() {
+                                    eprintln!("zendia: ExtensionServer restart failed: {err}");
+                                }
+                            } else {
+                                eprintln!(
+                                    "zendia: ExtensionServer crashed too many times; keeping paused until manual restart"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+
     // The tabs the browser starts with, once the page stage knows its size.
     let mut did_open_initial_tabs = use_state(|| false);
     if *viewport_known.read() && !*did_open_initial_tabs.peek() {
@@ -795,8 +963,23 @@ pub fn app() -> impl IntoElement {
                 || region_picker_state.is_active()
                 || media_preview_state.is_open()
                 || share_state.is_open()
+                || extension_popup_state.is_open()
+                || core.model().peek().pending_extension_prompt.is_some()
             {
                 return;
+            }
+            if !text_focus.is_any_focused() && !address_bar_state.is_open() && !menu_state.has_open_overlay() {
+                let matched_ext_cmd = {
+                    let model = core.model().peek();
+                    match_extension_shortcut(&e, &model.extension_commands)
+                        .map(|c| (c.extension_id.clone(), c.name.clone()))
+                };
+                if let Some((extension_id, name)) = matched_ext_cmd {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    core.invoke_or_log(Command::ExtensionInvokeCommand { extension_id, name });
+                    return;
+                }
             }
             if text_focus.is_any_focused() && is_text_editing_key(&e) {
                 return;
@@ -889,6 +1072,8 @@ pub fn app() -> impl IntoElement {
         .child(MediaPreviewOverlay)
         .child(GradientGeneratorOverlay)
         .child(ShareConfirmOverlay)
+        .child(ExtensionPopupOverlay)
+        .child(ExtensionPromptOverlay)
         .child(DownloadArcLayer { pinned_progress: None })
         .child(OnboardingOverlay)
 }

@@ -445,6 +445,14 @@ impl Component for ExtensionMenuRow {
             }
         };
 
+        let badge_bg = ext
+            .badge_bg
+            .map(|[r, g, b, a]| Color::from_argb(a, r, g, b))
+            .unwrap_or_else(|| theme.color(ThemeRole::Accent));
+        let badge_fg = ext
+            .badge_fg
+            .map(|[r, g, b, a]| Color::from_argb(a, r, g, b))
+            .unwrap_or_else(|| theme.color(ThemeRole::TextOnAccent));
         let badge = ext.badge_text.clone().filter(|_| usable).map(|text| {
             rect()
                 .position(Position::new_absolute().right(-4.0).top(-4.0))
@@ -452,14 +460,14 @@ impl Component for ExtensionMenuRow {
                 .min_width(Size::px(14.0))
                 .height(Size::px(14.0))
                 .corner_radius(CornerRadius::new_all(7.0))
-                .background(theme.color(ThemeRole::Accent))
+                .background(badge_bg)
                 .center()
                 .child(
                     label()
                         .text(text)
                         .font_size(9.0)
                         .font_weight(FontWeight::BOLD)
-                        .color(theme.color(ThemeRole::TextOnAccent)),
+                        .color(badge_fg),
                 )
         });
         let icon = rect()
@@ -469,7 +477,13 @@ impl Component for ExtensionMenuRow {
             .background(theme.color(ThemeRole::SurfaceRaised))
             .center()
             .opacity(if usable { 1.0 } else { 0.5 })
-            .child(Icon::new(ext.icon.clone()).size(17.0).role(ThemeRole::Text))
+            .child(crate::ui::extensions::ExtensionIconView::new(
+                format!("menu-ext-{}", ext.id.as_str()),
+                ext.icon.clone(),
+                ext.icon_data.clone(),
+                17.0,
+                ThemeRole::Text,
+            ))
             .maybe_child(badge);
 
         let name_row = rect()
@@ -613,6 +627,23 @@ impl Component for ExtensionRowOptions {
                 }),
             }
         };
+        let options = self.ext.options_url.as_ref().map(|_| {
+            let core = core.clone();
+            let id = id.clone();
+            MenuItemRow {
+                icon: "sliders",
+                title: "Extension Options",
+                role: ThemeRole::Text,
+                height: 30.0,
+                on_press: EventHandler::new(move |_| {
+                    core.invoke_or_log(Command::ExtensionOpenOptions {
+                        extension_id: id.clone(),
+                    });
+                    row_menu.set(None);
+                    close_menu(menu_state);
+                }),
+            }
+        });
         let manage = {
             let core = core.clone();
             MenuItemRow {
@@ -657,6 +688,7 @@ impl Component for ExtensionRowOptions {
             .shadow(theme.shadows.float_drop.to_shadow())
             .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
             .child(pin)
+            .maybe_child(options)
             .child(manage)
             .child(remove)
     }

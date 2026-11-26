@@ -19,6 +19,7 @@ pub mod chrome_actions;
 pub mod commands;
 pub mod downloads;
 pub mod events;
+pub mod extension_source;
 pub mod focus;
 pub mod history;
 pub mod input_state;

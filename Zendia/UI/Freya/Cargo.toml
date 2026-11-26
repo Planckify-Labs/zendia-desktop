@@ -24,6 +24,7 @@ path = "src/bin/gallery.rs"
 
 [dependencies]
 async-channel = "2.3"
+base64 = "0.22"
 cpal = "0.15"
 freya = { version = "0.5.4", features = ["engine"] }
 hub-protocol = { workspace = true }
@@ -34,3 +35,4 @@ zendia-automation = { workspace = true }
 zendia-browser-core = { workspace = true }
 zendia-keymap = { workspace = true }
 zendia-module-api = { workspace = true }
+zendia-service = { workspace = true }

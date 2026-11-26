@@ -54,9 +54,6 @@
 #include <LibWebView/Utilities.h>
 #include <LibWebView/WebCompatReport.h>
 #include <LibWebView/WebContentPage.h>
-#if defined(ENABLE_WEBEXT)
-#    include <UI/Qt/ExtensionsUI.h>
-#endif
 #include <UI/Qt/Application.h>
 #include <UI/Qt/BookmarkDialog.h>
 #include <UI/Qt/Bookmarks.h>
@@ -2519,61 +2516,6 @@ void Application::display_error_dialog(StringView error_message) const
 {
     create_message_box(QMessageBox::Warning, error_message, active_window_if_any())->open();
 }
-
-#if defined(ENABLE_WEBEXT)
-void Application::extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
-{
-    Extensions::host_call(extension_id, function, args, move(reply));
-}
-
-void Application::extension_ui_changed(StringView extension_id, StringView what)
-{
-    Extensions::ui_changed(extension_id, what);
-}
-
-bool Application::is_extension_popup_view(u64 view_id) const
-{
-    return Extensions::is_popup_view(view_id);
-}
-
-void Application::extension_popup_request(u64 view_id, StringView name, StringView args_json)
-{
-    Extensions::popup_request(view_id, name, args_json);
-}
-
-void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
-{
-    if (browser_options().headless_mode.has_value() || browser_options().auto_accept_extension_prompts) {
-        WebView::Application::the().WebView::Application::display_extension_prompt(prompt, move(on_answer));
-        return;
-    }
-
-    auto* dialog = create_message_box(QMessageBox::Question, prompt.title, active_window_if_any());
-    dialog->removeButton(dialog->button(QMessageBox::Ok));
-    if (!prompt.message.is_empty() || !prompt.details.is_empty()) {
-        StringBuilder text;
-        text.append(prompt.message);
-        for (auto const& detail : prompt.details)
-            text.appendff("\n  \u2022 {}", detail);
-        dialog->setInformativeText(qstring_from_ak_string(text.string_view().trim_whitespace()));
-    }
-    auto* accept_button = dialog->addButton(qstring_from_ak_string(prompt.accept_label), QMessageBox::AcceptRole);
-    auto* cancel_button = dialog->addButton(QMessageBox::Cancel);
-    dialog->setDefaultButton(cancel_button);
-
-    struct Answer : RefCounted<Answer> {
-        Function<void(bool)> callback;
-    };
-    auto answer = adopt_ref(*new Answer);
-    answer->callback = move(on_answer);
-    // Qt wants copyable slots; the callback is answered once, however the dialog closes.
-    QObject::connect(dialog, &QMessageBox::finished, [dialog, accept_button, answer](int) {
-        if (auto callback = move(answer->callback))
-            callback(dialog->clickedButton() == accept_button);
-    });
-    dialog->open();
-}
-#endif
 
 #if defined(LADYBIRD_HAS_UPDATE_CHECK)
 void Application::display_update_check_result(WebView::UpdateCheckResult::Kind kind, Optional<String> const& version, WebView::InstallMethod install_method, WebView::UpdateCheckTrigger trigger)

@@ -46,11 +46,6 @@
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/TimeoutsConfiguration.h>
 #include <LibWebView/Application.h>
-#if defined(ENABLE_WEBEXT)
-#    include <LibWebView/Extensions/ApplicationExtensionDelegate.h>
-#    include <LibWebView/Extensions/ExtensionManager.h>
-#    include <LibWebView/Extensions/StoreInstaller.h>
-#endif
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/CompositorClient.h>
 #include <LibWebView/CompositorPresentationClient.h>
@@ -58,6 +53,7 @@
 #include <LibWebView/CrashReport.h>
 #include <LibWebView/CrashReportOutbox.h>
 #include <LibWebView/CrashReportStore.h>
+#include <LibWebView/EmbedderExtensionBridge.h>
 #include <LibWebView/FontService.h>
 #include <LibWebView/FontServiceHost.h>
 #include <LibWebView/HSTSStore.h>
@@ -228,471 +224,17 @@ OwnPtr<MediaSessionPlatformBackend> Application::create_media_session_platform_b
     return {};
 }
 
-#if defined(ENABLE_WEBEXT)
-void Application::initialize_extensions()
+void Application::connect_extension_bridge(int socket_fd)
 {
-    m_extension_delegate = make<ApplicationExtensionDelegate>(LexicalPath::join(profile().paths().data, "Extensions"sv).string());
-    m_extension_manager = ExtensionManager::create(*m_extension_delegate);
-    m_extension_delegate->set_manager(*m_extension_manager);
-
-    // Extensions installed from the Chrome Web Store or addons.mozilla.org, kept in the profile.
-    m_store_installer = make<StoreInstaller>(*m_extension_manager, LexicalPath::join(profile().paths().data, "ExtensionPackages"sv).string());
-    m_store_installer->on_installed = [this](ByteString const& id, bool is_update) {
-        stop_extension_background_page(id);
-        start_extension_background_page(id, is_update ? ExtensionStartReason::Update : ExtensionStartReason::Install);
-        extension_ui_changed(id, "installed"sv);
-        extension_network_interest_changed();
-    };
-    m_store_installer->on_uninstalled = [this](ByteString const& id) {
-        stop_extension_background_page(id);
-        m_extension_delegate->remove_extension_data(id);
-        extension_ui_changed(id, "removed"sv);
-    };
-    m_kept_extension_ids = m_store_installer->load_installed_packages();
-
-    for (auto const& path : m_browser_options.extension_paths) {
-        ErrorOr<Variant<ExtensionManager::InstalledExtension, ExtensionManager::InstallFailure>> result = Error::from_string_literal("unreachable");
-
-        if (FileSystem::is_directory(path)) {
-            result = m_extension_manager->install_directory(path, {}, "auto"sv);
-        } else {
-            auto file = Core::File::open(path, Core::File::OpenMode::Read);
-            auto contents = file.is_error() ? ErrorOr<ByteBuffer> { file.release_error() } : file.value()->read_until_eof();
-            if (contents.is_error()) {
-                warnln("Could not read extension '{}': {}", path, contents.error());
-                continue;
-            }
-            result = m_extension_manager->install_package(contents.value().bytes(), {}, "auto"sv);
-        }
-
-        if (result.is_error()) {
-            warnln("Could not load extension '{}': {}", path, result.error());
-            continue;
-        }
-
-        result.value().visit(
-            [&](ExtensionManager::InstalledExtension const& extension) {
-                outln("Loaded extension: {} {} at {}", extension.display_name, extension.version, extension.base_url);
-                m_loaded_extension_ids.append(extension.id.to_byte_string());
-            },
-            [&](ExtensionManager::InstallFailure const& failure) {
-                warnln("Could not load extension '{}': {}", path, failure.message);
-            });
-    }
-}
-#endif
-
-#if defined(ENABLE_WEBEXT)
-// Background pages run in hidden views. They start once the event loop runs, when the processes they need are up.
-void Application::start_extension_background_pages()
-{
-    if (!m_extension_manager)
-        return;
-
-    for (auto const& id : m_kept_extension_ids) {
-        // --load-extension of the same extension wins.
-        if (!m_loaded_extension_ids.contains_slow(id))
-            start_extension_background_page(id, ExtensionStartReason::Startup);
-    }
-    for (auto const& id : m_loaded_extension_ids)
-        start_extension_background_page(id, ExtensionStartReason::Install);
-
-    // Rules that came with the packages were loaded before there was an event loop to tell the renderers on.
-    m_extensions_started = true;
-    extension_network_interest_changed();
-
-    // AD-HOC (cgx-webext): The Qt UI reports its windows and tabs to the extension core. A headless run has no such UI, so
-    //                      its views are reported as the tabs of one window; without that, tabs.* and scripting.executeScript
-    //                      have nothing to act on and cannot be run in a headless test.
-    if (m_browser_options.headless_mode.has_value()) {
-        static RefPtr<Core::Timer> s_headless_state_timer;
-        s_headless_state_timer = Core::Timer::create_repeating(AK::Duration::from_milliseconds(50), [this] {
-            if (!m_extension_manager)
-                return;
-            JsonArray tabs;
-            bool first = true;
-            ViewImplementation::for_each_view([&](ViewImplementation& view) {
-                if (is_extension_background_view(view.view_id()) || view.owner_view_id().has_value())
-                    return IterationDecision::Continue;
-                JsonObject entry;
-                entry.set("id"sv, static_cast<i64>(view.view_id()));
-                entry.set("active"sv, first);
-                entry.set("pinned"sv, false);
-                entry.set("url"sv, view.url().serialize());
-                entry.set("title"sv, view.title().to_utf8());
-                entry.set("status"sv, view.is_loading() ? "loading"sv : "complete"sv);
-                entry.set("muted"sv, false);
-                entry.set("zoom"sv, view.zoom_level());
-                entry.set("width"sv, static_cast<i64>(view.viewport_size().width().value()));
-                entry.set("height"sv, static_cast<i64>(view.viewport_size().height().value()));
-                MUST(tabs.append(move(entry)));
-                first = false;
-                return IterationDecision::Continue;
-            });
-            JsonObject window;
-            window.set("id"sv, 1);
-            window.set("type"sv, "normal"sv);
-            window.set("state"sv, "normal"sv);
-            window.set("focused"sv, true);
-            window.set("incognito"sv, false);
-            window.set("left"sv, 0);
-            window.set("top"sv, 0);
-            window.set("width"sv, m_browser_options.window_width);
-            window.set("height"sv, m_browser_options.window_height);
-            window.set("tabs"sv, move(tabs));
-            JsonArray windows;
-            MUST(windows.append(move(window)));
-            JsonObject root;
-            root.set("windows"sv, move(windows));
-            root.set("lastFocusedWindowId"sv, 1);
-            auto state = root.serialized().to_byte_string();
-            static ByteString s_last_reported;
-            if (state == s_last_reported)
-                return;
-            s_last_reported = state;
-            (void)m_extension_manager->host_event("browserState"sv, state);
-        });
-        s_headless_state_timer->start();
-    }
+    m_extension_bridge = nullptr;
+    if (socket_fd >= 0)
+        m_extension_bridge = EmbedderExtensionBridge::create(socket_fd);
 }
 
-void Application::start_extension_background_page(ByteString const& id, ExtensionStartReason reason)
+CookieJar* Application::default_cookie_jar() const
 {
-    if (!m_extension_manager || m_extension_background_views.contains(id))
-        return;
-    auto url_string = m_extension_manager->background_url(id);
-    if (!url_string.has_value()) {
-        if (reason != ExtensionStartReason::Startup)
-            m_extension_manager->notify_installed(id, reason == ExtensionStartReason::Update ? "update"sv : "install"sv);
-        return;
-    }
-    auto url = URL::Parser::basic_parse(*url_string);
-    if (!url.has_value()) {
-        warnln("Extensions: invalid background URL {}", *url_string);
-        return;
-    }
-
-    auto theme_path = LexicalPath::join(WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
-    auto theme = Gfx::load_system_theme(theme_path.string());
-    if (theme.is_error()) {
-        warnln("Extensions: cannot load the theme for background pages: {}", theme.error());
-        return;
-    }
-
-    auto view = HeadlessWebView::create(theme.value(), { 800, 600 });
-    // The background page's listeners must exist before the install and startup events fire.
-    view->on_load_finish = [this, id, reason, fired = false](URL::URL const&) mutable {
-        if (exchange(fired, true))
-            return;
-        if (reason != ExtensionStartReason::Startup)
-            m_extension_manager->notify_installed(id, reason == ExtensionStartReason::Update ? "update"sv : "install"sv);
-        if (reason == ExtensionStartReason::Startup || (reason == ExtensionStartReason::Install && m_loaded_extension_ids.contains_slow(id)))
-            m_extension_manager->notify_startup(id);
-    };
-    view->load_from_browser_ui(*url);
-    dbgln("Extensions: started background page {}", *url_string);
-    m_extension_background_views.set(id, move(view));
+    return m_default_session ? m_default_session->cookie_jar.ptr() : nullptr;
 }
-
-void Application::stop_extension_background_page(ByteString const& id)
-{
-    m_extension_background_views.remove(id);
-}
-
-static JsonObject serialize_extension_cookie(HTTP::Cookie::Cookie const& cookie, StringView store_id = "0"sv)
-{
-    JsonObject obj;
-    obj.set("name"sv, cookie.name);
-    obj.set("value"sv, cookie.value);
-    obj.set("domain"sv, cookie.domain);
-    obj.set("hostOnly"sv, cookie.host_only);
-    obj.set("path"sv, cookie.path);
-    obj.set("secure"sv, cookie.secure);
-    obj.set("httpOnly"sv, cookie.http_only);
-    obj.set("session"sv, !cookie.persistent);
-    if (cookie.persistent)
-        obj.set("expirationDate"sv, static_cast<double>(cookie.expiry_time.milliseconds_since_epoch()) / 1000.0);
-    StringView same_site = "unspecified"sv;
-    switch (cookie.same_site) {
-    case HTTP::Cookie::SameSite::None:
-        same_site = "no_restriction"sv;
-        break;
-    case HTTP::Cookie::SameSite::Lax:
-        same_site = "lax"sv;
-        break;
-    case HTTP::Cookie::SameSite::Strict:
-        same_site = "strict"sv;
-        break;
-    case HTTP::Cookie::SameSite::Default:
-        same_site = "unspecified"sv;
-        break;
-    }
-    obj.set("sameSite"sv, same_site);
-    obj.set("storeId"sv, store_id);
-    return obj;
-}
-
-bool Application::extension_host_call_works_without_ui(StringView function)
-{
-    // Keep in sync with extension_host_call below.
-    return function.is_one_of("host.cookies.get"sv, "host.cookies.getAll"sv, "host.cookies.set"sv, "host.cookies.remove"sv,
-        "host.browsingData.remove"sv, "host.search.engines"sv, "host.management.uninstall"sv);
-}
-
-void Application::extension_host_call(ByteString const&, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
-{
-    if (function == "host.cookies.get"sv && m_default_session && m_default_session->cookie_jar) {
-        auto url = URL::Parser::basic_parse(args.get_string("url"sv).value_or({}));
-        auto name = args.get_string("name"sv).value_or({});
-        if (!url.has_value())
-            return reply(Error::from_string_literal("Invalid cookie URL"));
-        auto cookie = m_default_session->cookie_jar->get_named_cookie(*url, name);
-        if (!cookie.has_value())
-            return reply(ByteString { "null"sv });
-        auto store_id = args.get_string("storeId"sv).value_or("0"_string);
-        return reply(serialize_extension_cookie(*cookie, store_id).serialized().to_byte_string());
-    }
-
-    if (function == "host.cookies.getAll"sv && m_default_session && m_default_session->cookie_jar) {
-        auto store_id = args.get_string("storeId"sv).value_or("0"_string);
-        auto filter_name = args.get_string("name"sv);
-        auto filter_domain = args.get_string("domain"sv);
-        auto filter_path = args.get_string("path"sv);
-        auto filter_secure = args.get_bool("secure"sv);
-        auto filter_session = args.get_bool("session"sv);
-        Optional<URL::URL> filter_url;
-        if (auto u = args.get_string("url"sv); u.has_value())
-            filter_url = URL::Parser::basic_parse(*u);
-
-        JsonArray out;
-        auto cookies = filter_url.has_value()
-            ? m_default_session->cookie_jar->get_all_cookies_webdriver(*filter_url)
-            : m_default_session->cookie_jar->get_all_cookies();
-        for (auto const& c : cookies) {
-            if (filter_name.has_value() && c.name != *filter_name)
-                continue;
-            if (filter_domain.has_value() && !HTTP::Cookie::domain_matches(c.domain, *filter_domain))
-                continue;
-            if (filter_path.has_value() && c.path != *filter_path)
-                continue;
-            if (filter_secure.has_value() && c.secure != *filter_secure)
-                continue;
-            if (filter_session.has_value() && (!c.persistent) != *filter_session)
-                continue;
-            out.must_append(serialize_extension_cookie(c, store_id));
-        }
-        return reply(out.serialized().to_byte_string());
-    }
-
-    if (function == "host.cookies.set"sv && m_default_session && m_default_session->cookie_jar) {
-        auto url = URL::Parser::basic_parse(args.get_string("url"sv).value_or({}));
-        if (!url.has_value())
-            return reply(Error::from_string_literal("Invalid cookie URL"));
-        auto canonical_domain = HTTP::Cookie::canonicalize_domain(*url);
-        HTTP::Cookie::Cookie cookie;
-        cookie.name = args.get_string("name"sv).value_or({});
-        cookie.value = args.get_string("value"sv).value_or({});
-        auto explicit_domain = args.get_string("domain"sv);
-        cookie.host_only = !explicit_domain.has_value();
-        cookie.domain = explicit_domain.value_or(canonical_domain.value_or({}));
-        cookie.path = args.get_string("path"sv).value_or(HTTP::Cookie::default_path(*url));
-        cookie.secure = args.get_bool("secure"sv).value_or(false);
-        cookie.http_only = args.get_bool("httpOnly"sv).value_or(false);
-        auto now = UnixDateTime::now();
-        cookie.creation_time = now;
-        cookie.last_access_time = now;
-        if (auto exp = args.get_double_with_precision_loss("expirationDate"sv); exp.has_value()) {
-            cookie.persistent = true;
-            cookie.expiry_time = UnixDateTime::from_milliseconds_since_epoch(static_cast<i64>(*exp * 1000.0));
-        } else {
-            cookie.persistent = false;
-            cookie.expiry_time = UnixDateTime::from_seconds_since_epoch(now.seconds_since_epoch() + 86400 * 365);
-        }
-        auto ss = args.get_string("sameSite"sv).value_or({});
-        if (ss == "no_restriction"sv)
-            cookie.same_site = HTTP::Cookie::SameSite::None;
-        else if (ss == "lax"sv)
-            cookie.same_site = HTTP::Cookie::SameSite::Lax;
-        else if (ss == "strict"sv)
-            cookie.same_site = HTTP::Cookie::SameSite::Strict;
-        else
-            cookie.same_site = HTTP::Cookie::SameSite::Default;
-        m_default_session->cookie_jar->update_cookie(cookie);
-        auto store_id = args.get_string("storeId"sv).value_or("0"_string);
-        return reply(serialize_extension_cookie(cookie, store_id).serialized().to_byte_string());
-    }
-
-    if (function == "host.cookies.remove"sv && m_default_session && m_default_session->cookie_jar) {
-        auto url = URL::Parser::basic_parse(args.get_string("url"sv).value_or({}));
-        auto name = args.get_string("name"sv).value_or({});
-        if (!url.has_value())
-            return reply(Error::from_string_literal("Invalid cookie URL"));
-        auto existing = m_default_session->cookie_jar->get_named_cookie(*url, name);
-        if (!existing.has_value())
-            return reply(ByteString { "null"sv });
-        CookieStorageKey key {
-            .name = existing->name,
-            .domain = existing->domain,
-            .host_only = existing->host_only,
-            .path = existing->path,
-            .partition_key = existing->partition_key,
-        };
-        m_default_session->cookie_jar->delete_cookie(key);
-        JsonObject removed;
-        removed.set("url"sv, args.get_string("url"sv).value_or({}));
-        removed.set("name"sv, name);
-        removed.set("storeId"sv, args.get_string("storeId"sv).value_or("0"_string));
-        return reply(removed.serialized().to_byte_string());
-    }
-
-    if (function == "host.browsingData.remove"sv) {
-        ClearBrowsingDataOptions options;
-        if (auto opt_obj = args.get_object("options"sv); opt_obj.has_value()) {
-            if (auto since = opt_obj->get_double_with_precision_loss("since"sv); since.has_value())
-                options.since = UnixDateTime::from_milliseconds_since_epoch(static_cast<i64>(*since));
-        }
-        if (auto types = args.get_object("dataToRemove"sv); types.has_value()) {
-            if (types->get_bool("cache"sv).value_or(false))
-                options.delete_cached_files = ClearBrowsingDataOptions::Delete::Yes;
-            if (types->get_bool("history"sv).value_or(false))
-                options.delete_history = ClearBrowsingDataOptions::Delete::Yes;
-            if (types->get_bool("downloads"sv).value_or(false))
-                options.delete_download_history = ClearBrowsingDataOptions::Delete::Yes;
-            if (types->get_bool("cookies"sv).value_or(false) || types->get_bool("localStorage"sv).value_or(false) || types->get_bool("indexedDB"sv).value_or(false))
-                options.delete_site_data = ClearBrowsingDataOptions::Delete::Yes;
-        }
-        auto promise = clear_browsing_data(options);
-        promise->when_resolved([reply = move(reply)](Empty) mutable {
-            reply(ByteString { "null"sv });
-        });
-        return;
-    }
-
-    if (function == "host.search.engines"sv) {
-        auto const& configured = settings().search_engine_settings();
-        JsonArray engines;
-        for (auto const& eng : builtin_search_engines()) {
-            JsonObject o;
-            o.set("name"sv, eng.name);
-            o.set("isDefault"sv, configured.engine.has_value() && configured.engine->name == eng.name);
-            engines.must_append(move(o));
-        }
-        return reply(engines.serialized().to_byte_string());
-    }
-
-    if (function == "host.management.uninstall"sv) {
-        auto id = args.get_string("id"sv).value_or({}).to_byte_string();
-        reply(ByteString { "null"sv });
-        Core::deferred_invoke([this, id = move(id)] { remove_extension(id); });
-        return;
-    }
-
-    auto message = ByteString::formatted("{} needs a browser window, and this Ladybird has none", function.substring_view(min<size_t>(5, function.length())));
-    reply(Error::from_string_view(message.view()));
-}
-
-bool Application::is_extension_background_view(u64 view_id) const
-{
-    for (auto const& [id, view] : m_extension_background_views) {
-        if (view->view_id() == view_id)
-            return true;
-    }
-    return false;
-}
-
-void Application::extension_network_interest_changed()
-{
-    // Extensions add listeners and rules in bursts (a background page starting up); one update covers them.
-    if (!m_extensions_started || m_extension_network_interest_update_pending)
-        return;
-    m_extension_network_interest_update_pending = true;
-    Core::deferred_invoke([this] {
-        m_extension_network_interest_update_pending = false;
-        if (!m_extension_manager)
-            return;
-        u32 stages = 0;
-        auto interest = JsonValue::from_string(m_extension_manager->host_event("networkInterest"sv, "{}"sv));
-        if (!interest.is_error() && interest.value().is_object()) {
-            if (auto names = interest.value().as_object().get_array("stages"sv); names.has_value()) {
-                names->for_each([&](JsonValue const& name) {
-                    if (!name.is_string())
-                        return;
-                    // The bits of Web::ExtensionNetwork::Stage, in its order.
-                    static constexpr Array stage_names = { "beforeRequest"sv, "beforeSendHeaders"sv, "sendHeaders"sv, "headersReceived"sv, "authRequired"sv, "beforeRedirect"sv, "responseStarted"sv, "completed"sv, "errorOccurred"sv };
-                    for (size_t i = 0; i < stage_names.size(); ++i) {
-                        if (name.as_string() == stage_names[i])
-                            stages |= 1u << i;
-                    }
-                });
-            }
-        }
-        // Bit 16 is Web::ExtensionNetwork::navigation_interest.
-        if (!interest.is_error() && interest.value().is_object() && interest.value().as_object().get_bool("navigation"sv).value_or(false))
-            stages |= 1u << 16;
-        if (stages == m_extension_network_interest)
-            return;
-        m_extension_network_interest = stages;
-        WebContentClient::for_each_client([&](WebContentClient& client) {
-            client.async_set_extension_network_interest(stages);
-            return IterationDecision::Continue;
-        });
-    });
-}
-
-void Application::reload_extension(ByteString const& extension_id)
-{
-    stop_extension_background_page(extension_id);
-    start_extension_background_page(extension_id, ExtensionStartReason::Startup);
-    ViewImplementation::for_each_view([&](ViewImplementation& view) {
-        if (m_extension_manager && m_extension_manager->extension_for_url(view.url().serialize().bytes_as_string_view()) == extension_id && !is_extension_popup_view(view.view_id()))
-            view.reload();
-        return IterationDecision::Continue;
-    });
-}
-
-void Application::remove_extension(ByteString const& extension_id)
-{
-    if (!m_extension_manager)
-        return;
-    auto info = m_extension_manager->extension_info(extension_id);
-    String name = "this extension"_string;
-    if (info.has_value()) {
-        if (auto parsed = JsonValue::from_string(*info); !parsed.is_error() && parsed.value().is_object())
-            name = parsed.value().as_object().get_string("name"sv).value_or(name);
-    }
-    ExtensionPrompt prompt {
-        .title = MUST(String::formatted("Remove \"{}\"?", name)),
-        .message = "The extension and the data it stored will be removed."_string,
-        .details = {},
-        .accept_label = "Remove"_string,
-    };
-    display_extension_prompt(prompt, [this, extension_id](bool accepted) {
-        if (!accepted || !m_extension_manager)
-            return;
-        // A store install is removed through the store installer, which also tells the store pages; an extension loaded
-        // from a file is only removed for this session, as it loads again from the command line.
-        if (m_store_installer && m_store_installer->uninstall(extension_id))
-            return;
-        stop_extension_background_page(extension_id);
-        m_extension_manager->uninstall(extension_id);
-        m_loaded_extension_ids.remove_all_matching([&](auto const& id) { return id == extension_id; });
-        extension_ui_changed(extension_id, "removed"sv);
-    });
-}
-
-void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
-{
-    if (m_browser_options.auto_accept_extension_prompts) {
-        outln("Extensions: {} (accepted by --auto-accept-extension-prompts)", prompt.title);
-        for (auto const& detail : prompt.details)
-            outln("    - {}", detail);
-        on_answer(true);
-        return;
-    }
-    warnln("Extensions: {} Declined: this browser has no window to ask in (pass --auto-accept-extension-prompts to accept).", prompt.title);
-    on_answer(false);
-}
-#endif
 
 Application::~Application()
 {
@@ -736,12 +278,8 @@ Application::~Application()
 
     PictureInPictureManager::the().destroy_all_windows();
 
-#if defined(ENABLE_WEBEXT)
-    // Views talk to the application while they close, so they go while it is still whole. Store installs in flight would
-    // start views, so they go first.
-    m_store_installer = nullptr;
-    m_extension_background_views.clear();
-#endif
+    // Disconnect the embedder extension bridge before process teardown so background views close cleanly.
+    m_extension_bridge = nullptr;
 
     // Connection die() handlers use the process manager, so destroy the processes while it is still reachable.
     if (m_process_manager)
@@ -862,16 +400,9 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool disable_scrollbar_painting = false;
     bool file_scheme_urls_have_tuple_origins = false;
 
-    Vector<ByteString> extension_paths;
-    bool auto_accept_extension_prompts = false;
-
     Core::ArgsParser args_parser;
     args_parser.set_general_help("The Ladybird web browser :^)");
     args_parser.add_positional_argument(raw_urls, "URLs to open", "url", Core::ArgsParser::Required::No);
-#if defined(ENABLE_WEBEXT)
-    args_parser.add_option(extension_paths, "Load an extension: an unpacked directory or a .crx/.xpi/.zip file. May be given more than once.", "load-extension", 0, "path");
-    args_parser.add_option(auto_accept_extension_prompts, "Accept extension install and removal prompts without asking (for automated tests)", "auto-accept-extension-prompts");
-#endif
 
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Optional,
@@ -1066,8 +597,6 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     m_explicit_content_blocker_list_paths = move(content_blocker_list_paths);
 
     m_browser_options = {
-        .extension_paths = move(extension_paths),
-        .auto_accept_extension_prompts = auto_accept_extension_prompts,
         .urls = {},
         .raw_urls = move(raw_urls),
         .headless_mode = headless_mode,
@@ -1185,9 +714,6 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     // A browser that crashed left a report that was recovered before the settings were read.
     if (m_settings->crash_report_sending() == CrashReportSending::NeverSend)
         CrashReportOutbox::the().discard_all();
-#if defined(ENABLE_WEBEXT)
-    initialize_extensions();
-#endif
 
     if (m_web_content_options.is_test_mode == IsTestMode::Yes) {
         TRY(m_settings->complete_first_run());
@@ -1246,11 +772,6 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     if (m_stats_log)
         m_stats_log->start_sampling();
     TRY(launch_services());
-
-#if defined(ENABLE_WEBEXT)
-    // Background pages need the services and run once the event loop does.
-    Core::deferred_invoke([this] { start_extension_background_pages(); });
-#endif
 
     if (m_browser_options.enable_content_blocker == EnableContentBlocker::Yes) {
         m_content_blocker_list_update_timer = Core::Timer::create_repeating(AK::Duration::from_seconds(24 * 60 * 60), [this] {

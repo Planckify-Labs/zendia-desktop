@@ -18,6 +18,7 @@ use crate::contributions::{
     SidePanelSide, ToolbarArea, ToolbarItem, ToolbarItemKind, ToolbarPlacement, ToolbarPlacementRules,
 };
 use crate::events::{Event, EventBus, Subscription, ViewRequest};
+use crate::extension_source::ExtensionSource;
 use crate::input_state::StatuslineSettings;
 use crate::menus::{APP_MENU_VIM_MODE_ID, builtin_menu_entries};
 use crate::model::{
@@ -101,6 +102,7 @@ struct StubState {
 pub struct StubBackend {
     state: Mutex<StubState>,
     tab_source: Mutex<Option<Arc<dyn TabSource>>>,
+    extension_source: Mutex<Option<Arc<dyn ExtensionSource>>>,
     bus: EventBus,
 }
 
@@ -157,6 +159,7 @@ impl StubBackend {
                 vim: vim::VimState::default(),
             }),
             tab_source: Mutex::new(None),
+            extension_source: Mutex::new(None),
             bus: EventBus::new(),
         }
     }
@@ -257,6 +260,77 @@ impl StubBackend {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
+    }
+
+    /// Attaches a real [`ExtensionSource`] backed by `ExtensionServer`.
+    pub fn attach_extension_source(&self, source: Arc<dyn ExtensionSource>) {
+        *self.extension_source.lock().unwrap_or_else(|error| error.into_inner()) = Some(source);
+    }
+
+    pub(crate) fn current_extension_source(&self) -> Option<Arc<dyn ExtensionSource>> {
+        self.extension_source
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Synchronously asks the attached [`ExtensionSource`] for page context-menu items matching `target_json`.
+    pub fn extension_context_menu_items(&self, target_json: &str) -> Vec<crate::modules::ExtensionContextMenuItem> {
+        self.current_extension_source()
+            .map(|src| src.context_menu_items(target_json))
+            .unwrap_or_default()
+    }
+
+    /// Replaces the live extension list and registered shortcuts pushed from `ExtensionServer`.
+    pub fn feed_extensions_snapshot(
+        &self,
+        extensions: Vec<crate::modules::ExtensionInfo>,
+        commands: Vec<crate::modules::ExtensionCommand>,
+    ) {
+        let (extensions_out, commands_out, contributions) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.extensions = extensions;
+            state.model.extension_commands = commands;
+            settings_modules::sync_module_contributions(&mut state.model);
+            (
+                state.model.extensions.clone(),
+                state.model.extension_commands.clone(),
+                state.model.contributions.clone(),
+            )
+        };
+        self.bus.publish(Event::ExtensionsChanged {
+            extensions: extensions_out,
+        });
+        self.bus
+            .publish(Event::ExtensionCommandsChanged { commands: commands_out });
+        self.bus.publish(Event::ContributionsChanged { contributions });
+    }
+
+    /// Updates or clears the active modal consent prompt requested by `ExtensionServer`.
+    pub fn feed_extension_prompt(&self, prompt: Option<crate::modules::ExtensionPrompt>) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.pending_extension_prompt = prompt.clone();
+        }
+        self.bus.publish(Event::ExtensionPromptChanged { prompt });
+    }
+
+    /// Updates `ServiceId::ExtensionServer`'s health status and resynchronizes extension toolbar/site contributions.
+    pub fn feed_extension_service_status(&self, status: ServiceStatus) {
+        self.apply_service_status_pub(ServiceId::ExtensionServer, status);
+    }
+
+    /// Requests the active window to open a WebExtension's HTML popup view.
+    pub fn open_extension_popup(&self, extension_id: crate::modules::ExtensionId, popup_url: String) {
+        self.request_view(ViewRequest::ExtensionPopupOpen {
+            extension_id,
+            popup_url,
+        });
+    }
+
+    /// Requests the active window to close any open WebExtension HTML popup view.
+    pub fn close_extension_popup(&self) {
+        self.request_view(ViewRequest::ExtensionPopupClose);
     }
 
     /// Records a tab opened by an attached [`TabSource`] and publishes the corresponding events.
@@ -3832,6 +3906,12 @@ impl BrowserCore for StubBackend {
             | Command::ExtensionSetToolbarPinned { .. }
             | Command::ExtensionInvokeAction { .. }
             | Command::ExtensionRemove { .. }
+            | Command::ExtensionReload { .. }
+            | Command::ExtensionInstallPath { .. }
+            | Command::ExtensionOpenOptions { .. }
+            | Command::ExtensionPromptAnswer { .. }
+            | Command::ExtensionContextMenuClick { .. }
+            | Command::ExtensionInvokeCommand { .. }
             | Command::ExtensionsMenuToggle
             | Command::ServiceSetState { .. }
             | Command::ServiceCycleState { .. }
@@ -4976,6 +5056,8 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         plugins_enabled: true,
         plugins: crate::modules::sample_plugins(),
         extensions: crate::modules::sample_extensions(),
+        extension_commands: Vec::new(),
+        pending_extension_prompt: None,
         vim_mode_enabled: false,
         shield_enabled: true,
         onboarding: crate::onboarding::OnboardingState::default_seen(),
