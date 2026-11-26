@@ -1049,6 +1049,14 @@ void WebContentPage::did_find_in_page(size_t current_match_index, Optional<size_
     }
 }
 
+void WebContentPage::did_reply_embedder_message(u64 request_id, bool ok, String result_json)
+{
+    if (displays_tab()) {
+        if (view().on_embedder_reply)
+            view().on_embedder_reply(request_id, ok, result_json);
+    }
+}
+
 void WebContentPage::did_request_cursor_change(Gfx::Cursor cursor)
 {
     view().did_request_cursor_change({}, move(cursor));

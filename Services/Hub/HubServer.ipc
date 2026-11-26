@@ -329,4 +329,7 @@ endpoint HubServer
     extension_host_call_finished(u64 request_id, bool succeeded, ByteString payload) =|
     extension_prompt_answered(u64 request_id, bool accepted) =|
     extension_set_popup_view(u64 view_id, bool is_popup) =|
+
+    // Zendia generic embedder channel: evaluates a script in an isolated world inside WebContent and replies via view_embedder_reply.
+    view_embedder_message(u64 view_id, u64 request_id, String world, String script) =|
 }

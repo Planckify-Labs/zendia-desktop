@@ -1420,6 +1420,13 @@ void ConnectionFromUI::view_find_in_page_end(u64 view_id)
     }
 }
 
+void ConnectionFromUI::view_embedder_message(u64 view_id, u64 request_id, String world, String script)
+{
+    if (auto* view = find_view(view_id)) {
+        view->deliver_embedder_message(request_id, move(world), move(script));
+    }
+}
+
 void ConnectionFromUI::view_report_website_issue(u64 view_id)
 {
     if (auto* view = find_view(view_id)) {

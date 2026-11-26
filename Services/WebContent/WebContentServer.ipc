@@ -260,6 +260,7 @@ endpoint WebContentServer routed by Web::PageId page_id
     find_in_page_next_match(Web::PageId page_id) =|
     find_in_page_previous_match(Web::PageId page_id) =|
     find_in_page_end(Web::PageId page_id) =|
+    deliver_embedder_message(Web::PageId page_id, u64 request_id, String world, String script) =|
 
     set_content_blocking_policy(Web::PageId page_id, bool enabled, Vector<String> disabled_sites) =|
     set_content_blockers(Core::AnonymousBuffer patterns) =|

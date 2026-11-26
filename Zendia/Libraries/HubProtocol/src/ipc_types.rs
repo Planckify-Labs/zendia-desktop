@@ -56,6 +56,7 @@ macro_rules! wire_enum {
 }
 
 // NB: A C++ enum class declared without an underlying type has int as its type, and goes as one.
+wire_enum!(AK_CaseSensitivity: i32 { CaseInsensitive, CaseSensitive });
 wire_enum!(Web_Bindings_NavigationHistoryBehavior: u8 { Auto, Push, Replace });
 wire_enum!(Web_EventResult: i32 { Accepted, Handled, Dropped, Cancelled });
 wire_enum!(Web_HTML_ActivateTab: i32 { Yes, No });

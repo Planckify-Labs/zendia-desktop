@@ -71,6 +71,7 @@ The extension_* IPC messages and their handlers. To be replaced by the one gener
 - `Services/Hub/ConnectionFromUI.h`
 - `Services/Hub/HubClient.ipc`
 - `Services/Hub/HubServer.ipc`
+- `Services/Hub/View.cpp`
 - `Services/WebContent/ConnectionFromClient.cpp`
 - `Services/WebContent/ConnectionFromClient.h`
 - `Services/WebContent/PageClient.cpp`
@@ -94,6 +95,7 @@ The C++ adapter over cgx-webext's C ABI, the store installer and the extension d
 - `Libraries/LibWebView/Extensions/StoreInstaller.h`
 - `Libraries/LibWebView/Options.h`
 - `Libraries/LibWebView/ViewImplementation.cpp`
+- `Libraries/LibWebView/ViewImplementation.h`
 - `Libraries/LibWebView/WebContentClient.cpp`
 - `Libraries/LibWebView/WebContentClient.h`
 - `Libraries/LibWebView/WebContentPage.cpp`

@@ -45,6 +45,11 @@ view_open_url_in_new_tab
 view_zoom_in
 view_zoom_out
 view_reset_zoom
+view_find_in_page
+view_find_in_page_next_match
+view_find_in_page_previous_match
+view_find_in_page_end
+view_embedder_message
 
 [HubClient]
 app_open_new_tab
@@ -80,6 +85,8 @@ view_page_background_color_change
 view_request_context_menu
 view_request_select_dropdown
 view_selected_text
+view_find_in_page
+view_embedder_reply
 
 # Declared types that only the types in src/ipc_types.rs carry.
 [Types]

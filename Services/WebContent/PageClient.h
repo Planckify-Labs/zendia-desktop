@@ -145,6 +145,7 @@ public:
     void did_execute_js_console_input(WebView::DebuggerValue const&);
     ErrorOr<WebView::DebuggerObjectProperties> console_object_properties(u64 object_id);
     void run_javascript(StringView js_source);
+    void deliver_embedder_message(u64 request_id, String world, String script_source);
     void did_output_js_console_message(WebView::ConsoleOutput);
 
     Vector<Web::CSS::StyleSheetIdentifier> list_style_sheets() const;
@@ -539,6 +540,9 @@ private:
     // The latest output of the document that the tab shows and of its iframes, which a DevTools client gets once it
     // asks, so it sees what the page output before.
     WebView::ConsoleOutputBuffer m_console_output_buffer;
+
+    // Cached isolated worlds for Zendia's generic embedder channel (e.g. "zendia-automation").
+    HashMap<String, GC::Ptr<Web::Internals::ExtensionWorld>> m_embedder_worlds;
 };
 
 }

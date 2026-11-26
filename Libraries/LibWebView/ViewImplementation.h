@@ -452,6 +452,7 @@ public:
     void find_in_page_next_match();
     void find_in_page_previous_match();
     void find_in_page_end();
+    void deliver_embedder_message(u64 request_id, String world, String script);
 
     void get_source();
     bool can_view_source() const;
@@ -753,6 +754,7 @@ public:
     Function<void(double milliseconds)> on_set_test_timeout;
     Function<void(JsonValue)> on_reference_test_metadata;
     Function<void(size_t current_match_index, Optional<size_t> const& total_match_count)> on_find_in_page;
+    Function<void(u64 request_id, bool ok, String const& result_json)> on_embedder_reply;
     Function<void(Gfx::Color)> on_theme_color_change;
     Function<void(Gfx::Color)> on_page_background_color_change;
     Function<void(Web::ScreenWakeLockState)> on_screen_wake_lock_state_changed;

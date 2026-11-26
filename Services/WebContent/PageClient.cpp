@@ -59,6 +59,7 @@
 #include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/TextDirectiveGenerator.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/Internals/ExtensionWorld.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/InvalidateDisplayList.h>
@@ -215,6 +216,8 @@ void PageClient::visit_edges(JS::Cell::Visitor& visitor)
         visitor.visit(controller.value);
     for (auto& reader : m_download_readers)
         visitor.visit(reader.value);
+    for (auto& world : m_embedder_worlds)
+        visitor.visit(world.value);
     m_pending_dom_mutations.for_each([&](auto& pending_mutation) {
         visitor.visit(pending_mutation.target);
     });
@@ -2863,6 +2866,42 @@ void PageClient::run_javascript(StringView js_source)
 
     if (evaluation_status.is_error())
         dbgln("Exception :(");
+}
+
+void PageClient::deliver_embedder_message(u64 request_id, String world_name, String script_source)
+{
+    auto active_document = page().local_traversable()->active_document();
+    if (!active_document || !active_document->window()) {
+        client().async_did_reply_embedder_message(m_id, request_id, false, "{\"kind\":\"message\",\"text\":\"No active document\"}"_string);
+        return;
+    }
+
+    auto window = active_document->window();
+    GC::Ptr<Web::Internals::ExtensionWorld> world;
+    if (auto existing = m_embedder_worlds.get(world_name); existing.has_value()) {
+        if (*existing && !(*existing)->is_detached() && &(*existing)->window() == window.ptr())
+            world = *existing;
+    }
+    if (!world) {
+        world = Web::Internals::ExtensionWorld::create(*window, world_name);
+        m_embedder_worlds.set(world_name, world);
+    }
+
+    auto& settings = world->settings();
+    auto filename = ByteString::formatted("zendia://{}", world_name);
+    auto script = Web::HTML::ClassicScript::create(filename, Utf16String::from_utf8(script_source), settings, active_document->url());
+    auto completion = script->run(Web::HTML::ClassicScript::RethrowErrors::Yes);
+    if (completion.is_error()) {
+        client().async_did_reply_embedder_message(m_id, request_id, false, "{\"kind\":\"message\",\"text\":\"Automation script failed\"}"_string);
+        return;
+    }
+
+    auto value = completion.value();
+    if (value.is_string()) {
+        client().async_did_reply_embedder_message(m_id, request_id, true, value.as_string().utf16_string().to_well_formed_utf8());
+    } else {
+        client().async_did_reply_embedder_message(m_id, request_id, true, "{\"kind\":\"ok\"}"_string);
+    }
 }
 
 void PageClient::did_output_js_console_message(WebView::ConsoleOutput console_output)

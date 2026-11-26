@@ -593,6 +593,12 @@ void View::forward_callbacks_to_ui(bool is_tab)
         }
     };
 
+    on_embedder_reply = [this](u64 request_id, bool ok, String const& result_json) {
+        if (auto* ui = ConnectionFromUI::the()) {
+            ui->async_view_embedder_reply(view_id(), request_id, ok, result_json);
+        }
+    };
+
     on_page_background_color_change = [this](auto const&... arguments) {
         if (auto* ui = ConnectionFromUI::the()) {
             push_state_to_ui();

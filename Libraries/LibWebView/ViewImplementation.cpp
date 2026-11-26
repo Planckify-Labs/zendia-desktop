@@ -2213,6 +2213,11 @@ void ViewImplementation::find_in_page_end()
     page().async_find_in_page_end();
 }
 
+void ViewImplementation::deliver_embedder_message(u64 request_id, String world, String script)
+{
+    page().async_deliver_embedder_message(request_id, move(world), move(script));
+}
+
 void ViewImplementation::get_source()
 {
     if (!can_view_source())

@@ -3339,6 +3339,17 @@ void ConnectionFromClient::find_in_page_end(Web::PageId page_id)
     page->page().find_in_page_end();
 }
 
+void ConnectionFromClient::deliver_embedder_message(Web::PageId page_id, u64 request_id, String world, String script)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value()) {
+        async_did_reply_embedder_message(page_id, request_id, false, "{\"kind\":\"message\",\"text\":\"Page not available\"}"_string);
+        return;
+    }
+
+    page->deliver_embedder_message(request_id, move(world), move(script));
+}
+
 void ConnectionFromClient::paste(Web::PageId page_id, Utf16String text)
 {
     if (auto page = this->page(page_id); page.has_value()) {

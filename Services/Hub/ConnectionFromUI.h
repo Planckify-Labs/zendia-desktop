@@ -253,6 +253,7 @@ private:
     virtual void view_deny_fullscreen_window(u64 view_id) override;
     virtual void view_set_is_fullscreen(u64 view_id, Web::ViewportIsFullscreen is_fullscreen) override;
     virtual void view_reset_site_permissions(u64 view_id, URL::Origin origin) override;
+    virtual void view_embedder_message(u64 view_id, u64 request_id, String world, String script) override;
 };
 
 }

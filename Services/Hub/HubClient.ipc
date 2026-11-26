@@ -418,4 +418,7 @@ endpoint HubClient
     extension_prompt(u64 request_id, String title, String message, Vector<String> details, String accept_label) =|
     extension_ui_changed(ByteString extension_id, ByteString what) =|
     extension_popup_request(u64 view_id, ByteString name, ByteString args_json) =|
+
+    // Zendia generic embedder channel reply from WebContent's isolated world.
+    view_embedder_reply(u64 view_id, u64 request_id, bool ok, String result_json) =|
 }

@@ -349,6 +349,7 @@ private:
     virtual void find_in_page_next_match(Web::PageId page_id) override;
     virtual void find_in_page_previous_match(Web::PageId page_id) override;
     virtual void find_in_page_end(Web::PageId page_id) override;
+    virtual void deliver_embedder_message(Web::PageId page_id, u64 request_id, String world, String script) override;
 
     virtual void paste(Web::PageId page_id, Utf16String text) override;
     virtual void paste_from_clipboard(Web::PageId page_id, Vector<Web::Clipboard::SystemClipboardItem> system_clipboard_data) override;
