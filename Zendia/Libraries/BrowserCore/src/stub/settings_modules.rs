@@ -13,9 +13,9 @@ use crate::contributions::ContributionSource;
 use crate::events::{Event, ViewRequest};
 use crate::model::{BrowserModel, ServiceId, ServiceState, ServiceStatus};
 use crate::modules::{
-    ExtensionId, PluginId, PluginStatus, cycle_service_status, extension_to_site_extension, extension_to_toolbar_item,
-    parse_service_id, parse_service_status, plugin_to_side_panel, service_down_summary, service_label,
-    service_status_in, service_status_label,
+    ExtensionId, PluginId, PluginStatus, cycle_service_status, extension_to_toolbar_item, parse_service_id,
+    parse_service_status, plugin_to_side_panel, service_down_summary, service_label, service_status_in,
+    service_status_label, unpinned_site_extensions,
 };
 use crate::settings::{SettingsGroupId, apply_browser_setting, reset_browser_settings_group};
 
@@ -378,8 +378,8 @@ pub fn sync_module_contributions(model: &mut BrowserModel) {
         }
     }
 
-    // Keep site panel extension tiles in sync with model.extensions.
-    model.site_extensions = model.extensions.iter().map(extension_to_site_extension).collect();
+    // Keep site panel extension tiles in sync with unpinned extensions (single-location rule).
+    model.site_extensions = unpinned_site_extensions(&model.extensions);
 
     // Replace only Plugin-sourced side panel entries.
     model
@@ -850,6 +850,10 @@ mod tests {
             .find(|item| matches!(item.source, ContributionSource::Extension { .. }))
             .expect("pinned sample extension should contribute a toolbar button");
         assert!(ext_item.enabled);
+        assert!(
+            view_model.site_extensions.is_empty(),
+            "pinned extension must leave the site panel (single-location rule)"
+        );
 
         // Cycle ExtensionServer -> Restarting -> Stopped -> Running.
         core.invoke(Command::ServiceCycleState {
@@ -891,12 +895,15 @@ mod tests {
         assert!(core.model().plugins[0].enabled);
         assert_eq!(core.model().plugins[0].status, PluginStatus::Running);
 
-        // Unpin extension removes it from toolbar contributions.
+        // Unpin extension removes it from toolbar contributions and restores it to the site panel.
         core.invoke(Command::ExtensionSetToolbarPinned {
             extension_id: ExtensionId::new(SAMPLE_EXTENSION_ID),
             pinned: false,
         })
         .unwrap();
+        while let Ok(ev) = sub.try_recv() {
+            view_model.apply_event(&ev);
+        }
         assert!(
             !core
                 .model()
@@ -905,6 +912,12 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item.source, ContributionSource::Extension { .. }))
         );
+        assert_eq!(
+            view_model.site_extensions.len(),
+            1,
+            "unpinned extension must return to the site panel in view model"
+        );
+        assert_eq!(view_model.site_extensions[0].badge_text.as_deref(), Some("4"));
     }
 
     #[test]

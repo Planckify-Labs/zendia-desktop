@@ -1037,6 +1037,11 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
                 description: "Agent chapter switched to Codex with teal agent dock, tab ring, and cursor preview.",
             },
             GalleryStateSpec {
+                id: "agents-probing",
+                label: "02 Probing",
+                description: "Agent chapter while probing local agents (shows the 'Looking for agents on this computer…' state).",
+            },
+            GalleryStateSpec {
                 id: "shield-off",
                 label: "03 Shield Off",
                 description: "Shield chapter with ad blocking turned off showing banner and popup ads landing over the page.",
@@ -1207,6 +1212,11 @@ pub const GALLERY_SECTIONS: &[GallerySectionSpec] = &[
                 id: "confirm-dont-ask",
                 label: "Confirm · Don't Ask",
                 description: "Share link confirmation dialog with 'Don't ask me again' checked.",
+            },
+            GalleryStateSpec {
+                id: "receive-preview",
+                label: "Receive · Preview",
+                description: "Incoming share link preview overlay with folders, split view, stacked badge footer, and import button.",
             },
         ],
     },

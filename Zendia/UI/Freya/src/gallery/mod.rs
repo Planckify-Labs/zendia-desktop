@@ -19,7 +19,7 @@ use crate::ui::chrome::address_bar::{AddressBarLayer, use_provide_address_bar_st
 use crate::ui::chrome::menus::{MenuLayer, use_provide_menu_state};
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::{use_core, use_provide_core_with_observer};
-use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill};
+use crate::ui::kit::{Icon, KitChip, KitSwitch, ListRow, Pill, use_provide_text_focus};
 use crate::ui::library::media_preview::{MediaPreviewOverlay, use_provide_media_preview_state};
 use crate::ui::library::sections::space_routing::use_provide_space_routing_view_state;
 use crate::ui::library::sections::spaces::use_provide_spaces_view_state;
@@ -65,6 +65,7 @@ impl App for GalleryApp {
         let initial_state = self.options.resolved_initial_state().to_string();
 
         let gallery_core = use_hook(|| Arc::new(GalleryCore::new(initial_theme)));
+        let _text_focus = use_provide_text_focus();
         let menu_state = use_provide_menu_state();
         let sidebar_state = use_provide_sidebar_state();
         let address_bar_state = use_provide_address_bar_state();
@@ -101,7 +102,12 @@ impl App for GalleryApp {
                     vim_statusline_state.close_all_keymaps();
                 }
                 CoreEvent::ViewRequested { request, .. } => match request {
-                    ViewRequest::ExtensionsMenuToggle => menu_state.toggle_extensions_menu(),
+                    ViewRequest::ExtensionsMenuToggle => {
+                        address_bar_state.close();
+                        address_bar_state.close_site_panel();
+                        share_state.close();
+                        menu_state.toggle_extensions_menu();
+                    }
                     ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
                         library_state.handle_view_request(request);
                         let _ = gallery_core.invoke(Command::LibraryFocusSet {
@@ -135,6 +141,7 @@ impl App for GalleryApp {
                     }
                     ViewRequest::LocationFocus => {
                         menu_state.close_all();
+                        share_state.close();
                         let current_url = gallery_core
                             .model()
                             .active_tab()
@@ -144,22 +151,31 @@ impl App for GalleryApp {
                     }
                     ViewRequest::AddressBarOpen { new_tab, initial_query } => {
                         menu_state.close_all();
+                        share_state.close();
                         address_bar_state.open_floating(*new_tab, initial_query.clone());
                     }
                     ViewRequest::PaletteOpen { initial_query } => {
                         menu_state.close_all();
+                        share_state.close();
                         address_bar_state.open_actions(initial_query.clone());
                     }
                     ViewRequest::SitePanelToggle => {
                         menu_state.close_all();
+                        share_state.close();
                         address_bar_state.toggle_site_panel(None);
                     }
                     ViewRequest::AppMenuToggle => {
                         address_bar_state.close();
                         address_bar_state.close_site_panel();
+                        share_state.close();
                         menu_state.toggle_app_menu(None);
                     }
-                    ViewRequest::AboutDialog => menu_state.open_about(),
+                    ViewRequest::AboutDialog => {
+                        address_bar_state.close();
+                        address_bar_state.close_site_panel();
+                        share_state.close();
+                        menu_state.open_about();
+                    }
                     ViewRequest::TabRename { tab_id } => {
                         if let Some(tab) = gallery_core.model().tab(*tab_id) {
                             sidebar_state.start_tab_rename(*tab_id, tab.display_title());

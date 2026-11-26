@@ -9,8 +9,8 @@
 use crate::gallery::sections::{demo_card, glass_backdrop, state_caption};
 use crate::ui::core_view::use_core;
 use crate::ui::kit::{
-    AnchoredPopover, ConfirmationCard, FadeTransition, GlassPanel, Icon, IconButton, KeyLabel, KitChip, KitSlider,
-    KitSwitch, ListRow, Pill, SlideDirection, SlideTransition, Toast,
+    AnchoredPopover, ConfirmationCard, FadeTransition, GlassPanel, Icon, IconButton, KeyLabel, KitCheckbox, KitChip,
+    KitSlider, KitSwitch, ListRow, Pill, SlideDirection, SlideTransition, Toast,
 };
 use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
@@ -151,6 +151,8 @@ fn controls_card() -> Element {
     let core = use_core();
 
     let mut chip_selected = use_state(|| true);
+    let mut checkbox_off = use_state(|| false);
+    let mut checkbox_on = use_state(|| true);
     let mut switch_on = use_state(|| true);
     let mut switch_off = use_state(|| false);
     let mut continuous_val = use_state(|| 64.0_f32);
@@ -161,11 +163,12 @@ fn controls_card() -> Element {
 
     let icon_core = core.clone();
     let chip_core = core.clone();
+    let checkbox_core = core.clone();
     let switch_core = core.clone();
     let slider_core = core.clone();
 
     demo_card(
-        "IconButton, KitChip, KitSwitch & KitSlider",
+        "IconButton, KitChip, KitCheckbox, KitSwitch & KitSlider",
         "Interactive controls across normal, hover, active, selected, and disabled states.",
         rect()
             .spacing(theme.spacing.xl)
@@ -288,6 +291,36 @@ fn controls_card() -> Element {
                             .selected(true),
                     )
                     .child(KitChip::new("Disabled").disabled(true)),
+            )
+            .child(state_caption("CHECKBOXES (UNCHECKED · CHECKED · DISABLED)"))
+            .child(
+                rect()
+                    .direction(Direction::Horizontal)
+                    .content(Content::wrap())
+                    .spacing(theme.spacing.xxl)
+                    .child(KitCheckbox::new(checkbox_off()).label("Unchecked").on_toggle({
+                        let core = checkbox_core.clone();
+                        move |next| {
+                            checkbox_off.set(next);
+                            core.invoke_or_log(Command::Custom {
+                                name: "gallery.checkbox.off".to_string(),
+                                args: vec![("value".to_string(), next.to_string())],
+                            });
+                        }
+                    }))
+                    .child(
+                        KitCheckbox::new(checkbox_on())
+                            .label("Restore pinned tabs")
+                            .on_toggle(move |next| {
+                                checkbox_on.set(next);
+                                checkbox_core.invoke_or_log(Command::Custom {
+                                    name: "gallery.checkbox.checked".to_string(),
+                                    args: vec![("value".to_string(), next.to_string())],
+                                });
+                            }),
+                    )
+                    .child(KitCheckbox::new(false).label("Disabled off").disabled(true))
+                    .child(KitCheckbox::new(true).label("Disabled on").disabled(true)),
             )
             .child(state_caption("SWITCHES (OFF · ON · DISABLED)"))
             .child(

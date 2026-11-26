@@ -10,12 +10,12 @@ use crate::gallery::registry::GalleryCore;
 use crate::ui::chrome::WindowShell;
 use crate::ui::core_view::use_core;
 use crate::ui::page::{PageArea, PaneMode};
-use crate::ui::share::ShareConfirmDialog;
+use crate::ui::share::{ShareConfirmDialog, ShareReceiveCard};
 use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedScheme, Rgba, ThemeRole, use_theme};
 use freya::prelude::*;
 use std::sync::Arc;
 use zendia_browser_core::model::{BrowserModel, Space, SpaceGradient, SpaceId, Tab, TabId, TabKind};
-use zendia_browser_core::share::build_share_payload;
+use zendia_browser_core::share::{build_share_payload, sample_share_preview};
 
 /// Gallery section showcasing Phase 12 Share link confirmation states.
 #[derive(Clone)]
@@ -170,6 +170,18 @@ impl Component for ShareSection {
             .interactive_window_controls(false)
             .key(format!("share-shell-{}", self.state_id));
 
+        let overlay_child: Element = if self.state_id == "receive-preview" {
+            ShareReceiveCard {
+                preview: sample_share_preview("https://share.zendia.app/s/deadbeef"),
+                host_tab_id: None,
+            }
+            .into_element()
+        } else {
+            ShareConfirmDialog::new(payload, name_draft, dont_ask)
+                .key(self.state_id.clone())
+                .into_element()
+        };
+
         rect()
             .width(Size::fill())
             .height(Size::fill())
@@ -195,7 +207,7 @@ impl Component for ShareSection {
                             .height(Size::percent(100.0))
                             .background(scrim_bg)
                             .center()
-                            .child(ShareConfirmDialog::new(payload, name_draft, dont_ask).key(self.state_id.clone())),
+                            .child(overlay_child),
                     ),
             )
     }

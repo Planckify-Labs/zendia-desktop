@@ -12,6 +12,7 @@ use crate::ui::chrome::sidebar::state::favicon_badge_colors;
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
 use crate::ui::kit::icons::prepared_icon_bytes;
+use crate::ui::kit::list_nav::scroll_item_into_view;
 use crate::ui::library::nav::{LibraryCursorRing, LibraryNavLayout, LibraryNavRow, use_library_nav};
 use crate::ui::library::search::{LibraryFilterChip, LibraryFilterGroup, LibrarySearchBar};
 use crate::ui::library::try_use_library_state;
@@ -44,6 +45,10 @@ impl Component for HistorySection {
         let mut filters_open = use_state(|| false);
         let mut applied_query_override = use_state(|| None::<String>);
         let mut applied_filters_override = use_state(|| None::<bool>);
+        let mut scroll_controller = use_scroll_controller(ScrollConfig::default);
+        let mut viewport_height = use_state(|| 480.0f32);
+        let mut last_scrolled_cursor = use_state(|| None::<String>);
+        let mut accel_held = use_state(|| false);
 
         // Sync gallery fixture overrides without fighting live user typing.
         if let Some(lib) = library {
@@ -63,7 +68,10 @@ impl Component for HistorySection {
             }
         }
 
-        let entries = core.model().read().history.clone();
+        let (entries, closed_tabs) = {
+            let model = core.model().read();
+            (model.history.clone(), model.closed_tabs.clone())
+        };
         let current_query = query.read().clone();
         let current_when = *when_filter.read();
         let current_sort = *sort_mode.read();
@@ -71,7 +79,7 @@ impl Component for HistorySection {
 
         let source_entries: &[HistoryEntry] = match current_source {
             HistorySource::History => &entries,
-            HistorySource::ClosedTabs => &[],
+            HistorySource::ClosedTabs => &closed_tabs,
         };
 
         // Anchor "Today" to the newest entry when fixture timestamps are ahead of or behind the clock,
@@ -93,10 +101,20 @@ impl Component for HistorySection {
         let groups = filter_and_group_history(source_entries, &history_query);
 
         let mut nav_rows = Vec::new();
+        let mut row_offsets: Vec<(String, f32, f32)> = Vec::new();
+        let mut y_cursor = 0.0f32;
+        const ROW_HEIGHT: f32 = 54.0;
+        const GROUP_HEADER_HEIGHT: f32 = 31.0;
         for group in &groups {
+            if !group.title.is_empty() {
+                y_cursor += GROUP_HEADER_HEIGHT;
+            }
             for entry in &group.entries {
+                let key = format!("history:{}", entry.id.0);
+                row_offsets.push((key.clone(), y_cursor, ROW_HEIGHT));
+                y_cursor += ROW_HEIGHT + 2.0;
                 nav_rows.push(LibraryNavRow::new(
-                    format!("history:{}", entry.id.0),
+                    key,
                     Some(Command::HistoryOpen {
                         entry_id: Some(entry.id),
                         url: None,
@@ -105,10 +123,26 @@ impl Component for HistorySection {
                     }),
                 ));
             }
+            y_cursor += 2.0;
         }
+        let content_height = y_cursor + 12.0;
         let cursor_key = use_library_nav(LibrarySection::History, LibraryNavLayout::List, nav_rows);
 
+        if *last_scrolled_cursor.peek() != cursor_key {
+            last_scrolled_cursor.set(cursor_key.clone());
+            if let Some(target_key) = cursor_key.as_deref()
+                && let Some(&(_, item_top, item_h)) = row_offsets.iter().find(|(k, _, _)| k == target_key)
+            {
+                let vh = *viewport_height.peek();
+                scroll_item_into_view(&mut scroll_controller, item_top, item_h, vh, content_height);
+            }
+        }
+
         let showing_closed = current_source == HistorySource::ClosedTabs;
+        if let Some(lib) = library {
+            let mut flag = lib.history_showing_closed;
+            flag.set_if_modified(showing_closed);
+        }
         let filter_groups = vec![
             LibraryFilterGroup::new(
                 "when",
@@ -253,6 +287,7 @@ impl Component for HistorySection {
                     group_box = group_box.child(HistoryRow {
                         entry,
                         focused,
+                        accel_held,
                         key: DiffKey::from(&row_key),
                     });
                 }
@@ -265,12 +300,33 @@ impl Component for HistorySection {
             .width(Size::fill())
             .height(Size::fill())
             .content(Content::Flex)
+            .on_global_key_down(move |e: Event<KeyboardEventData>| {
+                if e.modifiers.intersects(Modifiers::CONTROL | Modifiers::META) {
+                    accel_held.set_if_modified(true);
+                }
+            })
+            .on_global_key_up(move |e: Event<KeyboardEventData>| {
+                if !e.modifiers.intersects(Modifiers::CONTROL | Modifiers::META) {
+                    accel_held.set_if_modified(false);
+                }
+            })
             .child(search_bar)
             .child(
-                ScrollView::new()
+                rect()
                     .width(Size::fill())
                     .height(Size::flex(1.0))
-                    .child(list_body),
+                    .on_sized(move |e: Event<SizedEventData>| {
+                        let h = e.area.height();
+                        if (*viewport_height.peek() - h).abs() > 1.0 {
+                            viewport_height.set(h);
+                        }
+                    })
+                    .child(
+                        ScrollView::new_controlled(scroll_controller)
+                            .width(Size::fill())
+                            .height(Size::fill())
+                            .child(list_body),
+                    ),
             )
     }
 }
@@ -279,6 +335,7 @@ impl Component for HistorySection {
 struct HistoryRow {
     entry: HistoryEntry,
     focused: bool,
+    accel_held: State<bool>,
     key: DiffKey,
 }
 
@@ -390,12 +447,13 @@ impl Component for HistoryRow {
                 )
         });
 
+        let accel_held = self.accel_held;
         let row = rect()
             .a11y_role(AccessibilityRole::ListItem)
             .a11y_alt(title.clone())
             .width(Size::fill())
             .padding(Gaps::new(9.0, 12.0, 9.0, 12.0))
-            .corner_radius(CornerRadius::new_all(14.0))
+            .corner_radius(CornerRadius::new_all(16.0))
             .background(hover_bg)
             .direction(Direction::Horizontal)
             .content(Content::Flex)
@@ -430,11 +488,12 @@ impl Component for HistoryRow {
                 }
             })
             .on_press(move |_| {
+                let in_background = *accel_held.peek();
                 click_core.invoke_or_log(Command::HistoryOpen {
                     entry_id: Some(entry_id),
                     url: None,
                     new_tab: true,
-                    in_background: false,
+                    in_background,
                 });
             })
             .child(favicon_tile)
@@ -464,7 +523,7 @@ impl Component for HistoryRow {
             )
             .maybe_child(actions);
 
-        LibraryCursorRing::new(self.focused, row).corner_radius(14.0)
+        LibraryCursorRing::new(self.focused, row).corner_radius(16.0)
     }
 
     fn render_key(&self) -> DiffKey {

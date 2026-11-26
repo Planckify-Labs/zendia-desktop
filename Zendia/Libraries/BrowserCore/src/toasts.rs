@@ -30,8 +30,12 @@ pub struct ToastAction {
 pub struct Toast {
     pub id: ToastId,
     pub message: String,
+    /// Optional secondary description line rendered below `message` (e.g. `"Expires in 30 days"`).
+    pub description: Option<String>,
     pub action: Option<ToastAction>,
     pub timeout_ms: u64,
+    /// Monotonic counter incremented when a matching active toast is reused and should bounce.
+    pub bounce_seq: u32,
 }
 
 /// Messages Zen and Zendia show as toasts, by their Fluent ids in the fork.
@@ -45,12 +49,27 @@ pub mod messages {
     pub const DOWNLOAD_STARTED: &str = "Download started";
 }
 
+/// Adds `toast` to `toasts`, reusing an existing toast with the same message/description (bumping `bounce_seq`)
+/// or dropping the oldest ones past [`MAX_TOASTS`]. Returns `(final_toast, dropped_ids)`.
+pub fn push_or_reuse_toast(toasts: &mut Vec<Toast>, toast: Toast) -> (Toast, Vec<ToastId>) {
+    if let Some(existing) = toasts.iter_mut().find(|existing| {
+        existing.id != toast.id && existing.message == toast.message && existing.description == toast.description
+    }) {
+        existing.action = toast.action;
+        existing.timeout_ms = toast.timeout_ms;
+        existing.bounce_seq = existing.bounce_seq.saturating_add(1);
+        return (existing.clone(), Vec::new());
+    }
+    toasts.retain(|existing| existing.id != toast.id);
+    toasts.push(toast.clone());
+    let overflow = toasts.len().saturating_sub(MAX_TOASTS);
+    let dropped = toasts.drain(..overflow).map(|dropped| dropped.id).collect();
+    (toast, dropped)
+}
+
 /// Adds `toast` to `toasts`, dropping the oldest ones past [`MAX_TOASTS`]. Returns the ids that were dropped.
 pub fn push_toast(toasts: &mut Vec<Toast>, toast: Toast) -> Vec<ToastId> {
-    toasts.retain(|existing| existing.id != toast.id);
-    toasts.push(toast);
-    let overflow = toasts.len().saturating_sub(MAX_TOASTS);
-    toasts.drain(..overflow).map(|dropped| dropped.id).collect()
+    push_or_reuse_toast(toasts, toast).1
 }
 
 #[cfg(test)]
@@ -61,8 +80,10 @@ mod tests {
         Toast {
             id: ToastId(id),
             message: format!("toast {id}"),
+            description: None,
             action: None,
             timeout_ms: DEFAULT_TOAST_TIMEOUT_MS,
+            bounce_seq: 0,
         }
     }
 
@@ -83,5 +104,17 @@ mod tests {
         let mut toasts = vec![toast(1), toast(2)];
         push_toast(&mut toasts, toast(1));
         assert_eq!(toasts.iter().map(|t| t.id.0).collect::<Vec<_>>(), vec![2, 1]);
+    }
+
+    #[test]
+    fn duplicate_message_reuses_active_toast_and_bumps_bounce_seq() {
+        let mut toasts = vec![toast(1)];
+        let mut dup = toast(2);
+        dup.message = "toast 1".to_string();
+        let (reused, dropped) = push_or_reuse_toast(&mut toasts, dup);
+        assert!(dropped.is_empty());
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(reused.id, ToastId(1));
+        assert_eq!(reused.bounce_seq, 1);
     }
 }

@@ -10,7 +10,7 @@
 use super::StubBackend;
 use crate::agent::{
     AgentDeclaredPage, AgentInstruction, AgentTable, AgentTableRow, InstructionAttachment, InstructionId,
-    PANEL_DEFAULT_WIDTH, SidePanelPrefs, SteerStatus,
+    SidePanelPrefs, SteerStatus,
 };
 use crate::commands::{Command, CommandError, CommandResult};
 use crate::contributions::{SidePanelId, SidePanelLayout, SidePanelSide};
@@ -107,6 +107,27 @@ impl StubBackend {
 
     fn handle_panel_open(&self, panel_id: SidePanelId, focus: bool) -> CommandResult {
         self.ensure_known_panel(&panel_id, "panel.open")?;
+        if panel_id.as_str() == AGENT_PANEL_ID {
+            let updated_conv = {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                let active_conv_id = state
+                    .model
+                    .active_tab
+                    .and_then(|tab_id| state.model.active_conversations.get(&tab_id).copied());
+                active_conv_id.and_then(|conv_id| {
+                    let conv = state.model.conversations.iter_mut().find(|c| c.id == conv_id)?;
+                    if conv.unseen {
+                        conv.unseen = false;
+                        Some(conv.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(conversation) = updated_conv {
+                self.bus.publish(Event::ConversationUpdated { conversation });
+            }
+        }
         self.request_view(ViewRequest::PanelOpen { panel_id, focus });
         Ok(())
     }
@@ -149,8 +170,9 @@ impl StubBackend {
     }
 
     fn handle_panel_reset_width(&self, panel_id: SidePanelId) -> CommandResult {
+        let default_width = SidePanelPrefs::default_width_for(panel_id.as_str());
         self.update_panel_prefs(panel_id, "panel.reset_width", |prefs| {
-            prefs.width = PANEL_DEFAULT_WIDTH;
+            prefs.width = default_width;
         })
     }
 
@@ -793,8 +815,10 @@ impl StubBackend {
         let toast = crate::toasts::Toast {
             id: crate::toasts::ToastId(9001),
             message: "Agent trace log is available once AgentServer is running.".to_string(),
+            description: None,
             timeout_ms: 3000,
             action: None,
+            bounce_seq: 0,
         };
         {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

@@ -229,15 +229,20 @@ pub struct SynthState {
     filter: BiquadLowpass,
     sample_rate: f32,
     muted: bool,
+    master_gain_current: f32,
+    master_gain_target: f32,
 }
 
 impl SynthState {
     pub fn new(sample_rate: f32, muted: bool) -> Self {
+        let initial_gain = if muted { 0.0 } else { 1.0 };
         Self {
             voices: Vec::with_capacity(MAX_VOICES),
             filter: BiquadLowpass::new(sample_rate, LOWPASS_HZ, LOWPASS_Q),
             sample_rate: sample_rate.max(8000.0),
             muted,
+            master_gain_current: initial_gain,
+            master_gain_target: initial_gain,
         }
     }
 
@@ -250,9 +255,7 @@ impl SynthState {
 
     pub fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
-        if muted {
-            self.voices.clear();
-        }
+        self.master_gain_target = if muted { 0.0 } else { 1.0 };
     }
 
     pub fn enqueue_mode(&mut self, mode: InputMode) {
@@ -346,12 +349,23 @@ impl SynthState {
 
     /// Renders `out.len()` mono samples into `out`.
     pub fn render_mono(&mut self, out: &mut [f32]) {
-        if self.muted || self.voices.is_empty() {
+        if (self.muted && self.master_gain_current <= 1e-4) || self.voices.is_empty() {
+            if self.muted && self.master_gain_current <= 1e-4 {
+                self.master_gain_current = 0.0;
+                self.voices.clear();
+            }
             out.fill(0.0);
             return;
         }
         let dt = 1.0 / self.sample_rate;
+        // 20 ms linear master gain ramp matching sound.js mute/unmute smoothing.
+        let ramp_step = 1.0 / (0.020 * self.sample_rate).max(1.0);
         for sample in out.iter_mut() {
+            if self.master_gain_current < self.master_gain_target {
+                self.master_gain_current = (self.master_gain_current + ramp_step).min(self.master_gain_target);
+            } else if self.master_gain_current > self.master_gain_target {
+                self.master_gain_current = (self.master_gain_current - ramp_step).max(self.master_gain_target);
+            }
             let mut sum = 0.0_f32;
             let mut i = 0;
             while i < self.voices.len() {
@@ -362,8 +376,12 @@ impl SynthState {
                     self.voices.swap_remove(i);
                 }
             }
-            let filtered = self.filter.process(sum) * MASTER_GAIN;
+            let filtered = self.filter.process(sum) * MASTER_GAIN * self.master_gain_current;
             *sample = filtered.clamp(-0.95, 0.95);
+        }
+        if self.muted && self.master_gain_current <= 1e-4 {
+            self.master_gain_current = 0.0;
+            self.voices.clear();
         }
     }
 }
@@ -458,9 +476,8 @@ impl AudioHandle {
             return;
         }
         self.ensure_stream_started();
-        if !self.available.load(Ordering::Relaxed) {
-            return;
-        }
+        // Enqueue immediately even while the audio thread is opening the cpal stream so the very first cue plays
+        // without being dropped. If audio initialization ultimately fails (headless), voices remain bounded by MAX_VOICES.
         if let Ok(mut synth) = self.synth.lock() {
             f(&mut synth);
         }
@@ -518,6 +535,11 @@ static AUDIO: OnceLock<AudioHandle> = OnceLock::new();
 
 fn handle() -> &'static AudioHandle {
     AUDIO.get_or_init(AudioHandle::new)
+}
+
+/// Pre-warms the background audio output stream when onboarding opens unmuted so cues play without startup latency.
+pub fn warm_up() {
+    handle().ensure_stream_started();
 }
 
 /// Updates the global onboarding mute state.
@@ -599,9 +621,14 @@ mod tests {
         assert!(peak > 0.01, "expected audible signal, got peak {peak}");
         assert!(peak <= 0.95, "expected clipped peak <= 0.95, got {peak}");
 
-        // Muting silences immediately.
+        // Muting ramps smoothly down over 20 ms (~960 samples at 48 kHz), then stays silent.
         synth.set_muted(true);
-        synth.render_mono(&mut buf);
-        assert!(buf.iter().all(|&s| s == 0.0));
+        let mut ramp_buf = vec![0.0_f32; 1200];
+        synth.render_mono(&mut ramp_buf);
+        let tail = &ramp_buf[1050..];
+        assert!(tail.iter().all(|&s| s == 0.0));
+        let mut silent_buf = vec![0.0_f32; 512];
+        synth.render_mono(&mut silent_buf);
+        assert!(silent_buf.iter().all(|&s| s == 0.0));
     }
 }

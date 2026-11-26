@@ -532,6 +532,33 @@ pub fn sample_library_history(now_unix: u64) -> Vec<HistoryEntry> {
     ]
 }
 
+/// Sample recently closed tabs for the Library History "Closed tabs" source.
+pub fn sample_closed_tabs(now_unix: u64) -> Vec<HistoryEntry> {
+    vec![
+        HistoryEntry {
+            id: HistoryEntryId(100_001),
+            url: "https://book.freyaui.dev/guides/animations".to_string(),
+            title: "Animations — Freya Guide".to_string(),
+            visited_at_unix: now_unix.saturating_sub(180),
+            visit_count: 1,
+        },
+        HistoryEntry {
+            id: HistoryEntryId(100_002),
+            url: "https://doc.rust-lang.org/std/time/struct.Duration.html".to_string(),
+            title: "Duration in std::time — Rust".to_string(),
+            visited_at_unix: now_unix.saturating_sub(1_200),
+            visit_count: 1,
+        },
+        HistoryEntry {
+            id: HistoryEntryId(100_003),
+            url: "https://ladybird.org/posts/progress-2026".to_string(),
+            title: "Ladybird Progress Report".to_string(),
+            visited_at_unix: now_unix.saturating_sub(SECS_PER_DAY + 600),
+            visit_count: 1,
+        },
+    ]
+}
+
 /// Builds the context menu for a single history row, matching Zen's history menu plus open-in-tab and copy actions.
 pub fn build_history_row_context_menu(entry: &HistoryEntry) -> Vec<ResolvedMenuItem> {
     let id_str = entry.id.0.to_string();
@@ -797,6 +824,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(stub.model().active_tab().unwrap().url, first.url);
+
+        // Closing a tab records it in closed_tabs, and history.open reopens it.
+        let active_id = stub.model().active_tab.unwrap();
+        let closed_url = stub.model().active_tab().unwrap().url.clone();
+        stub.invoke(Command::TabClose {
+            tab_id: Some(active_id),
+            force: true,
+        })
+        .unwrap();
+        let closed_entry = stub.model().closed_tabs[0].clone();
+        assert_eq!(closed_entry.url, closed_url);
+        stub.invoke(Command::HistoryOpen {
+            entry_id: Some(closed_entry.id),
+            url: None,
+            new_tab: true,
+            in_background: false,
+        })
+        .unwrap();
+        assert_eq!(stub.model().active_tab().unwrap().url, closed_url);
+        assert!(!stub.model().closed_tabs.iter().any(|e| e.id == closed_entry.id));
 
         let second = stub.model().history[1].clone();
         stub.invoke(Command::HistoryOpen {

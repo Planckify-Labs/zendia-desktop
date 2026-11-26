@@ -6,7 +6,9 @@
 
 //! Glass surface container ([`GlassPanel`]) and rounded status/action capsule ([`Pill`]).
 
+use crate::ui::kit::focus_trap::focus_ring_border;
 use crate::ui::kit::icons::Icon;
+use crate::ui::kit::interactive::use_interactive_feedback;
 use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
 use zendia_module_api::ui::UiTone;
@@ -104,26 +106,58 @@ impl Component for GlassPanel {
             theme.color(ThemeRole::Border)
         };
 
-        let container = rect()
+        let sheen_gradient = LinearGradient::new()
+            .angle(180.0)
+            .stop((theme.glass.sheen_top.to_color(), 0.0))
+            .stop((Color::TRANSPARENT, 100.0));
+
+        let mut container = rect()
             .width(self.width.clone())
             .height(self.height.clone())
-            .padding(padding)
-            .spacing(self.spacing)
             .corner_radius(CornerRadius::new_all(radius))
             .background(background)
             .color(theme.color(ThemeRole::Text))
             .font_size(theme.font_sizes.md)
             .border(
                 Border::new()
-                    .width(1.0)
+                    .width(if self.glass { 0.5 } else { 1.0 })
                     .alignment(BorderAlignment::Inner)
                     .fill(border_color),
             )
             .shadow(theme.shadows.float_highlight.to_shadow())
             .shadow(theme.shadows.float_ambient.to_shadow())
             .shadow(theme.shadows.float_drop.to_shadow())
-            .overflow(Overflow::Clip)
-            .children(self.children.clone());
+            .overflow(Overflow::Clip);
+
+        if self.glass {
+            container = container
+                .shadow(Shadow::new().inset().spread(0.5).color(theme.glass.outline.to_color()))
+                .child(
+                    // Fork 96px top specular sheen (`zendia.css:640-650`, `pointer-events: none`).
+                    rect()
+                        .position(Position::new_absolute().top(0.0).left(0.0).right(0.0))
+                        .height(Size::px(96.0))
+                        .background(sheen_gradient)
+                        .interactive(Interactive::No),
+                );
+        }
+
+        container = container.child(
+            rect()
+                .width(if self.width == Size::auto() {
+                    Size::auto()
+                } else {
+                    Size::fill()
+                })
+                .height(if self.height == Size::auto() {
+                    Size::auto()
+                } else {
+                    Size::fill()
+                })
+                .padding(padding)
+                .spacing(self.spacing)
+                .children(self.children.clone()),
+        );
 
         if self.glass && theme.glass.blur > 0.0 {
             container.backdrop_blur(theme.glass.blur)
@@ -190,45 +224,51 @@ impl Pill {
 impl Component for Pill {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
-        let mut hovered = use_state(|| false);
+        let interactive = self.on_press.is_some();
+        let feedback = use_interactive_feedback(interactive);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
 
         let accent_role = ThemeRole::from_tone(self.tone);
-        let (bg, border_color, fg) = match self.tone {
+        let (rest_bg, hover_bg, pressed_bg, border_color, fg) = match self.tone {
             UiTone::Neutral => (
-                if hovered() {
-                    theme.rgba(ThemeRole::SurfaceRaised).to_color()
-                } else {
-                    theme.color(ThemeRole::SurfaceGlass)
-                },
+                theme.color(ThemeRole::SurfaceGlass),
+                theme.rgba(ThemeRole::SurfaceRaised).to_color(),
+                theme
+                    .rgba(ThemeRole::SurfaceRaised)
+                    .mix(theme.rgba(ThemeRole::Text), 0.10)
+                    .to_color(),
                 theme.glass.outline.to_color(),
                 theme.color(ThemeRole::Text),
             ),
             _ => {
                 let tint = theme.rgba(accent_role);
                 (
-                    tint.with_alpha(if hovered() { 0.28 } else { 0.18 }).to_color(),
+                    tint.with_alpha(0.18).to_color(),
+                    tint.with_alpha(0.28).to_color(),
+                    tint.with_alpha(0.36).to_color(),
                     tint.with_alpha(0.50).to_color(),
                     tint.to_color(),
                 )
             }
         };
-
-        let border = if focus() == Focus::Keyboard {
-            Border::new()
-                .width(2.0)
-                .alignment(BorderAlignment::Inner)
-                .fill(theme.color(ThemeRole::FocusRing))
+        let bg = if interactive {
+            feedback.background(rest_bg, hover_bg, pressed_bg)
         } else {
+            rest_bg
+        };
+
+        let border = focus_ring_border(
+            interactive && focus() == Focus::Keyboard,
+            &theme,
             Border::new()
                 .width(1.0)
                 .alignment(BorderAlignment::Inner)
-                .fill(border_color)
-        };
+                .fill(border_color),
+        );
 
-        let interactive = self.on_press.is_some();
         let on_press = self.on_press.clone();
+        let on_press_key = self.on_press.clone();
 
         let pill = rect()
             .a11y_id(a11y_id)
@@ -247,15 +287,26 @@ impl Component for Pill {
             .background(bg)
             .border(border)
             .shadow(theme.shadows.pill.to_shadow())
-            .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .scale(if interactive { feedback.scale() } else { 1.0 })
             .maybe(interactive, |el| {
-                el.cursor(CursorIcon::Pointer).on_press(move |e| {
-                    a11y_id.request_focus();
-                    if let Some(handler) = &on_press {
-                        handler.call(e);
-                    }
-                })
+                el.cursor(CursorIcon::Pointer)
+                    .on_pointer_enter(feedback.on_pointer_enter())
+                    .on_pointer_leave(feedback.on_pointer_leave())
+                    .on_pointer_down(feedback.on_pointer_down())
+                    .on_global_pointer_up(feedback.on_pointer_up())
+                    .on_press(move |e| {
+                        a11y_id.request_focus();
+                        if let Some(handler) = &on_press {
+                            handler.call(e);
+                        }
+                    })
+                    .on_key_down(move |e: Event<KeyboardEventData>| {
+                        if (e.key == Key::Named(NamedKey::Enter) || matches!(&e.key, Key::Character(c) if c == " "))
+                            && on_press_key.is_some()
+                        {
+                            e.stop_propagation();
+                        }
+                    })
             })
             .maybe_child(self.dot_role.map(|role| {
                 rect()

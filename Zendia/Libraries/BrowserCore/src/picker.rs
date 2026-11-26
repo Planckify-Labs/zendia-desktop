@@ -85,6 +85,8 @@ pub struct PickerItem {
     pub icon_badge_rgb: Option<(u8, u8, u8)>,
     /// Optional per-item accent color used for the glow on a selected grid tile.
     pub accent_rgb: Option<(u8, u8, u8)>,
+    /// When true in grid layout, the icon fills 100% of its rounded icon plate (`zendia.css:895`).
+    pub icon_fill: bool,
     /// Optional section heading shown above the first item of a contiguous run sharing it.
     pub section: Option<String>,
     /// Optional shortcut jump key badge (`a`, `s`, `d`, ...). Assigned automatically if `None`.
@@ -110,6 +112,7 @@ impl PickerItem {
             icon: None,
             icon_badge_rgb: None,
             accent_rgb: None,
+            icon_fill: false,
             section: None,
             key: None,
             enabled: true,
@@ -137,6 +140,11 @@ impl PickerItem {
 
     pub fn accent_rgb(mut self, rgb: (u8, u8, u8)) -> Self {
         self.accent_rgb = Some(rgb);
+        self
+    }
+
+    pub fn icon_fill(mut self, fill: bool) -> Self {
+        self.icon_fill = fill;
         self
     }
 
@@ -468,6 +476,7 @@ pub fn build_agents_picker(model: &BrowserModel) -> PickerRequest {
         icon: &'static str,
         version: Option<&'static str>,
         accent_rgb: (u8, u8, u8),
+        icon_fill: bool,
         install_hint: &'static str,
     }
 
@@ -478,6 +487,7 @@ pub fn build_agents_picker(model: &BrowserModel) -> PickerRequest {
             icon: "agent-claude",
             version: Some("1.0.24"),
             accent_rgb: (217, 119, 87),
+            icon_fill: false,
             install_hint: "npm i -g @anthropic-ai/claude-code",
         },
         AgentSpec {
@@ -486,6 +496,7 @@ pub fn build_agents_picker(model: &BrowserModel) -> PickerRequest {
             icon: "agent-codex",
             version: Some("0.9.1"),
             accent_rgb: (66, 133, 244),
+            icon_fill: false,
             install_hint: "npm i -g @openai/codex",
         },
         AgentSpec {
@@ -494,6 +505,7 @@ pub fn build_agents_picker(model: &BrowserModel) -> PickerRequest {
             icon: "agent-cursor",
             version: None,
             accent_rgb: (163, 163, 163),
+            icon_fill: false,
             install_hint: "curl https://cursor.com/install -fsS | bash",
         },
         AgentSpec {
@@ -502,6 +514,7 @@ pub fn build_agents_picker(model: &BrowserModel) -> PickerRequest {
             icon: "agent-antigravity",
             version: Some("2.0.0"),
             accent_rgb: (66, 133, 244),
+            icon_fill: false,
             install_hint: "Install Antigravity CLI",
         },
         AgentSpec {
@@ -510,6 +523,7 @@ pub fn build_agents_picker(model: &BrowserModel) -> PickerRequest {
             icon: "agent-opencode",
             version: None,
             accent_rgb: (245, 167, 66),
+            icon_fill: false,
             install_hint: "npm i -g opencode-ai",
         },
         AgentSpec {
@@ -518,6 +532,7 @@ pub fn build_agents_picker(model: &BrowserModel) -> PickerRequest {
             icon: "agent-kiro",
             version: None,
             accent_rgb: (144, 70, 255),
+            icon_fill: true,
             install_hint: "Install Kiro CLI",
         },
     ];
@@ -550,6 +565,7 @@ pub fn build_agents_picker(model: &BrowserModel) -> PickerRequest {
                 .detail(detail)
                 .icon(spec.icon)
                 .accent_rgb(spec.accent_rgb)
+                .icon_fill(spec.icon_fill)
                 .enabled(installed)
                 .dimmed(!installed)
                 .arg("panel_id", "zendia.agent");

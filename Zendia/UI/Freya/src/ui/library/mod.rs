@@ -24,22 +24,26 @@ use crate::ui::core_view::use_core;
 use crate::ui::kit::icons::{Icon, icon_raw_bytes};
 use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, motion, use_theme};
 use freya::animation::*;
+use freya::engine::prelude::{Canvas, Color as SkColor, Paint, PaintCap, PaintStyle, PathBuilder, Point as SkPoint};
 use freya::prelude::*;
 use std::collections::HashMap;
+use std::f32::consts::PI;
 use std::sync::Mutex;
 use std::time::Duration;
 use zendia_browser_core::commands::Command;
+use zendia_browser_core::downloads::{aggregate_active_progress, build_downloads_tab_context_menu};
 use zendia_browser_core::events::ViewRequest;
 use zendia_browser_core::history::build_history_tab_context_menu;
 use zendia_browser_core::library::LibrarySection;
+use zendia_browser_core::library_media::build_media_tab_context_menu;
 use zendia_browser_core::model::SidebarSide;
 
 /// Width of the section rail on the library's window edge (`--zen-library-side` min-width 110 px).
 pub const RAIL_WIDTH: f32 = 112.0;
 /// Open/close slide duration matching Zen's spring (`stiffness: 720, damping: 47, mass: 1.2`).
-pub const LIBRARY_SLIDE_DURATION: Duration = Duration::from_millis(300);
+pub const LIBRARY_SLIDE_DURATION: Duration = motion::LIBRARY_SLIDE;
 /// Section body fade-in duration when switching sections (`zen-library-section-fade 0.1s`).
-pub const SECTION_FADE_DURATION: Duration = Duration::from_millis(100);
+pub const SECTION_FADE_DURATION: Duration = motion::LIBRARY_SECTION_FADE;
 /// Minimum number of rail sections that must remain visible while customizing.
 const MIN_VISIBLE_SECTIONS: usize = 2;
 
@@ -64,6 +68,10 @@ pub struct LibraryViewState {
     pub history_filters_open_override: State<Option<bool>>,
     /// Forces the teal vim focus ring on the active section's search box (used in gallery vim-focus preview).
     pub force_search_focus_ring: State<bool>,
+    /// True while the History section is showing Closed tabs (`Archive` rail label).
+    pub history_showing_closed: State<bool>,
+    /// Window width reported by `WindowShell`, used to clamp dynamic Spaces width (`95vw`).
+    pub viewport_width: State<f32>,
 }
 
 impl LibraryViewState {
@@ -116,8 +124,8 @@ impl LibraryViewState {
     }
 
     /// Total width (`RAIL_WIDTH + section body width`) for the currently active section.
-    pub fn total_width(&self) -> f32 {
-        RAIL_WIDTH + sections::width(*self.section.read())
+    pub fn total_width_for(&self, space_count: usize, viewport_width: f32) -> f32 {
+        RAIL_WIDTH + sections::width_for(*self.section.read(), space_count, viewport_width)
     }
 
     /// Visible sections in rail order.
@@ -210,6 +218,8 @@ pub fn use_provide_library_state() -> LibraryViewState {
     let history_query_override = use_state(|| None::<String>);
     let history_filters_open_override = use_state(|| None::<bool>);
     let force_search_focus_ring = use_state(|| false);
+    let history_showing_closed = use_state(|| false);
+    let viewport_width = use_state(|| 1280.0f32);
     use_provide_context(|| LibraryViewState {
         open,
         section,
@@ -220,6 +230,8 @@ pub fn use_provide_library_state() -> LibraryViewState {
         history_query_override,
         history_filters_open_override,
         force_search_focus_ring,
+        history_showing_closed,
+        viewport_width,
     })
 }
 
@@ -296,8 +308,19 @@ impl Component for Library {
         let active = state.map(|s| *s.section.read()).unwrap_or(LibrarySection::DEFAULT);
         let customizing = state.is_some_and(|s| *s.customizing.read());
         let hidden = state.map(|s| s.hidden_sections.read().clone()).unwrap_or_default();
-        let sidebar_side = core.model().read().layout.sidebar_side;
+        let history_showing_closed = state.is_some_and(|s| *s.history_showing_closed.read());
+        let viewport_width = state.map(|s| *s.viewport_width.read()).unwrap_or(1280.0);
+        let (sidebar_side, space_count, download_progress, media_enabled) = {
+            let model = core.model().read();
+            (
+                model.layout.sidebar_side,
+                model.spaces.len(),
+                aggregate_active_progress(&model.downloads),
+                model.library_media_enabled,
+            )
+        };
         let is_right = sidebar_side == SidebarSide::Right;
+        let body_width = sections::width_for(active, space_count, viewport_width);
 
         // Zen's 100 ms fade when switching between sections.
         let section_fade = use_animation_with_dependencies(&active, move |conf, _| {
@@ -336,12 +359,19 @@ impl Component for Library {
         let mut tabs_column = rect().width(Size::fill()).cross_align(Alignment::center()).spacing(8.0);
         for section in visible_sections {
             let is_hidden = hidden.contains(&section);
+            let title_override = (section == LibrarySection::History && history_showing_closed).then_some("Archive");
+            let active_progress = (section == LibrarySection::Downloads)
+                .then_some(download_progress)
+                .flatten();
             tabs_column = tabs_column.child(RailTabButton {
                 section,
+                title_override,
                 selected: section == active,
                 customizing,
                 hidden_tab: is_hidden,
                 can_hide: is_hidden || can_hide_more,
+                download_progress: active_progress,
+                media_enabled,
                 key: DiffKey::from(&section.id()),
             });
         }
@@ -422,7 +452,7 @@ impl Component for Library {
 
         let list_focus_id = state.map(|s| s.nav.list_focus_a11y_id);
         let body = rect()
-            .width(Size::px(sections::width(active)))
+            .width(Size::px(body_width))
             .height(Size::fill())
             .overflow(Overflow::Clip)
             .opacity(body_opacity)
@@ -430,7 +460,7 @@ impl Component for Library {
 
         let click_core = core.clone();
         let mut container = rect()
-            .width(Size::px(RAIL_WIDTH + sections::width(active)))
+            .width(Size::px(RAIL_WIDTH + body_width))
             .height(Size::fill())
             .direction(Direction::Horizontal)
             .maybe(list_focus_id.is_some(), |r| {
@@ -458,10 +488,13 @@ impl Component for Library {
 #[derive(Clone, PartialEq)]
 struct RailTabButton {
     section: LibrarySection,
+    title_override: Option<&'static str>,
     selected: bool,
     customizing: bool,
     hidden_tab: bool,
     can_hide: bool,
+    download_progress: Option<f32>,
+    media_enabled: bool,
     key: DiffKey,
 }
 
@@ -501,8 +534,9 @@ impl Component for RailTabButton {
             Color::TRANSPARENT
         };
 
-        let icon_el: Element =
-            if let Some((cache_key, bytes)) = prepared_library_icon(self.section, self.selected, theme.scheme) {
+        let icon_filled = self.selected || self.download_progress.is_some();
+        let raw_icon_el: Element =
+            if let Some((cache_key, bytes)) = prepared_library_icon(self.section, icon_filled, theme.scheme) {
                 SvgViewer::new((cache_key, bytes))
                     .width(Size::px(28.0))
                     .height(Size::px(28.0))
@@ -515,10 +549,36 @@ impl Component for RailTabButton {
                     .into_element()
             };
 
+        let icon_el: Element = if let Some(progress) = self.download_progress {
+            let accent = theme.color(ThemeRole::Accent);
+            let track = match theme.scheme {
+                ResolvedScheme::Dark => Color::from_argb(42, 255, 255, 255),
+                ResolvedScheme::Light => Color::from_argb(36, 0, 0, 0),
+            };
+            let sk_arc = SkColor::from_argb(accent.a(), accent.r(), accent.g(), accent.b());
+            let sk_track = SkColor::from_argb(track.a(), track.r(), track.g(), track.b());
+            let ring_cb = RenderCallback::new(move |ctx| {
+                if let RenderTarget::Background { canvas, .. } = &mut ctx.target {
+                    paint_rail_progress_ring(canvas, ctx.size.width, ctx.size.height, progress, sk_track, sk_arc);
+                }
+            });
+            rect()
+                .width(Size::px(36.0))
+                .height(Size::px(36.0))
+                .center()
+                .background(Fill::Callback(ring_cb))
+                .child(raw_icon_el)
+                .into_element()
+        } else {
+            raw_icon_el
+        };
+
         let section = self.section;
         let customizing = self.customizing;
         let hidden_tab = self.hidden_tab;
         let can_hide = self.can_hide;
+        let media_enabled = self.media_enabled;
+        let title_text = self.title_override.unwrap_or_else(|| section.title());
         let press_core = core.clone();
 
         let toggle_badge = customizing.then(|| {
@@ -567,7 +627,7 @@ impl Component for RailTabButton {
 
         rect()
             .a11y_role(AccessibilityRole::Tab)
-            .a11y_alt(section.title())
+            .a11y_alt(title_text)
             .width(Size::px(RAIL_WIDTH - 16.0))
             .padding(Gaps::new(15.0, 4.0, 15.0, 4.0))
             .corner_radius(CornerRadius::new_all(10.0))
@@ -587,16 +647,23 @@ impl Component for RailTabButton {
             .on_pointer_leave(move |_| hovered.set_if_modified(false))
             .on_mouse_down(move |e: Event<MouseEventData>| {
                 if e.button == Some(MouseButton::Right)
-                    && section == LibrarySection::History
                     && let Some(ms) = menu_state
                 {
-                    e.stop_propagation();
-                    ms.open_context_menu(OpenContextMenu {
-                        position: (e.global_location.x as f32, e.global_location.y as f32),
-                        items: build_history_tab_context_menu(),
-                        tab_id: None,
-                        open_submenu: None,
-                    });
+                    let items = match section {
+                        LibrarySection::History => build_history_tab_context_menu(),
+                        LibrarySection::Downloads => build_downloads_tab_context_menu(),
+                        LibrarySection::Media => build_media_tab_context_menu(media_enabled),
+                        LibrarySection::Spaces | LibrarySection::SpaceRouting => Vec::new(),
+                    };
+                    if !items.is_empty() {
+                        e.stop_propagation();
+                        ms.open_context_menu(OpenContextMenu {
+                            position: (e.global_location.x as f32, e.global_location.y as f32),
+                            items,
+                            tab_id: None,
+                            open_submenu: None,
+                        });
+                    }
                 }
             })
             .on_press(move |_| {
@@ -608,7 +675,7 @@ impl Component for RailTabButton {
             .child(icon_el)
             .child(
                 label()
-                    .text(section.title())
+                    .text(title_text)
                     .font_size(12.5)
                     .font_weight(FontWeight::SEMI_BOLD)
                     .max_lines(1)
@@ -672,4 +739,41 @@ impl Component for FooterIconButton {
     fn render_key(&self) -> DiffKey {
         self.key.clone().or(self.default_key())
     }
+}
+
+fn paint_rail_progress_ring(canvas: &Canvas, width: f32, height: f32, fraction: f32, track: SkColor, arc: SkColor) {
+    let cx = width * 0.5;
+    let cy = height * 0.5;
+    let radius = (width.min(height) * 0.5) - 2.0;
+
+    let mut track_paint = Paint::default();
+    track_paint.set_anti_alias(true);
+    track_paint.set_style(PaintStyle::Stroke);
+    track_paint.set_stroke_width(2.5);
+    track_paint.set_color(track);
+    canvas.draw_circle(SkPoint::new(cx, cy), radius, &track_paint);
+
+    let sweep = fraction.clamp(0.05, 1.0) * 2.0 * PI;
+    let start = -PI * 0.5;
+    let steps = 32usize;
+    let mut pb = PathBuilder::new();
+    for step in 0..=steps {
+        let ang = start + sweep * (step as f32 / steps as f32);
+        let sin_a = crate::ui::onboarding::theme::sin_f32(ang);
+        let cos_a = crate::ui::onboarding::theme::sin_f32(ang + PI * 0.5);
+        let pt = SkPoint::new(cx + radius * cos_a, cy + radius * sin_a);
+        if step == 0 {
+            pb.move_to(pt);
+        } else {
+            pb.line_to(pt);
+        }
+    }
+
+    let mut arc_paint = Paint::default();
+    arc_paint.set_anti_alias(true);
+    arc_paint.set_style(PaintStyle::Stroke);
+    arc_paint.set_stroke_cap(PaintCap::Round);
+    arc_paint.set_stroke_width(3.0);
+    arc_paint.set_color(arc);
+    canvas.draw_path(&pb.detach(), &arc_paint);
 }

@@ -423,6 +423,19 @@ pub fn build_media_context_menu(item: &LibraryMediaItem) -> Vec<ResolvedMenuItem
     ]
 }
 
+/// Builds the context menu opened by right-clicking the Media tab in the library rail.
+/// Returns an empty list when Media is disabled, matching Zen's rail tab menu.
+pub fn build_media_tab_context_menu(enabled: bool) -> Vec<ResolvedMenuItem> {
+    if !enabled {
+        return Vec::new();
+    }
+    let mut turn_off =
+        ResolvedMenuItem::action("library.media.turn_off", "Turn Off Media", "library.media.set_enabled")
+            .with_arg("enabled", "false");
+    turn_off.icon = Some("close".to_string());
+    vec![turn_off]
+}
+
 /// Materializes small, crisp sample PNG files in a deterministic temp directory and returns sample [`LibraryMediaItem`]s
 /// (4 local PNG images + 1 video with a local poster PNG) along with their folder names.
 pub fn materialize_sample_media(now_unix: u64) -> (Vec<LibraryMediaItem>, Vec<String>) {
@@ -726,6 +739,15 @@ mod tests {
 
     #[test]
     fn classifies_media_kinds_like_zen() {
+        assert!(build_media_tab_context_menu(false).is_empty());
+        let enabled_menu = build_media_tab_context_menu(true);
+        assert_eq!(enabled_menu.len(), 1);
+        assert_eq!(enabled_menu[0].command, "library.media.set_enabled");
+        assert_eq!(
+            enabled_menu[0].command_args,
+            vec![("enabled".to_string(), "false".to_string())]
+        );
+
         assert_eq!(media_kind_of("photo.png"), Some(LibraryMediaKind::Image));
         assert_eq!(media_kind_of("clip.mp4"), Some(LibraryMediaKind::Video));
         assert_eq!(media_kind_of("clip.mkv"), Some(LibraryMediaKind::Video));

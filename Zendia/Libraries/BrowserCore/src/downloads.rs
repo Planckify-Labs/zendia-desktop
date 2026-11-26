@@ -223,6 +223,31 @@ pub fn progress_fraction(download: &Download) -> Option<f32> {
     Some((download.bytes_received as f64 / total as f64).clamp(0.0, 1.0) as f32)
 }
 
+/// Aggregate progress across all `InProgress` downloads in `0.0..=1.0`, or `None` when no download is active.
+pub fn aggregate_active_progress(downloads: &[Download]) -> Option<f32> {
+    let mut active_count = 0usize;
+    let mut received_total: u128 = 0;
+    let mut size_total: u128 = 0;
+    for dl in downloads {
+        if dl.status != DownloadStatus::InProgress {
+            continue;
+        }
+        active_count += 1;
+        if let Some(total) = dl.total_bytes.filter(|t| *t > 0) {
+            received_total += u128::from(dl.bytes_received.min(total));
+            size_total += u128::from(total);
+        }
+    }
+    if active_count == 0 {
+        return None;
+    }
+    if size_total > 0 {
+        Some((received_total as f64 / size_total as f64).clamp(0.0, 1.0) as f32)
+    } else {
+        Some(0.25)
+    }
+}
+
 /// Returns whether `download` matches `filter` at reference timestamp `now_unix`.
 pub fn matches_filter(download: &Download, filter: &DownloadFilter, now_unix: u64) -> bool {
     if !filter.file_groups.is_empty() {
@@ -588,6 +613,17 @@ pub fn build_download_context_menu(download: &Download) -> Vec<ResolvedMenuItem>
     items
 }
 
+/// Builds the context menu opened by right-clicking the Downloads tab in the library rail.
+pub fn build_downloads_tab_context_menu() -> Vec<ResolvedMenuItem> {
+    let mut clear_all = ResolvedMenuItem::action(
+        "library.downloads.clear_all",
+        "Clear All Downloads",
+        "download.clear_finished",
+    );
+    clear_all.icon = Some("edit-delete".to_string());
+    vec![clear_all]
+}
+
 /// Builds a mixed-state download list spanning multiple days for the gallery fixtures.
 pub fn sample_mixed_downloads(now_unix: u64, sample_image_path: Option<String>) -> Vec<Download> {
     let today = now_unix;
@@ -792,8 +828,15 @@ mod tests {
 
     #[test]
     fn context_menu_adapts_to_download_state() {
+        let tab_menu = build_downloads_tab_context_menu();
+        assert_eq!(tab_menu.len(), 1);
+        assert_eq!(tab_menu[0].command, "download.clear_finished");
+
         let now = sample_now();
         let list = sample_mixed_downloads(now, None);
+        let agg = aggregate_active_progress(&list).expect("sample has an active download");
+        assert!(agg > 0.5 && agg < 0.7);
+        assert_eq!(aggregate_active_progress(&list[1..]), None);
 
         let active_menu = build_download_context_menu(&list[0]);
         assert!(active_menu.iter().any(|i| i.command == "download.pause"));

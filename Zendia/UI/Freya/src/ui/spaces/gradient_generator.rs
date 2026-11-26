@@ -10,14 +10,17 @@
 
 use crate::ui::chrome::menus::state::clamp_popup_origin;
 use crate::ui::core_view::use_core;
-use crate::ui::kit::Icon;
+use crate::ui::kit::{Icon, TextField};
 use crate::ui::spaces::state::{SpaceEditingState, try_use_space_editing_state};
-use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedScheme, Rgba, ThemeRole, use_theme};
+use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedScheme, Rgba, ThemeRole, motion, use_theme};
+use freya::animation::*;
 use freya::engine::prelude::{
     Canvas, Paint, PaintCap, PaintJoin, PaintStyle, PathBuilder, RRect, Rect as SkRect, SkColor, SkPoint,
 };
 use freya::prelude::*;
+use std::cell::Cell;
 use std::f32::consts::PI;
+use std::time::Duration;
 use zendia_browser_core::agent::{cos_f32, sin_f32};
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::model::SpaceId;
@@ -26,6 +29,24 @@ use zendia_browser_core::space_appearance::{
     PAD_COORD_SIZE, SpaceAppearance, SpaceColorScheme, TEXTURE_DIAL_STEPS, TextureKind, layer_intensity,
     texture_amount_from_dial_point, wave_slider_points,
 };
+
+/// Parses a `#RGB` or `#RRGGBB` hex string into `(r, g, b)` (`GRD-03`).
+pub fn parse_custom_hex_color(raw: &str) -> Option<(u8, u8, u8)> {
+    let hex = raw.trim().strip_prefix('#').unwrap_or(raw.trim());
+    if hex.len() == 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some((r, g, b))
+    } else if hex.len() == 3 {
+        let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+        let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+        let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+        Some((r, g, b))
+    } else {
+        None
+    }
+}
 
 /// Panel width matching Zen's `--panel-width: 364px`.
 pub const GRADIENT_PANEL_WIDTH: f32 = 364.0;
@@ -140,10 +161,38 @@ impl Component for GradientGeneratorCard {
         let mut dragging_primary = use_state(|| false);
         let mut wave_area = use_state(|| (0.0f32, 0.0f32, 220.0f32, 44.0f32));
         let mut dragging_wave = use_state(|| false);
+        let mut wave_hovered = use_state(|| false);
         let mut dial_area = use_state(|| (0.0f32, 0.0f32, DIAL_SIZE, DIAL_SIZE));
         let mut dragging_dial = use_state(|| false);
         let mut dial_dragged = use_state(|| false);
+        let mut dial_hovered = use_state(|| false);
         let mut local_page = use_state(|| 0usize);
+        let mut custom_hex_draft = use_state(String::new);
+        let mut custom_colors = use_state(Vec::<(u8, u8, u8)>::new);
+        let mut show_custom_hex = use_state(|| false);
+        let custom_hex_a11y = use_hook(AccessibilityId::new_unique);
+
+        // GRD-05: Wave thumb hover scale (1.0 -> 1.1 over 500ms) and texture dial handle hover length (10px -> 14px).
+        let wave_thumb_anim =
+            use_animation_with_dependencies(&(wave_hovered() || dragging_wave()), move |conf, active| {
+                conf.on_creation(OnCreation::Finish);
+                conf.on_change(OnChange::Rerun);
+                let (from, to) = if *active { (1.0, 1.1) } else { (1.1, 1.0) };
+                AnimNum::new(from, to)
+                    .duration(Duration::from_millis(500))
+                    .ease(Ease::Out)
+                    .function(Function::Quad)
+            });
+        let dial_handle_anim =
+            use_animation_with_dependencies(&(dial_hovered() || dragging_dial()), move |conf, active| {
+                conf.on_creation(OnCreation::Finish);
+                conf.on_change(OnChange::Rerun);
+                let (from, to) = if *active { (10.0, 14.0) } else { (14.0, 10.0) };
+                AnimNum::new(from, to)
+                    .duration(Duration::from_millis(100))
+                    .ease(Ease::Out)
+                    .function(Function::Quad)
+            });
 
         let appearance = self.appearance.clone();
         let space_id = self.space_id;
@@ -310,9 +359,22 @@ impl Component for GradientGeneratorCard {
                     }
                 }),
                 key: DiffKey::from(&"grad-harmony"),
+            })
+            .child(PadActionButton {
+                icon: "code".to_string(),
+                alt: "Toggle custom hex color input".to_string(),
+                active: show_custom_hex(),
+                disabled: false,
+                custom_harmony_icon: false,
+                on_press: EventHandler::new(move |_| {
+                    let next = !*show_custom_hex.peek();
+                    show_custom_hex.set(next);
+                }),
+                key: DiffKey::from(&"grad-custom-hex"),
             });
 
         // Dots placed on the color pad.
+        let is_dragging_primary = dragging_primary();
         let dot_elements: Vec<Element> = appearance
             .dots
             .iter()
@@ -322,6 +384,7 @@ impl Component for GradientGeneratorCard {
                 let dot_id = dot.id;
                 PadColorDot {
                     dot: dot.clone(),
+                    is_dragging: is_dragging_primary && dot.is_primary,
                     on_drag_start: EventHandler::new(move |_| {
                         dragging_primary.set(true);
                     }),
@@ -346,7 +409,7 @@ impl Component for GradientGeneratorCard {
             .a11y_alt("Gradient color pad")
             .width(Size::px(PAD_DISPLAY_SIZE))
             .height(Size::px(PAD_DISPLAY_SIZE))
-            .corner_radius(CornerRadius::new_all(8.0))
+            .corner_radius(CornerRadius::new_all(4.0))
             .overflow(Overflow::Clip)
             .background(pad_bg)
             .on_sized(move |e: Event<SizedEventData>| {
@@ -439,6 +502,31 @@ impl Component for GradientGeneratorCard {
             .direction(Direction::Horizontal)
             .content(Content::Flex)
             .cross_align(Alignment::center())
+            .on_wheel(move |e: Event<WheelEventData>| {
+                // GRD-02: Scroll-wheel / horizontal swipe over preset swatches cycles preset pages.
+                let delta = if e.delta_x.abs() >= e.delta_y.abs() {
+                    e.delta_x
+                } else {
+                    e.delta_y
+                };
+                if delta.abs() < 0.15 {
+                    return;
+                }
+                e.stop_propagation();
+                let next = if delta < 0.0 {
+                    (active_page + 1).min(page_count.saturating_sub(1))
+                } else {
+                    active_page.saturating_sub(1)
+                };
+                if next != active_page {
+                    if let Some(ed) = editing {
+                        let mut p = ed.preset_page;
+                        p.set(next);
+                    } else {
+                        local_page.set(next);
+                    }
+                }
+            })
             .child(PageArrowButton {
                 is_left: true,
                 disabled: prev_disabled,
@@ -521,6 +609,7 @@ impl Component for GradientGeneratorCard {
         } else {
             layer_intensity(appearance.opacity)
         };
+        let thumb_scale = wave_thumb_anim.get().value();
         let wave_cb = RenderCallback::new(move |ctx| {
             if let RenderTarget::Background { canvas, .. } = &mut ctx.target {
                 paint_wave_slider(
@@ -530,26 +619,36 @@ impl Component for GradientGeneratorCard {
                     wave_intensity,
                     is_dark,
                     !is_default_empty,
+                    thumb_scale,
                 );
             }
         });
 
-        let update_opacity_from_x = {
+        let commit_opacity = {
             let core = core.clone();
             let app = appearance.clone();
             let commit = commit_appearance.clone();
-            move |global_x: f32| {
-                let (x0, _, w, _) = *wave_area.peek();
-                let frac = ((global_x - x0 - 10.0) / (w - 20.0).max(1.0)).clamp(0.0, 1.0);
-                let opacity = MIN_GRADIENT_OPACITY + frac * (MAX_GRADIENT_OPACITY - MIN_GRADIENT_OPACITY);
+            move |opacity: f32| {
+                let clamped = opacity.clamp(MIN_GRADIENT_OPACITY, MAX_GRADIENT_OPACITY);
                 if for_draft {
                     let mut next = app.clone();
-                    next.set_opacity(opacity);
+                    next.set_opacity(clamped);
                     commit(next);
                 } else {
-                    core.invoke_or_log(Command::SpaceAppearanceSetOpacity { space_id, opacity });
+                    core.invoke_or_log(Command::SpaceAppearanceSetOpacity {
+                        space_id,
+                        opacity: clamped,
+                    });
                 }
             }
+        };
+        let key_opacity = commit_opacity.clone();
+        let current_opacity = appearance.opacity;
+        let update_opacity_from_x = move |global_x: f32| {
+            let (x0, _, w, _) = *wave_area.peek();
+            let frac = ((global_x - x0 - 10.0) / (w - 20.0).max(1.0)).clamp(0.0, 1.0);
+            let opacity = MIN_GRADIENT_OPACITY + frac * (MAX_GRADIENT_OPACITY - MIN_GRADIENT_OPACITY);
+            commit_opacity(opacity);
         };
         let wave_down = update_opacity_from_x.clone();
         let wave_move = update_opacity_from_x;
@@ -577,6 +676,8 @@ impl Component for GradientGeneratorCard {
                     wave_area.set(next);
                 }
             })
+            .on_pointer_enter(move |_| wave_hovered.set_if_modified(true))
+            .on_pointer_leave(move |_| wave_hovered.set_if_modified(false))
             .on_pointer_down(move |e: Event<PointerEventData>| {
                 if is_default_empty || e.button() != Some(MouseButton::Left) {
                     return;
@@ -594,13 +695,39 @@ impl Component for GradientGeneratorCard {
                 if *dragging_wave.peek() {
                     dragging_wave.set(false);
                 }
+            })
+            .on_key_down(move |e: Event<KeyboardEventData>| {
+                if is_default_empty {
+                    return;
+                }
+                // GRD-04: Keyboard Arrow/Home/End control on Wave Slider.
+                let next = match e.key {
+                    Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowUp) => Some(current_opacity + 0.05),
+                    Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowDown) => Some(current_opacity - 0.05),
+                    Key::Named(NamedKey::Home) => Some(MIN_GRADIENT_OPACITY),
+                    Key::Named(NamedKey::End) => Some(MAX_GRADIENT_OPACITY),
+                    _ => None,
+                };
+                if let Some(op) = next {
+                    e.stop_propagation();
+                    key_opacity(op);
+                }
             });
 
         let tex_kind = appearance.texture_kind;
         let tex_amount = appearance.texture_amount;
+        let handle_len = dial_handle_anim.get().value();
         let dial_cb = RenderCallback::new(move |ctx| {
             if let RenderTarget::Background { canvas, .. } = &mut ctx.target {
-                paint_texture_dial(canvas, ctx.size.width, ctx.size.height, tex_kind, tex_amount, is_dark);
+                paint_texture_dial(
+                    canvas,
+                    ctx.size.width,
+                    ctx.size.height,
+                    tex_kind,
+                    tex_amount,
+                    is_dark,
+                    handle_len,
+                );
             }
         });
 
@@ -610,6 +737,12 @@ impl Component for GradientGeneratorCard {
         let dial_click_core = core.clone();
         let dial_click_app = appearance.clone();
         let dial_click_commit = commit_appearance.clone();
+        let dial_wheel_core = core.clone();
+        let dial_wheel_app = appearance.clone();
+        let dial_wheel_commit = commit_appearance.clone();
+        let dial_key_core = core.clone();
+        let dial_key_app = appearance.clone();
+        let dial_key_commit = commit_appearance.clone();
 
         let texture_dial = rect()
             .a11y_focusable(true)
@@ -634,6 +767,8 @@ impl Component for GradientGeneratorCard {
                     dial_area.set(next);
                 }
             })
+            .on_pointer_enter(move |_| dial_hovered.set_if_modified(true))
+            .on_pointer_leave(move |_| dial_hovered.set_if_modified(false))
             .on_pointer_down(move |e: Event<PointerEventData>| {
                 if e.button() != Some(MouseButton::Left) {
                     return;
@@ -683,7 +818,218 @@ impl Component for GradientGeneratorCard {
                         }
                     }
                 }
+            })
+            .on_wheel(move |e: Event<WheelEventData>| {
+                // GRD-02: Horizontal wheel cycles TextureKind; vertical wheel steps texture amount by ±1/16.
+                e.stop_propagation();
+                let mut next = dial_wheel_app.clone();
+                if e.delta_x.abs() >= e.delta_y.abs() && e.delta_x.abs() >= 0.15 {
+                    next.cycle_texture(e.delta_x < 0.0);
+                } else if e.delta_y.abs() >= 0.15 {
+                    let step = 1.0 / TEXTURE_DIAL_STEPS as f32;
+                    let next_amt = (next.texture_amount + if e.delta_y > 0.0 { step } else { -step }).clamp(0.0, 1.0);
+                    let kind = if next_amt > 0.0 && next.texture_kind == TextureKind::None {
+                        TextureKind::Grain
+                    } else {
+                        next.texture_kind
+                    };
+                    next.set_texture(kind, next_amt);
+                } else {
+                    return;
+                }
+                if for_draft {
+                    dial_wheel_commit(next);
+                } else {
+                    dial_wheel_core.invoke_or_log(Command::SpaceAppearanceSetTexture {
+                        space_id,
+                        kind: next.texture_kind,
+                        amount: next.texture_amount,
+                    });
+                }
+            })
+            .on_key_down(move |e: Event<KeyboardEventData>| {
+                // GRD-04: Keyboard Arrow/Home/End/Space/Enter control on Texture Dial.
+                let step = 1.0 / TEXTURE_DIAL_STEPS as f32;
+                let mut next = dial_key_app.clone();
+                let handled = match &e.key {
+                    Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowUp) => {
+                        let amt = (next.texture_amount + step).clamp(0.0, 1.0);
+                        let kind = if amt > 0.0 && next.texture_kind == TextureKind::None {
+                            TextureKind::Grain
+                        } else {
+                            next.texture_kind
+                        };
+                        next.set_texture(kind, amt);
+                        true
+                    }
+                    Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowDown) => {
+                        let amt = (next.texture_amount - step).clamp(0.0, 1.0);
+                        next.set_texture(next.texture_kind, amt);
+                        true
+                    }
+                    Key::Named(NamedKey::Home) => {
+                        next.set_texture(next.texture_kind, 0.0);
+                        true
+                    }
+                    Key::Named(NamedKey::End) => {
+                        let kind = if next.texture_kind == TextureKind::None {
+                            TextureKind::Grain
+                        } else {
+                            next.texture_kind
+                        };
+                        next.set_texture(kind, 1.0);
+                        true
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        next.cycle_texture(true);
+                        true
+                    }
+                    Key::Character(ch) if ch == " " => {
+                        next.cycle_texture(true);
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    e.stop_propagation();
+                    if for_draft {
+                        dial_key_commit(next);
+                    } else {
+                        dial_key_core.invoke_or_log(Command::SpaceAppearanceSetTexture {
+                            space_id,
+                            kind: next.texture_kind,
+                            amount: next.texture_amount,
+                        });
+                    }
+                }
             });
+
+        // GRD-03: Custom hex color input + removable custom color swatch chips.
+        let custom_apply_app = appearance.clone();
+        let custom_apply_commit = commit_appearance.clone();
+        let add_custom_color = move || {
+            let raw = custom_hex_draft.peek().clone();
+            let Some(rgb) = parse_custom_hex_color(&raw) else {
+                return;
+            };
+            let mut list = custom_colors.peek().clone();
+            if !list.contains(&rgb) {
+                list.push(rgb);
+                custom_colors.set(list);
+            }
+            custom_hex_draft.set(String::new());
+            let mut next = custom_apply_app.clone();
+            if next.dots.is_empty() {
+                next.add_dot(Some((180.0, 140.0)));
+            }
+            if let Some(first) = next.dots.first_mut() {
+                first.rgb = rgb;
+            }
+            custom_apply_commit(next);
+        };
+        let mut add_on_submit = add_custom_color.clone();
+        let mut add_on_press = add_custom_color;
+
+        let custom_chips = custom_colors.read().clone();
+        let custom_color_section = rect()
+            .width(Size::px(PAD_DISPLAY_SIZE))
+            .spacing(6.0)
+            .child(
+                rect()
+                    .width(Size::fill())
+                    .height(Size::px(30.0))
+                    .padding(Gaps::new(0.0, 4.0, 0.0, 8.0))
+                    .spacing(6.0)
+                    .direction(Direction::Horizontal)
+                    .content(Content::Flex)
+                    .cross_align(Alignment::center())
+                    .corner_radius(CornerRadius::new_all(7.0))
+                    .background(pad_bg)
+                    .child(
+                        TextField::new(custom_hex_draft)
+                            .a11y_id(custom_hex_a11y)
+                            .placeholder("Custom hex (#RRGGBB)")
+                            .width(Size::flex(1.0))
+                            .color(text_color)
+                            .placeholder_color(muted_icon)
+                            .on_submit(move |_| add_on_submit()),
+                    )
+                    .child(
+                        rect()
+                            .a11y_role(AccessibilityRole::Button)
+                            .a11y_alt("Add custom color")
+                            .width(Size::px(22.0))
+                            .height(Size::px(22.0))
+                            .corner_radius(CornerRadius::new_all(5.0))
+                            .background(if parse_custom_hex_color(&custom_hex_draft.read()).is_some() {
+                                theme.color(ThemeRole::Accent)
+                            } else {
+                                Color::TRANSPARENT
+                            })
+                            .center()
+                            .cursor(CursorIcon::Pointer)
+                            .on_press(move |e: Event<PressEventData>| {
+                                e.stop_propagation();
+                                add_on_press();
+                            })
+                            .child(Icon::new("plus").size(12.0).role(ThemeRole::Text)),
+                    ),
+            )
+            .maybe_child((!custom_chips.is_empty()).then(|| {
+                rect()
+                    .width(Size::fill())
+                    .direction(Direction::Horizontal)
+                    .spacing(6.0)
+                    .children(custom_chips.into_iter().enumerate().map(|(idx, rgb)| {
+                        let apply_app = appearance.clone();
+                        let apply_commit = commit_appearance.clone();
+                        let hex_str = format!("#{:02X}{:02X}{:02X}", rgb.0, rgb.1, rgb.2);
+                        rect()
+                            .key(format!("custom-{idx}-{hex_str}"))
+                            .padding(Gaps::new(3.0, 6.0, 3.0, 5.0))
+                            .spacing(5.0)
+                            .direction(Direction::Horizontal)
+                            .cross_align(Alignment::center())
+                            .corner_radius(CornerRadius::new_all(6.0))
+                            .background(pad_bg)
+                            .cursor(CursorIcon::Pointer)
+                            .on_press(move |e: Event<PressEventData>| {
+                                e.stop_propagation();
+                                let mut next = apply_app.clone();
+                                if next.dots.is_empty() {
+                                    next.add_dot(Some((180.0, 140.0)));
+                                }
+                                if let Some(first) = next.dots.first_mut() {
+                                    first.rgb = rgb;
+                                }
+                                apply_commit(next);
+                            })
+                            .child(
+                                rect()
+                                    .width(Size::px(12.0))
+                                    .height(Size::px(12.0))
+                                    .corner_radius(CornerRadius::new_all(3.0))
+                                    .background(Color::from_rgb(rgb.0, rgb.1, rgb.2)),
+                            )
+                            .child(label().text(hex_str).font_size(11.0).color(text_color))
+                            .child(
+                                rect()
+                                    .a11y_role(AccessibilityRole::Button)
+                                    .a11y_alt("Remove custom color")
+                                    .width(Size::px(14.0))
+                                    .height(Size::px(14.0))
+                                    .center()
+                                    .on_press(move |e: Event<PressEventData>| {
+                                        e.stop_propagation();
+                                        let mut next_list = custom_colors.peek().clone();
+                                        next_list.retain(|c| *c != rgb);
+                                        custom_colors.set(next_list);
+                                    })
+                                    .child(Icon::new("close").size(9.0).role(ThemeRole::TextMuted)),
+                            )
+                            .into_element()
+                    }))
+            }));
 
         let controls_row = rect()
             .width(Size::px(PAD_DISPLAY_SIZE))
@@ -701,7 +1047,7 @@ impl Component for GradientGeneratorCard {
             .width(Size::px(GRADIENT_PANEL_WIDTH))
             .padding(Gaps::new_all(PANEL_PADDING))
             .spacing(10.0)
-            .corner_radius(CornerRadius::new_all(12.0))
+            .corner_radius(CornerRadius::new_all(8.0))
             .background(panel_bg)
             .border(
                 Border::new()
@@ -720,6 +1066,7 @@ impl Component for GradientGeneratorCard {
             .child(color_pad)
             .child(swatches_row)
             .child(controls_row)
+            .maybe_child(show_custom_hex().then_some(custom_color_section))
     }
 
     fn render_key(&self) -> DiffKey {
@@ -857,6 +1204,7 @@ impl Component for PadActionButton {
 #[derive(Clone, PartialEq)]
 struct PadColorDot {
     dot: GradientDot,
+    is_dragging: bool,
     on_drag_start: EventHandler<()>,
     on_remove: EventHandler<()>,
     key: DiffKey,
@@ -874,16 +1222,71 @@ impl Component for PadColorDot {
         let size = if self.dot.is_primary { 38.0 } else { 22.0 };
         let border_w = if self.dot.is_primary { 5.5 } else { 3.0 };
         let scale = PAD_DISPLAY_SIZE / PAD_COORD_SIZE;
-        let left = (self.dot.x * scale - size * 0.5).clamp(4.0, PAD_DISPLAY_SIZE - size - 4.0);
-        let top = (self.dot.y * scale - size * 0.5).clamp(4.0, PAD_DISPLAY_SIZE - size - 4.0);
+        let target_left = (self.dot.x * scale - size * 0.5).clamp(4.0, PAD_DISPLAY_SIZE - size - 4.0);
+        let target_top = (self.dot.y * scale - size * 0.5).clamp(4.0, PAD_DISPLAY_SIZE - size - 4.0);
         let is_primary = self.dot.is_primary;
+        let is_dragging = self.is_dragging;
         let on_drag_start = self.on_drag_start.clone();
         let on_remove = self.on_remove.clone();
 
+        // GRD-01: Spring-interpolate dot coordinates over 400ms on add/remove/harmony/preset changes; snap while dragging.
+        let last_pos = use_hook(|| Cell::new((target_left, target_top)));
+        let (from_left, from_top) = last_pos.get();
+        let pos_key = (target_left.round() as i32, target_top.round() as i32);
+        let pos_anim = use_animation_with_dependencies(&pos_key, move |conf, _| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let dur = if is_dragging {
+                Duration::from_millis(1)
+            } else {
+                motion::GRADIENT_DOT_SPRING
+            };
+            (
+                AnimNum::new(from_left, target_left)
+                    .duration(dur)
+                    .ease(Ease::Out)
+                    .function(motion::ease_out_fn()),
+                AnimNum::new(from_top, target_top)
+                    .duration(dur)
+                    .ease(Ease::Out)
+                    .function(motion::ease_out_fn()),
+            )
+        });
+        let (cur_left, cur_top) = if is_dragging {
+            (target_left, target_top)
+        } else {
+            let a = pos_anim.get();
+            (a.0.value(), a.1.value())
+        };
+        last_pos.set((cur_left, cur_top));
+
+        // GRD-01: Center-anchored dot scale (1.05 hover over 200ms, 1.20 dragging).
+        let target_scale: f32 = if is_dragging {
+            1.20
+        } else if hovered() && is_primary {
+            1.05
+        } else {
+            1.0
+        };
+        let last_scale = use_hook(|| Cell::new(target_scale));
+        let from_scale = last_scale.get();
+        let scale_anim = use_animation_with_dependencies(&((target_scale * 100.0).round() as i32), move |conf, pct| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let to = (*pct as f32) / 100.0;
+            AnimNum::new(from_scale, to)
+                .duration(motion::GRADIENT_DOT_HOVER)
+                .ease(Ease::Out)
+                .function(Function::Quad)
+        });
+        let cur_scale = scale_anim.get().value();
+        last_scale.set(cur_scale);
+
         rect()
-            .position(Position::new_absolute().left(left).top(top))
-            .width(Size::px(if hovered() && is_primary { size + 2.0 } else { size }))
-            .height(Size::px(if hovered() && is_primary { size + 2.0 } else { size }))
+            .position(Position::new_absolute().left(cur_left).top(cur_top))
+            .width(Size::px(size))
+            .height(Size::px(size))
+            .scale(cur_scale)
             .corner_radius(CornerRadius::new_all(999.0))
             .background(Color::from_rgb(self.dot.rgb.0, self.dot.rgb.1, self.dot.rgb.2))
             .border(
@@ -899,7 +1302,9 @@ impl Component for PadColorDot {
                     .blur(8.0)
                     .color(Color::from_argb(100, 0, 0, 0)),
             )
-            .cursor(if is_primary {
+            .cursor(if is_dragging {
+                CursorIcon::Grabbing
+            } else if is_primary {
                 CursorIcon::Grab
             } else {
                 CursorIcon::Pointer
@@ -941,8 +1346,31 @@ impl Component for PresetSwatch {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let mut hovered = use_state(|| false);
+        let mut pressed = use_state(|| false);
         let preset = self.preset;
         let on_press = self.on_press.clone();
+
+        // GRD-05: Preset swatch scales 1.05 on hover / 0.95 on active press over 100ms.
+        let target_scale: f32 = if pressed() {
+            0.95
+        } else if hovered() {
+            1.05
+        } else {
+            1.0
+        };
+        let last_scale = use_hook(|| Cell::new(target_scale));
+        let from_scale = last_scale.get();
+        let scale_anim = use_animation_with_dependencies(&((target_scale * 100.0).round() as i32), move |conf, pct| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let to = (*pct as f32) / 100.0;
+            AnimNum::new(from_scale, to)
+                .duration(Duration::from_millis(100))
+                .ease(Ease::Out)
+                .function(Function::Quad)
+        });
+        let cur_scale = scale_anim.get().value();
+        last_scale.set(cur_scale);
 
         let swatch_cb = RenderCallback::new(move |ctx| {
             if let RenderTarget::Background { canvas, .. } = &mut ctx.target {
@@ -964,6 +1392,7 @@ impl Component for PresetSwatch {
             .a11y_alt(format!("Color preset page {} item {}", self.page + 1, self.index + 1))
             .width(Size::px(26.0))
             .height(Size::px(26.0))
+            .scale(cur_scale)
             .corner_radius(CornerRadius::new_all(999.0))
             .overflow(Overflow::Clip)
             .background(Fill::Callback(swatch_cb))
@@ -975,7 +1404,12 @@ impl Component for PresetSwatch {
             )
             .cursor(CursorIcon::Pointer)
             .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_pointer_leave(move |_| {
+                hovered.set_if_modified(false);
+                pressed.set_if_modified(false);
+            })
+            .on_pointer_down(move |_| pressed.set_if_modified(true))
+            .on_global_pointer_up(move |_| pressed.set_if_modified(false))
             .on_press(move |e: Event<PressEventData>| {
                 e.stop_propagation();
                 on_press.call(());
@@ -1147,7 +1581,15 @@ fn paint_preset_swatch(canvas: &Canvas, width: f32, height: f32, preset: Gradien
     }
 }
 
-fn paint_wave_slider(canvas: &Canvas, width: f32, height: f32, intensity: f32, is_dark: bool, show_thumb: bool) {
+fn paint_wave_slider(
+    canvas: &Canvas,
+    width: f32,
+    height: f32,
+    intensity: f32,
+    is_dark: bool,
+    show_thumb: bool,
+    thumb_scale: f32,
+) {
     let pad_x = 10.0;
     let track_w = (width - pad_x * 2.0).max(10.0);
     let cy = height * 0.5;
@@ -1218,8 +1660,8 @@ fn paint_wave_slider(canvas: &Canvas, width: f32, height: f32, intensity: f32, i
     canvas.restore_to_count(save);
 
     if show_thumb {
-        let thumb_w = 8.0 + intensity.clamp(0.0, 1.0) * 6.0;
-        let thumb_h = 30.0 + intensity.clamp(0.0, 1.0) * 10.0;
+        let thumb_w = (7.0 + intensity.clamp(0.0, 1.0) * 4.0) * thumb_scale;
+        let thumb_h = (22.0 + intensity.clamp(0.0, 1.0) * 8.0) * thumb_scale;
         let mut thumb_paint = Paint::default();
         thumb_paint.set_anti_alias(true);
         thumb_paint.set_style(PaintStyle::Fill);
@@ -1237,7 +1679,15 @@ fn paint_wave_slider(canvas: &Canvas, width: f32, height: f32, intensity: f32, i
     }
 }
 
-fn paint_texture_dial(canvas: &Canvas, width: f32, height: f32, kind: TextureKind, amount: f32, is_dark: bool) {
+fn paint_texture_dial(
+    canvas: &Canvas,
+    width: f32,
+    height: f32,
+    kind: TextureKind,
+    amount: f32,
+    is_dark: bool,
+    handle_len: f32,
+) {
     let cx = width * 0.5;
     let cy = height * 0.5;
     let outer_r = (width.min(height) * 0.5) - 5.0;
@@ -1342,7 +1792,7 @@ fn paint_texture_dial(canvas: &Canvas, width: f32, height: f32, kind: TextureKin
     } else {
         SkColor::from_rgb(117, 117, 117)
     });
-    let rr = RRect::new_rect_xy(SkRect::from_xywh(-2.6, -5.5, 5.2, 11.0), 2.0, 2.0);
+    let rr = RRect::new_rect_xy(SkRect::from_xywh(-2.6, -handle_len * 0.5, 5.2, handle_len), 2.0, 2.0);
     canvas.draw_rrect(rr, &handle_paint);
     canvas.restore_to_count(save);
 }
@@ -1385,5 +1835,17 @@ fn paint_backdrop_texture(canvas: &Canvas, width: f32, height: f32, kind: Textur
         }
         y += spacing;
         row += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_hex_color_parser_handles_3_and_6_digit_hex() {
+        assert_eq!(parse_custom_hex_color("#ff8040"), Some((255, 128, 64)));
+        assert_eq!(parse_custom_hex_color("0f8"), Some((0, 255, 136)));
+        assert_eq!(parse_custom_hex_color("not-a-color"), None);
     }
 }

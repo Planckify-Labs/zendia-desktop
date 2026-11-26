@@ -10,7 +10,7 @@
 
 use crate::commands::CommandDescriptor;
 use crate::contributions::{ContributionId, ContributionSource, PaletteEntry};
-use crate::model::{BookmarkId, BrowserModel, HistoryEntryId, SpaceId, TabId};
+use crate::model::{BookmarkId, BrowserModel, FolderId, HistoryEntryId, SpaceId, TabId, TabKind, ThemeScheme};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use zendia_keymap::KeyTable;
@@ -313,6 +313,11 @@ pub enum AddressBarResultKind {
         bookmark_id: BookmarkId,
         url: String,
     },
+    Folder {
+        folder_id: FolderId,
+        space_id: SpaceId,
+        space_name: String,
+    },
     Action {
         command: String,
         command_args: Vec<(String, String)>,
@@ -332,8 +337,10 @@ pub struct AddressBarResult {
     /// True for the primary heuristic top row (search or direct URL) that receives Zen's accent selection highlight.
     pub heuristic: bool,
     pub shortcut_hint: Option<String>,
-    /// Trailing action chip text (such as `"Switch to Tab"`).
+    /// Trailing action chip text (such as `"Switch to Tab"` or `"Open"`).
     pub badge_text: Option<String>,
+    /// Optional accent RGB tint for the trailing action pill (used for workspace switch pills).
+    pub badge_accent: Option<(u8, u8, u8)>,
 }
 
 /// One filtered and ranked item computed by `BrowserCore` for the command palette / Actions mode.
@@ -347,6 +354,8 @@ pub struct ResolvedPaletteItem {
     pub command: String,
     pub command_args: Vec<(String, String)>,
     pub shortcut_hint: Option<String>,
+    pub badge_text: Option<String>,
+    pub badge_accent: Option<(u8, u8, u8)>,
     pub score: i32,
 }
 
@@ -517,6 +526,7 @@ pub fn query_address_bar(
                 heuristic: false,
                 shortcut_hint: None,
                 badge_text: None,
+                badge_accent: None,
             });
             if results.len() >= max_results {
                 return results;
@@ -548,6 +558,7 @@ pub fn query_address_bar(
                 heuristic: false,
                 shortcut_hint: None,
                 badge_text: None,
+                badge_accent: None,
             });
             if results.len() >= max_results {
                 break;
@@ -581,6 +592,7 @@ pub fn query_address_bar(
                     heuristic: true,
                     shortcut_hint: None,
                     badge_text: None,
+                    badge_accent: None,
                 });
             }
             LocationInputKind::Search { query, search_url } => {
@@ -598,6 +610,7 @@ pub fn query_address_bar(
                     heuristic: true,
                     shortcut_hint: None,
                     badge_text: None,
+                    badge_accent: None,
                 });
             }
         }
@@ -661,6 +674,42 @@ pub fn query_address_bar(
             heuristic: false,
             shortcut_hint: None,
             badge_text: Some("Switch to Tab".to_string()),
+            badge_accent: None,
+        });
+    }
+
+    // 2b. Sidebar folders (matching ZenUBSidebarProvider.#addFolders).
+    for folder in &model.folders {
+        let space_name = model
+            .space(folder.space_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "Space".to_string());
+        let match_score = token_match_score(&tokens, &folder.name, &space_name);
+        if match_score == 0 {
+            continue;
+        }
+        let space_accent = model
+            .space(folder.space_id)
+            .and_then(|s| s.gradient.stops.first().copied());
+        secondary.push(AddressBarResult {
+            id: format!("folder:{}", folder.id.0),
+            kind: AddressBarResultKind::Folder {
+                folder_id: folder.id,
+                space_id: folder.space_id,
+                space_name: space_name.clone(),
+            },
+            title: folder.name.clone(),
+            subtitle: Some(format!("{space_name} / Folder")),
+            icon: Some(if folder.icon.is_empty() {
+                "folder".to_string()
+            } else {
+                folder.icon.clone()
+            }),
+            score: 650 + match_score,
+            heuristic: false,
+            shortcut_hint: None,
+            badge_text: Some("Open".to_string()),
+            badge_accent: space_accent,
         });
     }
 
@@ -687,6 +736,7 @@ pub fn query_address_bar(
             heuristic: false,
             shortcut_hint: None,
             badge_text: None,
+            badge_accent: None,
         });
     }
 
@@ -714,38 +764,71 @@ pub fn query_address_bar(
             heuristic: false,
             shortcut_hint: None,
             badge_text: None,
+            badge_accent: None,
         });
     }
 
-    // 5. Inline quick actions (matching ZenUBActionsProvider: >= 3 chars, non-protocol, high score).
+    // 5. Inline quick actions (matching ZenUBActionsProvider: >= 3 chars, non-protocol, high score),
+    //    including dynamic workspace-switch ("Focus on <Space>") and extension actions.
     if trimmed.len() >= 3 && parse_explicit_scheme(trimmed).is_none() {
-        let mut action_matches = Vec::new();
+        let mut action_matches: Vec<(i32, AddressBarResult)> = Vec::new();
         for entry in &model.contributions.palette_entries {
+            if !is_palette_entry_available(model, entry) {
+                continue;
+            }
             let score = fuzzy_score(&entry.title, trimmed);
             if score > INLINE_ACTION_MIN_SCORE {
                 let shortcut_hint = key_table
                     .and_then(|table| shortcut_for_command_with_args(table, &entry.command, &entry.command_args))
                     .or_else(|| entry.shortcut_hint.clone());
-                action_matches.push((score, entry, shortcut_hint));
+                action_matches.push((
+                    score,
+                    AddressBarResult {
+                        id: format!("action:{}", entry.id.as_str()),
+                        kind: AddressBarResultKind::Action {
+                            command: entry.command.clone(),
+                            command_args: entry.command_args.clone(),
+                            shortcut_hint: shortcut_hint.clone(),
+                        },
+                        title: entry.title.clone(),
+                        subtitle: Some("Action".to_string()),
+                        icon: entry.icon.clone().or_else(|| Some("sparkles".to_string())),
+                        score: 350 + score.min(300),
+                        heuristic: false,
+                        shortcut_hint,
+                        badge_text: None,
+                        badge_accent: None,
+                    },
+                ));
+            }
+        }
+        for dyn_item in dynamic_space_and_extension_actions(model) {
+            let score = fuzzy_score(&dyn_item.title, trimmed);
+            if score > INLINE_ACTION_MIN_SCORE {
+                action_matches.push((
+                    score,
+                    AddressBarResult {
+                        id: format!("action:{}", dyn_item.id),
+                        kind: AddressBarResultKind::Action {
+                            command: dyn_item.command,
+                            command_args: dyn_item.command_args,
+                            shortcut_hint: None,
+                        },
+                        title: dyn_item.title,
+                        subtitle: dyn_item.detail,
+                        icon: dyn_item.icon,
+                        score: 360 + score.min(300),
+                        heuristic: false,
+                        shortcut_hint: None,
+                        badge_text: dyn_item.badge_text,
+                        badge_accent: dyn_item.badge_accent,
+                    },
+                ));
             }
         }
         action_matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
-        for (raw_score, entry, shortcut_hint) in action_matches.into_iter().take(2) {
-            secondary.push(AddressBarResult {
-                id: format!("action:{}", entry.id.as_str()),
-                kind: AddressBarResultKind::Action {
-                    command: entry.command.clone(),
-                    command_args: entry.command_args.clone(),
-                    shortcut_hint: shortcut_hint.clone(),
-                },
-                title: entry.title.clone(),
-                subtitle: Some("Action".to_string()),
-                icon: entry.icon.clone().or_else(|| Some("sparkles".to_string())),
-                score: 350 + raw_score.min(300),
-                heuristic: false,
-                shortcut_hint,
-                badge_text: None,
-            });
+        for (_, item) in action_matches.into_iter().take(2) {
+            secondary.push(item);
         }
     }
 
@@ -814,6 +897,15 @@ pub fn builtin_palette_entries() -> Vec<PaletteEntry> {
             "Layout",
             "split",
             "split.new_empty",
+            Vec::new(),
+        ),
+        palette_entry(
+            "zen.action.unsplit_view",
+            "Expand Current View",
+            "Unsplit the active split view into separate tabs",
+            "Layout",
+            "split",
+            "split.unsplit",
             Vec::new(),
         ),
         palette_entry(
@@ -907,12 +999,21 @@ pub fn builtin_palette_entries() -> Vec<PaletteEntry> {
             Vec::new(),
         ),
         palette_entry(
-            "zen.action.toggle_pin_tab",
-            "Pin / Unpin Tab",
-            "Toggle pinned state on the active tab",
+            "zen.action.pin_tab",
+            "Pin Tab",
+            "Pin the active tab to the current space",
             "Tabs",
             "pin",
-            "tab.toggle_pin",
+            "tab.pin",
+            Vec::new(),
+        ),
+        palette_entry(
+            "zen.action.unpin_tab",
+            "Unpin Tab",
+            "Unpin the active tab back to normal tabs",
+            "Tabs",
+            "unpin",
+            "tab.unpin",
             Vec::new(),
         ),
         palette_entry(
@@ -1024,12 +1125,21 @@ pub fn builtin_palette_entries() -> Vec<PaletteEntry> {
             Vec::new(),
         ),
         palette_entry(
-            "zen.action.toggle_essential",
-            "Toggle Essential Tab",
-            "Add or remove the active tab from essentials",
+            "zen.action.add_to_essentials",
+            "Add to Essentials",
+            "Pin the active tab to the essentials grid",
             "Tabs",
             "essential-add",
-            "tab.toggle_essential",
+            "tab.add_to_essentials",
+            Vec::new(),
+        ),
+        palette_entry(
+            "zen.action.remove_from_essentials",
+            "Remove from Essentials",
+            "Remove the active tab from the essentials grid",
+            "Tabs",
+            "essential-remove",
+            "tab.remove_from_essentials",
             Vec::new(),
         ),
         palette_entry(
@@ -1105,6 +1215,15 @@ pub fn builtin_palette_entries() -> Vec<PaletteEntry> {
             Vec::new(),
         ),
         palette_entry(
+            "zendia.palette.toggle_agents",
+            "Toggle Agents Panel",
+            "Open or close the cross-window agents roster panel",
+            "Agents",
+            "agents",
+            "agents.toggle",
+            Vec::new(),
+        ),
+        palette_entry(
             "zendia.palette.toggle_webchat",
             "Toggle Web Chat Panel",
             "Open ChatGPT, Gemini, or another chat site",
@@ -1153,6 +1272,80 @@ fn default_icon_for_command(name: &str) -> &'static str {
     }
 }
 
+/// Evaluates Zen's context-aware `isAvailable` rules against the current browser model.
+pub fn is_palette_entry_available(model: &BrowserModel, entry: &PaletteEntry) -> bool {
+    let active_tab = model.active_tab();
+    let has_active_tab = active_tab.is_some();
+    let active_folders = model
+        .active_space
+        .map(|sid| model.folders_in_space(sid))
+        .unwrap_or_default();
+
+    match entry.id.as_str() {
+        "zen.action.unsplit_view" => model.active_split_group().is_some(),
+        "zen.action.collapse_all_folders" => active_folders.iter().any(|f| !f.collapsed),
+        "zen.action.expand_all_folders" => active_folders.iter().any(|f| f.collapsed),
+        "zen.action.pin_tab" => active_tab.is_some_and(|t| t.kind == TabKind::Normal),
+        "zen.action.unpin_tab" => active_tab.is_some_and(|t| t.kind == TabKind::Pinned),
+        "zen.action.add_to_essentials" => active_tab.is_some_and(|t| t.kind != TabKind::Essential),
+        "zen.action.remove_from_essentials" => active_tab.is_some_and(|t| t.kind == TabKind::Essential),
+        "zen.action.next_space" | "zen.action.previous_space" => model.spaces.len() > 1,
+        "zen.action.theme_auto" => model.theme.scheme != ThemeScheme::System,
+        "zen.action.theme_light" => model.theme.scheme != ThemeScheme::Light,
+        "zen.action.theme_dark" => model.theme.scheme != ThemeScheme::Dark,
+        "zen.action.close_tab"
+        | "zen.action.duplicate_tab"
+        | "zen.action.capture_screenshot"
+        | "zen.action.find_in_page"
+        | "zen.action.print" => has_active_tab,
+        _ => true,
+    }
+}
+
+/// Synthesizes dynamic workspace-switch (`Focus on <Space>`) and enabled extension (`Extension <Name>`) actions,
+/// matching Zen's `ZenUBActionsProvider`.
+fn dynamic_space_and_extension_actions(model: &BrowserModel) -> Vec<ResolvedPaletteItem> {
+    let mut out = Vec::new();
+    for space in &model.spaces {
+        if Some(space.id) == model.active_space {
+            continue;
+        }
+        let accent = space.gradient.stops.first().copied();
+        out.push(ResolvedPaletteItem {
+            id: format!("zen.action.space.{}", space.id.0),
+            title: format!("Focus on {}", space.name),
+            detail: Some(format!("Switch to workspace {}", space.name)),
+            category: "Spaces".to_string(),
+            icon: Some(space.icon.clone()),
+            command: "space.switch".to_string(),
+            command_args: vec![("space_id".to_string(), space.id.0.to_string())],
+            shortcut_hint: None,
+            badge_text: Some(space.name.clone()),
+            badge_accent: accent,
+            score: 0,
+        });
+    }
+    for ext in &model.extensions {
+        if !ext.enabled {
+            continue;
+        }
+        out.push(ResolvedPaletteItem {
+            id: format!("zen.action.extension.{}", ext.id.0),
+            title: format!("Extension {}", ext.name),
+            detail: Some(format!("Run {} extension action", ext.name)),
+            category: "Extensions".to_string(),
+            icon: Some(ext.icon.clone()),
+            command: "extension.invoke_action".to_string(),
+            command_args: vec![("extension_id".to_string(), ext.id.0.clone())],
+            shortcut_hint: None,
+            badge_text: Some("Extension".to_string()),
+            badge_accent: None,
+            score: 0,
+        });
+    }
+    out
+}
+
 /// Builds and fuzzy-filters command palette items from contributed palette entries and all registered core commands,
 /// resolving each item's shortcut from `key_table`.
 pub fn query_palette(
@@ -1165,9 +1358,14 @@ pub fn query_palette(
     let mut covered_commands: HashSet<String> = HashSet::new();
 
     // 1. Contributed palette entries (Zen global actions, plugin/extension palette contributions) in curated order.
+    covered_commands.insert("tab.toggle_pin".to_string());
+    covered_commands.insert("tab.toggle_essential".to_string());
     for entry in &model.contributions.palette_entries {
         if entry.command_args.is_empty() {
             covered_commands.insert(entry.command.clone());
+        }
+        if !is_palette_entry_available(model, entry) {
+            continue;
         }
         let shortcut_hint = key_table
             .and_then(|table| shortcut_for_command_with_args(table, &entry.command, &entry.command_args))
@@ -1181,9 +1379,14 @@ pub fn query_palette(
             command: entry.command.clone(),
             command_args: entry.command_args.clone(),
             shortcut_hint,
+            badge_text: None,
+            badge_accent: None,
             score: 0,
         });
     }
+
+    // 1b. Dynamic workspace-switch and extension actions.
+    items.extend(dynamic_space_and_extension_actions(model));
 
     // 2. Remaining registered commands from the registry so every zero-arg/defaultable command is reachable.
     for desc in commands {
@@ -1218,6 +1421,8 @@ pub fn query_palette(
             command: desc.name.clone(),
             command_args: Vec::new(),
             shortcut_hint,
+            badge_text: None,
+            badge_accent: None,
             score: 0,
         });
     }
@@ -1400,5 +1605,60 @@ mod tests {
         assert!(fuzzy_score("Close Tab", "close tab") > fuzzy_score("Reopen Closed Tab", "close tab"));
         assert!(fuzzy_score("Toggle Compact Mode", "toggle") > fuzzy_score("Sidebar Toggle", "toggle"));
         assert_eq!(fuzzy_score("New Space", "xyz"), 0);
+    }
+
+    #[test]
+    fn address_bar_matches_folders_workspaces_and_extensions() {
+        let model = sample_model(true);
+        let key_table = KeyTable::standard();
+
+        // Folder search (AR-04).
+        let folder_name = model.folders[0].name.clone();
+        let folder_hits = query_address_bar(&model, &folder_name, Some(&key_table), 8);
+        assert!(
+            folder_hits
+                .iter()
+                .any(|r| matches!(r.kind, AddressBarResultKind::Folder { .. })
+                    && r.badge_text.as_deref() == Some("Open")),
+            "expected folder match for `{folder_name}`: {folder_hits:?}"
+        );
+
+        // Workspace switch action (AR-05).
+        let space_hits = query_address_bar(&model, "Focus on Work", Some(&key_table), 8);
+        assert!(
+            space_hits
+                .iter()
+                .any(|r| matches!(&r.kind, AddressBarResultKind::Action { command, .. } if command == "space.switch")),
+            "expected space.switch inline action: {space_hits:?}"
+        );
+
+        // Extension action (AR-05).
+        let ext_hits = query_address_bar(&model, "Extension uBlock", Some(&key_table), 8);
+        assert!(
+            ext_hits.iter().any(|r| matches!(
+                &r.kind,
+                AddressBarResultKind::Action { command, .. } if command == "extension.invoke_action"
+            )),
+            "expected extension.invoke_action inline action: {ext_hits:?}"
+        );
+    }
+
+    #[test]
+    fn palette_filters_context_aware_actions() {
+        let mut model = sample_model(true);
+        let commands = builtin_command_descriptors();
+        let key_table = KeyTable::standard();
+
+        // Default model: no active split, active tab is normal, theme is Dark.
+        model.theme.scheme = ThemeScheme::Dark;
+        let items = query_palette(&model, &commands, "", Some(&key_table));
+        assert!(!items.iter().any(|i| i.id == "zen.action.unsplit_view"));
+        assert!(items.iter().any(|i| i.title == "Pin Tab"));
+        assert!(!items.iter().any(|i| i.title == "Unpin Tab"));
+        assert!(items.iter().any(|i| i.title == "Add to Essentials"));
+        assert!(!items.iter().any(|i| i.title == "Remove from Essentials"));
+        assert!(!items.iter().any(|i| i.id == "zen.action.theme_dark"));
+        assert!(items.iter().any(|i| i.id == "zen.action.theme_light"));
+        assert!(items.iter().any(|i| i.title == "Focus on Work"));
     }
 }

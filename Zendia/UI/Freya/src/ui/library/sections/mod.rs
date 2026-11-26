@@ -16,11 +16,16 @@ use zendia_browser_core::library::LibrarySection;
 
 /// Width of a section's body next to the rail.
 pub fn width(section: LibrarySection) -> f32 {
+    width_for(section, 2, 1280.0)
+}
+
+/// Width of a section's body next to the rail given the current space count and window width (`LIB-SH-03`).
+pub fn width_for(section: LibrarySection, space_count: usize, viewport_width: f32) -> f32 {
     match section {
         LibrarySection::History => history::WIDTH,
         LibrarySection::Downloads => downloads::WIDTH,
         LibrarySection::Media => media::WIDTH,
-        LibrarySection::Spaces => spaces::WIDTH,
+        LibrarySection::Spaces => spaces::dynamic_width(space_count, viewport_width),
         LibrarySection::SpaceRouting => space_routing::WIDTH,
     }
 }

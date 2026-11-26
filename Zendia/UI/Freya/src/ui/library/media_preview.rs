@@ -10,13 +10,14 @@
 
 use crate::ui::chrome::menus::{OpenContextMenu, try_use_menu_state};
 use crate::ui::core_view::use_core;
+use crate::ui::kit::focus_trap::handle_modal_tab_key;
 use crate::ui::kit::icons::prepared_icon_bytes;
+use crate::ui::kit::popup_presence::use_last_some;
 use crate::ui::kit::{Icon, IconButton};
 use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedScheme, ThemeRole, motion, use_theme};
 use freya::animation::*;
 use freya::prelude::*;
 use std::path::PathBuf;
-use std::time::Duration;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::downloads::{current_unix_seconds, format_bytes};
 use zendia_browser_core::events::ViewRequest;
@@ -25,9 +26,6 @@ use zendia_browser_core::library_media::{
     format_duration, format_relative_date, step_media_id,
 };
 use zendia_browser_core::model::LibraryMediaId;
-
-/// Zen's `MORPH_MS` open and close duration (`250 ms`).
-const PREVIEW_MOTION: Duration = Duration::from_millis(250);
 
 /// Per-window view state for the library's full-size media preview overlay.
 #[derive(Clone, Copy, PartialEq)]
@@ -99,15 +97,32 @@ impl Component for MediaPreviewOverlay {
         let theme = use_theme();
         let preview_state = try_use_media_preview_state();
         let menu_state = try_use_menu_state();
+        let close_btn_id = use_hook(AccessibilityId::new_unique);
+        let prev_btn_id = use_hook(AccessibilityId::new_unique);
+        let next_btn_id = use_hook(AccessibilityId::new_unique);
+        let open_btn_id = use_hook(AccessibilityId::new_unique);
+        let show_btn_id = use_hook(AccessibilityId::new_unique);
+        let copy_btn_id = use_hook(AccessibilityId::new_unique);
 
         let is_open = preview_state.is_some_and(|s| s.is_open());
         let current_id = preview_state.and_then(|s| *s.current_id.read());
+        let items = core.model().read().library_media.clone();
+        let live_snapshot: Option<(LibraryMediaItem, usize, usize)> = if is_open {
+            current_id
+                .and_then(|id| items.iter().position(|item| item.id == id))
+                .or_else(|| (!items.is_empty()).then_some(0))
+                .map(|idx| (items[idx].clone(), idx, items.len()))
+        } else {
+            None
+        };
+        let cached_snapshot = use_last_some(&live_snapshot);
+
         let anim = use_animation_with_dependencies(&is_open, move |conf, open| {
             conf.on_creation(OnCreation::Finish);
             conf.on_change(OnChange::Rerun);
             let (from, to) = if *open { (0.0, 1.0) } else { (1.0, 0.0) };
             AnimNum::new(from, to)
-                .duration(PREVIEW_MOTION)
+                .duration(motion::MEDIA_PREVIEW_MORPH)
                 .ease(Ease::Out)
                 .function(motion::ease_out_fn())
         });
@@ -117,17 +132,13 @@ impl Component for MediaPreviewOverlay {
             return rect().into_element();
         }
 
-        let items = core.model().read().library_media.clone();
-        let current_index = current_id
-            .and_then(|id| items.iter().position(|item| item.id == id))
-            .or_else(|| (!items.is_empty()).then_some(0));
-        let Some(index) = current_index else {
+        let Some((item, index, total)) = cached_snapshot else {
             return rect().into_element();
         };
-        let item = items[index].clone();
-        let total = items.len();
         let has_prev = index > 0;
         let has_next = index + 1 < total;
+        let first_media_id = items.first().map(|i| i.id);
+        let last_media_id = items.last().map(|i| i.id);
 
         let root_size = *Platform::get().current_window().root_size.read();
         let panel_width = (root_size.width * 0.72).clamp(520.0, 960.0);
@@ -165,10 +176,22 @@ impl Component for MediaPreviewOverlay {
         let stage_next_core = core.clone();
         let media_id = item.id;
 
+        let focus_ring = vec![
+            close_btn_id,
+            prev_btn_id,
+            next_btn_id,
+            open_btn_id,
+            show_btn_id,
+            copy_btn_id,
+        ];
         let on_global_key_down = move |e: Event<KeyboardEventData>| {
             if !is_open {
                 return;
             }
+            if handle_modal_tab_key(&e, &focus_ring) {
+                return;
+            }
+            let vim_enabled = key_core.model().peek().vim_mode_enabled;
             match &e.key {
                 Key::Named(NamedKey::Escape) => {
                     e.stop_propagation();
@@ -182,15 +205,27 @@ impl Component for MediaPreviewOverlay {
                     e.stop_propagation();
                     key_core.invoke_or_log(Command::LibraryMediaPreviewStep { delta: 1 });
                 }
-                Key::Character(ch) if ch == "q" && e.modifiers.is_empty() => {
+                Key::Named(NamedKey::Home) => {
+                    e.stop_propagation();
+                    if let Some(first_id) = first_media_id {
+                        key_core.invoke_or_log(Command::LibraryMediaPreviewOpen { media_id: first_id });
+                    }
+                }
+                Key::Named(NamedKey::End) => {
+                    e.stop_propagation();
+                    if let Some(last_id) = last_media_id {
+                        key_core.invoke_or_log(Command::LibraryMediaPreviewOpen { media_id: last_id });
+                    }
+                }
+                Key::Character(ch) if vim_enabled && ch == "q" && e.modifiers.is_empty() => {
                     e.stop_propagation();
                     key_core.invoke_or_log(Command::LibraryMediaPreviewClose);
                 }
-                Key::Character(ch) if ch == "h" && e.modifiers.is_empty() => {
+                Key::Character(ch) if vim_enabled && ch == "h" && e.modifiers.is_empty() => {
                     e.stop_propagation();
                     key_core.invoke_or_log(Command::LibraryMediaPreviewStep { delta: -1 });
                 }
-                Key::Character(ch) if ch == "l" && e.modifiers.is_empty() => {
+                Key::Character(ch) if vim_enabled && ch == "l" && e.modifiers.is_empty() => {
                     e.stop_propagation();
                     key_core.invoke_or_log(Command::LibraryMediaPreviewStep { delta: 1 });
                 }
@@ -215,33 +250,39 @@ impl Component for MediaPreviewOverlay {
             .cross_align(Alignment::center())
             .spacing(8.0)
             .child(
-                IconButton::new("close", "Close preview")
-                    .size(28.0)
-                    .icon_size(14.0)
-                    .on_press({
-                        let c = core.clone();
-                        move |_| {
-                            c.invoke_or_log(Command::LibraryMediaPreviewClose);
-                        }
-                    }),
+                rect().a11y_id(close_btn_id).a11y_focusable(true).child(
+                    IconButton::new("close", "Close preview")
+                        .size(28.0)
+                        .icon_size(14.0)
+                        .on_press({
+                            let c = core.clone();
+                            move |_| {
+                                c.invoke_or_log(Command::LibraryMediaPreviewClose);
+                            }
+                        }),
+                ),
             )
             .child(
-                IconButton::new("arrow-left", "Previous media")
-                    .size(28.0)
-                    .icon_size(14.0)
-                    .disabled(!has_prev)
-                    .on_press(move |_| {
-                        prev_core.invoke_or_log(Command::LibraryMediaPreviewStep { delta: -1 });
-                    }),
+                rect().a11y_id(prev_btn_id).a11y_focusable(true).child(
+                    IconButton::new("arrow-left", "Previous media")
+                        .size(28.0)
+                        .icon_size(14.0)
+                        .disabled(!has_prev)
+                        .on_press(move |_| {
+                            prev_core.invoke_or_log(Command::LibraryMediaPreviewStep { delta: -1 });
+                        }),
+                ),
             )
             .child(
-                IconButton::new("arrow-right", "Next media")
-                    .size(28.0)
-                    .icon_size(14.0)
-                    .disabled(!has_next)
-                    .on_press(move |_| {
-                        next_core.invoke_or_log(Command::LibraryMediaPreviewStep { delta: 1 });
-                    }),
+                rect().a11y_id(next_btn_id).a11y_focusable(true).child(
+                    IconButton::new("arrow-right", "Next media")
+                        .size(28.0)
+                        .icon_size(14.0)
+                        .disabled(!has_next)
+                        .on_press(move |_| {
+                            next_core.invoke_or_log(Command::LibraryMediaPreviewStep { delta: 1 });
+                        }),
+                ),
             )
             .child(
                 rect()
@@ -298,6 +339,9 @@ impl Component for MediaPreviewOverlay {
             })
             .child(
                 rect()
+                    .a11y_id(open_btn_id)
+                    .a11y_focusable(true)
+                    .a11y_role(AccessibilityRole::Button)
                     .padding(Gaps::new(6.0, 12.0, 6.0, 12.0))
                     .corner_radius(CornerRadius::new_all(8.0))
                     .background(open_pill_bg)
@@ -406,6 +450,9 @@ impl Component for MediaPreviewOverlay {
                     .spacing(8.0)
                     .child(
                         rect()
+                            .a11y_id(show_btn_id)
+                            .a11y_focusable(true)
+                            .a11y_role(AccessibilityRole::Button)
                             .padding(Gaps::new(4.0, 9.0, 4.0, 9.0))
                             .corner_radius(CornerRadius::new_all(7.0))
                             .background(open_pill_bg)
@@ -426,6 +473,9 @@ impl Component for MediaPreviewOverlay {
                     )
                     .child(
                         rect()
+                            .a11y_id(copy_btn_id)
+                            .a11y_focusable(true)
+                            .a11y_role(AccessibilityRole::Button)
                             .padding(Gaps::new(4.0, 9.0, 4.0, 9.0))
                             .corner_radius(CornerRadius::new_all(7.0))
                             .background(open_pill_bg)
@@ -441,7 +491,8 @@ impl Component for MediaPreviewOverlay {
                     ),
             );
 
-        let panel_offset_y = (1.0 - progress) * 14.0;
+        let panel_offset_y = (1.0 - progress) * 10.0;
+        let panel_scale = 0.94 + 0.06 * progress;
         let panel_shadow =
             Shadow::new()
                 .x(0.0)
@@ -463,6 +514,7 @@ impl Component for MediaPreviewOverlay {
             .shadow(panel_shadow)
             .opacity(progress)
             .offset_y(panel_offset_y)
+            .scale(panel_scale)
             .on_mouse_down(|e: Event<MouseEventData>| {
                 e.stop_propagation();
             })

@@ -58,6 +58,7 @@ impl SurfaceRect {
 #[derive(Clone, PartialEq)]
 pub struct PageSurfaceData {
     pub frame: Option<ImageHandle>,
+    pub frame_seq: u64,
     pub frame_size: (i32, i32),
     pub frame_device_pixel_ratio: f64,
     pub background: (u8, u8, u8),
@@ -69,6 +70,7 @@ impl Default for PageSurfaceData {
     fn default() -> Self {
         Self {
             frame: None,
+            frame_seq: 0,
             frame_size: (0, 0),
             frame_device_pixel_ratio: 1.0,
             background: (255, 255, 255),
@@ -226,6 +228,14 @@ impl PageSurfaceTracker {
     #[allow(dead_code)]
     pub fn surface_rect(&self, view_id: u64) -> Option<SurfaceRect> {
         self.rects.get(&view_id).copied()
+    }
+
+    /// Finds the mounted view whose measured rect contains logical window coordinate `(x, y)`.
+    pub fn hit_test_view(&self, x: f32, y: f32) -> Option<(u64, SurfaceRect)> {
+        self.rects.iter().find_map(|(&view_id, &rect)| {
+            let hit = x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+            hit.then_some((view_id, rect))
+        })
     }
 
     /// Returns whether `view_id` is currently mounted on screen in at least one surface.

@@ -6,7 +6,8 @@
 
 //! Key notation parser (`<C-j>`, `<S-Tab>`, `Ctrl+T`, `<leader>ff`) and the [`KeyLabel`] key-cap component.
 
-use crate::ui::theme::{ThemeRole, use_theme};
+use crate::ui::theme::{ThemeRole, motion, use_theme};
+use freya::animation::*;
 use freya::prelude::*;
 
 /// Single rendered key cap parsed from a shortcut or vim key notation string.
@@ -179,6 +180,15 @@ impl KeyLabel {
 impl Component for KeyLabel {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
+        let active_anim = use_animation_with_dependencies(&self.active, move |conf, active| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *active { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::PICKER_KEY_FADE)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
         let caps = parse_key_notation(&self.notation);
 
         if self.subtle {
@@ -228,21 +238,16 @@ impl Component for KeyLabel {
                 );
         }
 
+        let active_t = active_anim.get().value().clamp(0.0, 1.0);
         let hint_rgba = theme.rgba(ThemeRole::Hint);
+        let hint_text_rgba = theme.rgba(ThemeRole::HintText);
         let text_rgba = theme.rgba(ThemeRole::Text);
-        let (bg, border_color, fg) = if self.active {
-            (
-                hint_rgba.to_color(),
-                hint_rgba.to_color(),
-                theme.color(ThemeRole::HintText),
-            )
-        } else {
-            (
-                hint_rgba.with_alpha(0.20).to_color(),
-                hint_rgba.with_alpha(0.50).to_color(),
-                hint_rgba.mix(text_rgba, 0.45).to_color(),
-            )
-        };
+        let idle_bg = hint_rgba.with_alpha(0.20);
+        let idle_border = hint_rgba.with_alpha(0.50);
+        let idle_fg = hint_rgba.mix(text_rgba, 0.45);
+        let bg = idle_bg.mix(hint_rgba, active_t).to_color();
+        let border_color = idle_border.mix(hint_rgba, active_t).to_color();
+        let fg = idle_fg.mix(hint_text_rgba, active_t).to_color();
 
         let items = caps.into_iter().enumerate().map(|(index, cap)| {
             let cap_bg = if cap.is_modifier && !self.active {
@@ -253,15 +258,15 @@ impl Component for KeyLabel {
             rect()
                 .key(index)
                 .min_width(Size::px(18.0))
-                .height(Size::px(20.0))
+                .height(Size::px(18.0))
                 .padding(Gaps::new(0.0, 5.0, 0.0, 5.0))
                 .main_align(Alignment::center())
                 .cross_align(Alignment::center())
-                .corner_radius(CornerRadius::new_all(theme.radii.sm))
+                .corner_radius(CornerRadius::new_all(6.0))
                 .background(cap_bg)
                 .border(
                     Border::new()
-                        .width(1.0)
+                        .width(0.5)
                         .alignment(BorderAlignment::Inner)
                         .fill(border_color),
                 )

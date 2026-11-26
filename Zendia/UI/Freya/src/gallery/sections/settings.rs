@@ -77,9 +77,15 @@ fn build_fixture_model(state_id: &str) -> BrowserModel {
         }
         "ext-toolbar-normal" => {
             model.layout.toolbar_layout = ToolbarLayout::Multiple;
+            if let Some(ext) = model.extensions.first_mut() {
+                ext.pinned_to_toolbar = true;
+            }
         }
         "ext-toolbar-paused" => {
             model.layout.toolbar_layout = ToolbarLayout::Multiple;
+            if let Some(ext) = model.extensions.first_mut() {
+                ext.pinned_to_toolbar = true;
+            }
             set_service(
                 &mut model,
                 ServiceId::ExtensionServer,

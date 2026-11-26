@@ -12,6 +12,7 @@ use crate::ui::core_view::{CoreView, use_core};
 use crate::ui::kit::{Icon, PickerGrid, PickerItem as KitPickerItem, PickerList};
 use crate::ui::page::PageSurfaceContext;
 use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedScheme, ResolvedTheme, Rgba, ThemeRole, motion, use_theme};
+use crate::ui::vim::statusline::try_use_vim_statusline_state;
 use freya::animation::*;
 use freya::prelude::*;
 use zendia_browser_core::commands::Command;
@@ -153,7 +154,8 @@ pub fn agent_emblem_svg(icon_id: &str, dimmed: bool) -> Option<(String, Bytes)> 
 fn core_item_to_kit_item(item: &CorePickerItem, layout: PickerLayout, theme: &ResolvedTheme) -> KitPickerItem {
     let mut kit = KitPickerItem::new(item.id.clone(), item.title.clone())
         .dimmed(item.dimmed)
-        .disabled(!item.enabled);
+        .disabled(!item.enabled)
+        .icon_fill(item.icon_fill);
 
     if let Some(section) = &item.section {
         kit = kit.section(section.clone());
@@ -166,6 +168,9 @@ fn core_item_to_kit_item(item: &CorePickerItem, layout: PickerLayout, theme: &Re
     }
     if let Some((r, g, b)) = item.accent_rgb {
         kit = kit.accent_color(Color::from_rgb(r, g, b));
+    }
+    if let Some(tooltip) = &item.tooltip {
+        kit = kit.tooltip(tooltip.clone());
     }
 
     if let Some(icon) = &item.icon {
@@ -219,6 +224,7 @@ impl Component for VimPickerOverlay {
         let core = use_core();
         let state = use_vim_picker_state();
         let page_ctx = try_consume_context::<PageSurfaceContext>();
+        let statusline_state = try_use_vim_statusline_state();
 
         let vim_enabled = core.model().read().vim_mode_enabled;
         let current_request = state.request.read().clone();
@@ -230,6 +236,15 @@ impl Component for VimPickerOverlay {
             && last_request.peek().as_ref() != Some(req)
         {
             last_request.set(Some(req.clone()));
+        }
+
+        use_drop(move || {
+            if let Some(sl) = statusline_state {
+                sl.set_overlay_obstacle(None);
+            }
+        });
+        if !is_open && let Some(sl) = statusline_state {
+            sl.set_overlay_obstacle(None);
         }
 
         let entrance = use_animation_with_dependencies(&(is_open, open_seq), move |conf, (open, _)| {
@@ -248,7 +263,7 @@ impl Component for VimPickerOverlay {
             }
         });
 
-        let progress = entrance.get().value().clamp(0.0, 1.1);
+        let progress = entrance.get().value().clamp(0.0, 1.05);
         let opacity = progress.clamp(0.0, 1.0);
         if !is_open && opacity <= 0.01 {
             return rect().into_element();
@@ -262,8 +277,20 @@ impl Component for VimPickerOverlay {
         let window_w = root_size.width.max(480.0);
         let window_h = root_size.height.max(360.0);
         let (card_w, base_top) = compute_picker_geometry(request.layout, window_w, window_h);
+        let max_list_h = (window_h * 0.60 - 82.0).clamp(160.0, 520.0);
         let left = ((window_w - card_w) * 0.5).max(16.0);
-        let y_offset = motion::FLOAT_IN_Y * (1.0 - progress);
+        let (y_offset, scale) = if is_open {
+            (
+                motion::FLOAT_IN_Y * (1.0 - progress),
+                motion::FLOAT_IN_SCALE + (1.0 - motion::FLOAT_IN_SCALE) * progress,
+            )
+        } else {
+            let exit_t = (1.0 - opacity).clamp(0.0, 1.0);
+            (
+                motion::FLOAT_OUT_Y * exit_t,
+                1.0 + (motion::FLOAT_OUT_SCALE - 1.0) * exit_t,
+            )
+        };
         let top = (base_top + y_offset).max(20.0);
 
         let close_picker = {
@@ -297,9 +324,22 @@ impl Component for VimPickerOverlay {
                 rect()
                     .position(Position::new_global().left(left).top(top))
                     .opacity(opacity)
+                    .scale((scale, scale))
+                    .on_sized(move |e: Event<SizedEventData>| {
+                        if is_open && let Some(sl) = statusline_state {
+                            sl.set_overlay_obstacle(Some((
+                                e.area.min_x(),
+                                e.area.min_y(),
+                                e.area.width(),
+                                e.area.height(),
+                            )));
+                        }
+                    })
                     .child(
                         VimPickerCard::new(request, state.query, state.cursor, state.filter_active)
                             .width(card_w)
+                            .max_list_height(max_list_h)
+                            .stagger_trigger(open_seq)
                             .capture_keys(is_open)
                             .on_close(move |_| close_card())
                             .key(open_seq),
@@ -318,6 +358,7 @@ pub struct VimPickerCard {
     filter_active: State<bool>,
     width: Option<f32>,
     max_list_height: f32,
+    stagger_trigger: u64,
     capture_keys: bool,
     on_choose: Option<EventHandler<CorePickerItem>>,
     on_close: Option<EventHandler<()>>,
@@ -339,11 +380,17 @@ impl VimPickerCard {
             filter_active,
             width: None,
             max_list_height: 360.0,
+            stagger_trigger: 0,
             capture_keys: false,
             on_choose: None,
             on_close: None,
             key: DiffKey::None,
         }
+    }
+
+    pub fn stagger_trigger(mut self, trigger: u64) -> Self {
+        self.stagger_trigger = trigger;
+        self
     }
 
     pub fn width(mut self, width: f32) -> Self {
@@ -554,20 +601,21 @@ impl Component for VimPickerCard {
             PickerLayout::Grid => 500.0,
         });
 
-        let (glass_bg, outline_color, text_muted, divider_color) = match theme.scheme {
-            ResolvedScheme::Dark => (
-                Rgba::from_rgb_alpha(30, 30, 34, 0.90).to_color(),
-                Color::from_argb(38, 255, 255, 255),
-                Color::from_argb(196, 251, 251, 254),
-                Color::from_argb(32, 255, 255, 255),
-            ),
-            ResolvedScheme::Light => (
-                Rgba::from_rgb_alpha(232, 232, 236, 0.90).to_color(),
-                Color::from_argb(36, 0, 0, 0),
-                Color::from_argb(190, 21, 20, 26),
-                Color::from_argb(32, 0, 0, 0),
-            ),
+        let glass_bg = if theme.glass.float_blur > 0.0 {
+            theme.glass.float_tint.to_color()
+        } else {
+            theme.glass.float_solid.to_color()
         };
+        let outline_color = theme.glass.outline.to_color();
+        let text_muted = theme
+            .rgba(ThemeRole::Text)
+            .with_alpha(theme.glass.muted_opacity)
+            .to_color();
+        let divider_color = theme.glass.outline.to_color();
+        let sheen_gradient = LinearGradient::new()
+            .angle(0.0)
+            .stop((theme.glass.sheen_top.to_color(), 0.0))
+            .stop((Color::from_argb(0, 255, 255, 255), 100.0));
 
         let filter_row = is_filtering.then(|| {
             let mut clear_query = self.query;
@@ -637,25 +685,23 @@ impl Component for VimPickerCard {
                 )
         });
 
+        // Hover applies only a subtle row/tile hover tint inside `PickerList`/`PickerGrid` without moving the
+        // keyboard selection cursor (`VIM-PK-06`).
         let body: Element = match self.request.layout {
             PickerLayout::List => PickerList::new(kit_items)
                 .vim_style(true)
                 .highlighted(current_cursor)
                 .max_height(self.max_list_height)
+                .stagger_trigger(self.stagger_trigger)
                 .empty_message("No matching items")
-                .on_hover(move |idx: usize| {
-                    cursor.set_if_modified(idx);
-                })
                 .on_select(choose_on_click)
                 .into_element(),
             PickerLayout::Grid => PickerGrid::new(kit_items)
                 .columns(DEFAULT_GRID_COLUMNS)
                 .highlighted(current_cursor)
                 .max_height(self.max_list_height)
+                .stagger_trigger(self.stagger_trigger)
                 .empty_message("No matching items")
-                .on_hover(move |idx: usize| {
-                    cursor.set_if_modified(idx);
-                })
                 .on_select(choose_on_click)
                 .into_element(),
         };
@@ -666,18 +712,22 @@ impl Component for VimPickerCard {
             self.request.hint.clone()
         };
 
+        let inner_ring_color = match theme.scheme {
+            ResolvedScheme::Dark => Rgba::from_rgb_alpha(255, 255, 255, 0.05).to_color(),
+            ResolvedScheme::Light => Rgba::from_rgb_alpha(255, 255, 255, 0.30).to_color(),
+        };
+
         let card = rect()
             .a11y_role(AccessibilityRole::Dialog)
             .a11y_alt(self.request.title.clone())
             .width(Size::px(card_width))
-            .padding(Gaps::new_all(7.0))
             .corner_radius(CornerRadius::new_all(theme.radii.float))
             .overflow(Overflow::Clip)
             .background(glass_bg)
             .border(
                 Border::new()
-                    .width(1.0)
-                    .alignment(BorderAlignment::Inner)
+                    .width(0.5)
+                    .alignment(BorderAlignment::Outer)
                     .fill(outline_color),
             )
             .shadow(theme.shadows.float_highlight.to_shadow())
@@ -687,47 +737,67 @@ impl Component for VimPickerCard {
             .on_global_key_down(handle_global_key)
             .child(
                 rect()
-                    .width(Size::fill())
-                    .padding(Gaps::new(6.0, 10.0, 8.0, 10.0))
-                    .child(
-                        label()
-                            .text(self.request.title.clone())
-                            .font_size(13.0)
-                            .font_weight(FontWeight::SEMI_BOLD)
-                            .color(text_muted)
-                            .max_lines(1)
-                            .text_overflow(TextOverflow::Ellipsis),
-                    ),
+                    .position(Position::new_absolute().top(0.0).left(0.0))
+                    .width(Size::percent(100.0))
+                    .height(Size::px(48.0))
+                    .background(sheen_gradient)
+                    .interactive(Interactive::No),
             )
-            .maybe_child(filter_row)
-            .child(body)
             .child(
                 rect()
                     .width(Size::fill())
-                    .margin(Gaps::new(6.0, 0.0, 0.0, 0.0))
-                    .child(
-                        rect()
-                            .width(Size::fill())
-                            .height(Size::px(1.0))
-                            .background(divider_color),
+                    .padding(Gaps::new_all(7.0))
+                    .corner_radius(CornerRadius::new_all(theme.radii.float))
+                    .border(
+                        Border::new()
+                            .width(0.5)
+                            .alignment(BorderAlignment::Inner)
+                            .fill(inner_ring_color),
                     )
                     .child(
                         rect()
                             .width(Size::fill())
-                            .padding(Gaps::new(7.0, 10.0, 3.0, 10.0))
+                            .padding(Gaps::new(6.0, 10.0, 8.0, 10.0))
                             .child(
                                 label()
-                                    .text(hint_text)
-                                    .font_size(11.0)
+                                    .text(self.request.title.clone())
+                                    .font_size(13.0)
+                                    .font_weight(FontWeight::SEMI_BOLD)
                                     .color(text_muted)
                                     .max_lines(1)
                                     .text_overflow(TextOverflow::Ellipsis),
                             ),
+                    )
+                    .maybe_child(filter_row)
+                    .child(body)
+                    .child(
+                        rect()
+                            .width(Size::fill())
+                            .margin(Gaps::new(6.0, 0.0, 0.0, 0.0))
+                            .child(
+                                rect()
+                                    .width(Size::fill())
+                                    .height(Size::px(0.5))
+                                    .background(divider_color),
+                            )
+                            .child(
+                                rect()
+                                    .width(Size::fill())
+                                    .padding(Gaps::new(8.0, 10.0, 2.0, 10.0))
+                                    .child(
+                                        label()
+                                            .text(hint_text)
+                                            .font_size(11.0)
+                                            .color(text_muted)
+                                            .max_lines(1)
+                                            .text_overflow(TextOverflow::Ellipsis),
+                                    ),
+                            ),
                     ),
             );
 
-        if theme.glass.blur > 0.0 {
-            card.backdrop_blur(theme.glass.blur)
+        if theme.glass.float_blur > 0.0 {
+            card.backdrop_blur(theme.glass.float_blur)
         } else {
             card
         }

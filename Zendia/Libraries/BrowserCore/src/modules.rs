@@ -398,7 +398,8 @@ pub fn extension_to_toolbar_item(ext: &ExtensionInfo, service_status: &ServiceSt
         kind: ToolbarItemKind::Button,
         placement: ToolbarPlacement::NavigationEnd,
         placement_rules: ToolbarPlacementRules {
-            single_toolbar: Some(ToolbarArea::SidebarBottom),
+            single_toolbar: Some(ToolbarArea::SidebarUrlBar),
+            single_toolbar_compact: Some(ToolbarArea::SidebarUrlBar),
             multiple_toolbars: Some(ToolbarArea::TopBarEnd),
             collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
         },
@@ -420,11 +421,67 @@ pub fn extension_to_site_extension(ext: &ExtensionInfo) -> SiteExtension {
         icon: ext.icon.clone(),
         enabled: ext.enabled,
         has_site_access: ext.has_site_access,
-        command: format!("extension.invoke_action:{}", ext.id.0),
+        badge_text: ext.badge_text.clone(),
+        command: ext.command.clone(),
         source: ContributionSource::Extension {
             extension_id: ext.id.0.clone(),
         },
     }
+}
+
+/// Returns the extensions that belong in the Site Data Panel's Extensions tile area.
+///
+/// Matches the fork's `CustomizableUI` single-location rule: unpinned extensions live in the Site Data Panel, while
+/// pinned enabled extensions move out of the panel and into the active toolbar (`AREA_NAVBAR`).
+pub fn unpinned_site_extensions(extensions: &[ExtensionInfo]) -> Vec<SiteExtension> {
+    extensions
+        .iter()
+        .filter(|ext| !ext.pinned_to_toolbar)
+        .map(extension_to_site_extension)
+        .collect()
+}
+
+/// Builds the Ladybird/Zen right-click context menu for an extension button (in the Site Data Panel or pinned toolbar).
+pub fn build_extension_context_menu(ext: &ExtensionInfo) -> Vec<crate::menus::ResolvedMenuItem> {
+    use crate::menus::ResolvedMenuItem;
+    let ext_id = ext.id.0.clone();
+    let pin_label = if ext.pinned_to_toolbar {
+        "Unpin from Toolbar"
+    } else {
+        "Pin to Toolbar"
+    };
+    let pin_icon = if ext.pinned_to_toolbar { "unpin" } else { "pin" };
+    let next_pinned = if ext.pinned_to_toolbar { "false" } else { "true" };
+
+    let mut pin = ResolvedMenuItem::action(
+        format!("ext.ctx.pin.{ext_id}"),
+        pin_label,
+        "extension.set_toolbar_pinned",
+    );
+    pin.icon = Some(pin_icon.to_string());
+    pin.command_args = vec![
+        ("extension_id".to_string(), ext_id.clone()),
+        ("pinned".to_string(), next_pinned.to_string()),
+    ];
+
+    let mut manage = ResolvedMenuItem::action(format!("ext.ctx.manage.{ext_id}"), "Manage Extension", "settings.open");
+    manage.icon = Some("settings".to_string());
+    manage.command_args = vec![("group".to_string(), "extensions".to_string())];
+
+    let mut remove = ResolvedMenuItem::action(
+        format!("ext.ctx.remove.{ext_id}"),
+        "Remove Extension",
+        "extension.remove",
+    );
+    remove.icon = Some("trash".to_string());
+    remove.command_args = vec![("extension_id".to_string(), ext_id.clone())];
+
+    vec![
+        pin,
+        manage,
+        ResolvedMenuItem::separator(format!("ext.ctx.sep.{ext_id}")),
+        remove,
+    ]
 }
 
 /// Builds a [`SidePanelEntry`] contribution for a plugin that declares a side panel.
@@ -474,10 +531,35 @@ mod tests {
     }
 
     #[test]
-    fn sample_extension_starts_in_the_extensions_menu_only() {
-        let ext = &sample_extensions()[0];
+    fn sample_extension_starts_in_the_site_panel_only_and_moves_on_pin() {
+        let exts = sample_extensions();
+        let ext = &exts[0];
         assert!(!ext.pinned_to_toolbar);
         assert!(!extension_to_toolbar_item(ext, &ServiceStatus::Running).visible);
+        let site_exts = unpinned_site_extensions(&exts);
+        assert_eq!(site_exts.len(), 1);
+        assert_eq!(site_exts[0].badge_text.as_deref(), Some("4"));
+        assert_eq!(site_exts[0].extension_id(), Some(ext.id.clone()));
+
+        let pinned_ext = ExtensionInfo {
+            pinned_to_toolbar: true,
+            ..ext.clone()
+        };
+        assert!(unpinned_site_extensions(std::slice::from_ref(&pinned_ext)).is_empty());
+        let item = extension_to_toolbar_item(&pinned_ext, &ServiceStatus::Running);
+        assert!(item.visible);
+        assert_eq!(item.placement_rules.single_toolbar, Some(ToolbarArea::SidebarUrlBar));
+        assert_eq!(
+            item.placement_rules.single_toolbar_compact,
+            Some(ToolbarArea::SidebarUrlBar)
+        );
+        assert_eq!(item.placement_rules.multiple_toolbars, Some(ToolbarArea::TopBarEnd));
+        assert_eq!(item.placement_rules.collapsed_toolbar, Some(ToolbarArea::TopBarEnd));
+
+        let unpinned_menu = build_extension_context_menu(ext);
+        assert_eq!(unpinned_menu[0].label, "Pin to Toolbar");
+        let pinned_menu = build_extension_context_menu(&pinned_ext);
+        assert_eq!(pinned_menu[0].label, "Unpin from Toolbar");
     }
 
     #[test]

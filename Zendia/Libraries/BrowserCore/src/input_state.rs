@@ -209,23 +209,38 @@ fn natural_lowercase_key(key: &str) -> String {
     out
 }
 
+/// Normalizes keymap alias names inside angle brackets (e.g. `<C-Bslash>` -> `<C-\>`) so sorting matches the fork's
+/// literal key tokens (`<C-\>` sorts before `<C-b>`).
+fn normalize_sort_key(key: &str) -> String {
+    match key {
+        "<C-Bslash>" => "<C-\\>".to_string(),
+        "<Bslash>" => "\\".to_string(),
+        "<lt>" => "<".to_string(),
+        "<gt>" => ">".to_string(),
+        "<Bar>" => "|".to_string(),
+        other => other.replace("-Bslash>", "-\\>"),
+    }
+}
+
 /// Sorts which-key items using which-key.nvim's default order:
 /// mappings before groups, word keys before symbols, bracketed keys before bare symbols,
 /// natural number order, lowercase before uppercase, then raw key order.
 pub fn sort_which_key_items(items: &mut [WhichKeyItem]) {
     items.sort_by(|a, b| {
+        let ak = normalize_sort_key(&a.key);
+        let bk = normalize_sort_key(&b.key);
         let ord = a
             .is_group
             .cmp(&b.is_group)
-            .then_with(|| (!is_word_key(&a.key)).cmp(&(!is_word_key(&b.key))))
-            .then_with(|| (!is_bracketed_key(&a.key)).cmp(&(!is_bracketed_key(&b.key))))
-            .then_with(|| natural_lowercase_key(&a.key).cmp(&natural_lowercase_key(&b.key)))
+            .then_with(|| (!is_word_key(&ak)).cmp(&(!is_word_key(&bk))))
+            .then_with(|| (!is_bracketed_key(&ak)).cmp(&(!is_bracketed_key(&bk))))
+            .then_with(|| natural_lowercase_key(&ak).cmp(&natural_lowercase_key(&bk)))
             .then_with(|| {
-                let a_upper = a.key != a.key.to_lowercase();
-                let b_upper = b.key != b.key.to_lowercase();
+                let a_upper = ak != ak.to_lowercase();
+                let b_upper = bk != bk.to_lowercase();
                 a_upper.cmp(&b_upper)
             });
-        if ord != Ordering::Equal { ord } else { a.key.cmp(&b.key) }
+        if ord != Ordering::Equal { ord } else { ak.cmp(&bk) }
     });
 }
 
@@ -576,6 +591,14 @@ mod tests {
                 .any(|i| i.label == "j" && i.description == "Scroll Down")
         );
         assert!(all.items.iter().any(|i| i.label == "g" && i.is_group));
+
+        // VIM-WK-08: `<C-\>` must sort before `<C-b>`, matching the fork's literal token order.
+        let pos_bslash = all.items.iter().position(|i| i.label == "<C-\\>");
+        let pos_cb = all.items.iter().position(|i| i.label == "<C-b>");
+        assert!(
+            pos_bslash.is_some() && pos_cb.is_some() && pos_bslash < pos_cb,
+            "expected <C-\\> ({pos_bslash:?}) before <C-b> ({pos_cb:?})"
+        );
     }
 
     #[test]

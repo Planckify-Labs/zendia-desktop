@@ -33,6 +33,7 @@ pub mod picker;
 pub mod region;
 pub mod settings;
 pub mod share;
+pub mod shell_layout;
 pub mod site_info;
 pub mod space_appearance;
 pub mod space_routing;

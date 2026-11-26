@@ -9,7 +9,11 @@
 
 use crate::ui::kit::icons::{Icon, prepared_icon_bytes};
 use crate::ui::kit::key_label::KeyLabel;
-use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, use_theme};
+use crate::ui::kit::list_nav::scroll_item_into_view;
+use crate::ui::kit::popup_presence::StaggeredRow;
+use crate::ui::kit::tooltip::KitTooltip;
+use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, motion, use_theme};
+use freya::animation::*;
 use freya::prelude::*;
 
 /// Data describing one selectable row in a [`PickerList`].
@@ -29,6 +33,8 @@ pub struct PickerItem {
     pub key_hint: Option<String>,
     /// Optional trailing action chip label (such as `"Switch to Tab"` with an arrow chip).
     pub action_chip: Option<String>,
+    /// Optional custom pill color for the trailing action chip (used for workspace switch pills).
+    pub action_chip_color: Option<Color>,
     /// When true, highlighting this row uses the full accent fill (Zen heuristic row style).
     pub accent_highlight: bool,
     /// Optional section header shown above the first item of a contiguous run sharing it.
@@ -41,10 +47,14 @@ pub struct PickerItem {
     pub custom_icon_svg: Option<(String, Bytes)>,
     /// Optional brand accent color used for selected grid tile glow.
     pub accent_color: Option<Color>,
+    /// When true in grid layout, the icon fills 100% of its rounded icon plate.
+    pub icon_fill: bool,
     /// Visual dimmed appearance (for example, an uninstalled agent tile).
     pub dimmed: bool,
     /// Disables pointer activation when true.
     pub disabled: bool,
+    /// Optional hover tooltip text (e.g. install instructions for uninstalled agents, `VIM-PK-07`).
+    pub tooltip: Option<String>,
 }
 
 impl PickerItem {
@@ -57,14 +67,17 @@ impl PickerItem {
             icon_badge: None,
             key_hint: None,
             action_chip: None,
+            action_chip_color: None,
             accent_highlight: false,
             section: None,
             detail: None,
             key_badge: None,
             custom_icon_svg: None,
             accent_color: None,
+            icon_fill: false,
             dimmed: false,
             disabled: false,
+            tooltip: None,
         }
     }
 
@@ -90,6 +103,11 @@ impl PickerItem {
 
     pub fn action_chip(mut self, label: impl Into<String>) -> Self {
         self.action_chip = Some(label.into());
+        self
+    }
+
+    pub fn action_chip_color(mut self, color: Color) -> Self {
+        self.action_chip_color = Some(color);
         self
     }
 
@@ -123,6 +141,11 @@ impl PickerItem {
         self
     }
 
+    pub fn icon_fill(mut self, fill: bool) -> Self {
+        self.icon_fill = fill;
+        self
+    }
+
     pub fn dimmed(mut self, dimmed: bool) -> Self {
         self.dimmed = dimmed;
         self
@@ -132,16 +155,34 @@ impl PickerItem {
         self.disabled = disabled;
         self
     }
+
+    pub fn tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = Some(tooltip.into());
+        self
+    }
 }
 
+/// Height of a row in a [`PickerList`], and of one in its vim style.
+const ROW_HEIGHT: f32 = 44.0;
+const VIM_ROW_HEIGHT: f32 = 36.0;
+/// Gap between rows, in both styles.
+const ROW_GAP: f32 = 2.0;
+/// Space above the first row, and above and below all rows together.
+const LIST_PAD_TOP: f32 = 8.0;
+const LIST_PAD_VERTICAL: f32 = 14.0;
+const VIM_SECTION_HEIGHT: f32 = 24.0;
+
 /// Scrollable list of [`PickerItem`] rows with keyboard highlight, pointer hover, and click selection.
+/// The list scrolls to keep the highlighted row on screen.
 #[derive(Clone, PartialEq)]
 pub struct PickerList {
     items: Vec<PickerItem>,
     highlighted: Option<usize>,
     max_height: f32,
     empty_message: Option<String>,
+    highlight_query: Option<String>,
     vim_style: bool,
+    stagger_trigger: u64,
     on_hover: Option<EventHandler<usize>>,
     on_select: Option<EventHandler<usize>>,
     key: DiffKey,
@@ -160,7 +201,9 @@ impl PickerList {
             highlighted: None,
             max_height: 272.0,
             empty_message: None,
+            highlight_query: None,
             vim_style: false,
+            stagger_trigger: 0,
             on_hover: None,
             on_select: None,
             key: DiffKey::None,
@@ -182,9 +225,22 @@ impl PickerList {
         self
     }
 
+    /// Highlights matching query tokens in bold inside row titles and subtitles.
+    pub fn highlight_query(mut self, query: impl Into<String>) -> Self {
+        let q = query.into();
+        self.highlight_query = if q.trim().is_empty() { None } else { Some(q) };
+        self
+    }
+
     /// Uses Zendia's compact Vim picker row geometry (section headings, leading key badges, right-aligned details).
     pub fn vim_style(mut self, enabled: bool) -> Self {
         self.vim_style = enabled;
+        self
+    }
+
+    /// Triggers a capped per-row entrance stagger whenever `trigger > 0` changes.
+    pub fn stagger_trigger(mut self, trigger: u64) -> Self {
+        self.stagger_trigger = trigger;
         self
     }
 
@@ -202,6 +258,82 @@ impl PickerList {
 impl Component for PickerList {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
+        let mut scroll = use_scroll_controller(ScrollConfig::default);
+        // The highlight and row count the scroll position was last brought up to date for, and the row the pointer
+        // last highlighted: scrolling to a hovered row would pull the list out from under the pointer.
+        let mut shown = use_state(|| None::<(Option<usize>, usize)>);
+        let mut pointed = use_state(|| None::<usize>);
+
+        // Gliding cursor bar animation state for `vim_style` (`VIM-PK-01`).
+        let target_cursor_y: Option<f32> = if self.vim_style
+            && let Some(idx) = self.highlighted
+            && idx < self.items.len()
+        {
+            Some(vim_row_span(&self.items, idx).0)
+        } else {
+            None
+        };
+        let mut prev_cursor_y = use_state(|| target_cursor_y.unwrap_or(0.0));
+        let mut from_cursor_y = use_state(|| target_cursor_y.unwrap_or(0.0));
+        let mut cursor_glide_seq = use_state(|| 0u64);
+        if let Some(ty) = target_cursor_y
+            && (*prev_cursor_y.peek() - ty).abs() > 0.5
+        {
+            let prev = *prev_cursor_y.peek();
+            from_cursor_y.set(prev);
+            prev_cursor_y.set(ty);
+            let next_seq = cursor_glide_seq.peek().wrapping_add(1);
+            cursor_glide_seq.set(next_seq);
+        }
+        let glide_seq = *cursor_glide_seq.read();
+        let glide_from = *from_cursor_y.read();
+        let glide_to = target_cursor_y.unwrap_or(*prev_cursor_y.read());
+        let cursor_glide = use_animation_with_dependencies(
+            &(glide_seq, glide_from.to_bits(), glide_to.to_bits()),
+            move |conf, _| {
+                conf.on_creation(OnCreation::Finish);
+                conf.on_change(OnChange::Rerun);
+                AnimNum::new(0.0, 1.0)
+                    .duration(motion::PICKER_CURSOR)
+                    .ease(Ease::Out)
+                    .function(motion::spring_fn())
+            },
+        );
+        let animated_cursor_y = glide_from + (glide_to - glide_from) * cursor_glide.get().value();
+
+        let current = (self.highlighted, self.items.len());
+        if *shown.peek() != Some(current) {
+            shown.set(Some(current));
+            let by_pointer = self.highlighted.is_some() && *pointed.peek() == self.highlighted;
+            pointed.set_if_modified(None);
+            if !by_pointer {
+                let index = self.highlighted.unwrap_or(0).min(self.items.len().saturating_sub(1));
+                let (top, height, content) = if self.vim_style {
+                    let (top, content) = vim_row_span(&self.items, index);
+                    (top, VIM_ROW_HEIGHT, content)
+                } else {
+                    let stride = ROW_HEIGHT + ROW_GAP;
+                    (
+                        LIST_PAD_TOP + index as f32 * stride,
+                        ROW_HEIGHT,
+                        self.items.len() as f32 * stride + LIST_PAD_VERTICAL,
+                    )
+                };
+                if index == 0 {
+                    scroll.scroll_to_y(0);
+                } else {
+                    scroll_item_into_view(&mut scroll, top, height, content.min(self.max_height), content);
+                }
+            }
+        }
+
+        let hover_handler = self.on_hover.clone();
+        let on_hover: Option<EventHandler<usize>> = hover_handler.map(|handler| {
+            EventHandler::new(move |index: usize| {
+                pointed.set(Some(index));
+                handler.call(index);
+            })
+        });
 
         if self.items.is_empty() {
             let Some(message) = &self.empty_message else {
@@ -258,34 +390,102 @@ impl Component for PickerList {
                     previous_section = Some(section);
                 }
 
-                children.push(
-                    VimPickerRow {
-                        item: item.clone(),
-                        index,
-                        highlighted: self.highlighted == Some(index),
-                        on_hover: self.on_hover.clone(),
-                        on_select: self.on_select.clone(),
-                        key: DiffKey::from(&item.id),
-                    }
-                    .into_element(),
-                );
+                let row_el = VimPickerRow {
+                    item: item.clone(),
+                    index,
+                    highlighted: self.highlighted == Some(index),
+                    gliding_cursor: true,
+                    on_hover: on_hover.clone(),
+                    on_select: self.on_select.clone(),
+                    key: DiffKey::from(&item.id),
+                }
+                .into_element();
+                let wrapped = if self.stagger_trigger > 0 {
+                    StaggeredRow::new(index)
+                        .trigger(self.stagger_trigger)
+                        .key(("vim-row-stagger", &item.id))
+                        .child(row_el)
+                        .into_element()
+                } else {
+                    row_el
+                };
+                children.push(wrapped);
             }
 
-            let estimated_height = self.items.len() as f32 * 38.0 + section_count as f32 * 24.0 + 6.0;
-            let container_height = estimated_height.min(self.max_height);
+            let (_, content_height) = vim_row_span(&self.items, 0);
+            let container_height = content_height.min(self.max_height);
+            let needs_scroll = content_height > self.max_height;
 
-            return ScrollView::new()
+            let gliding_bar = target_cursor_y.map(|_| {
+                let (cursor_bg, top_border, drop_shadow) = match theme.scheme {
+                    ResolvedScheme::Dark => (
+                        Rgba::from_rgb_alpha(255, 255, 255, 0.08)
+                            .mix(theme.palette.purple, 0.26)
+                            .with_alpha(0.28)
+                            .to_color(),
+                        Color::from_argb(32, 255, 255, 255),
+                        Shadow::new().y(1.0).blur(3.0).color(Color::from_argb(64, 0, 0, 0)),
+                    ),
+                    ResolvedScheme::Light => (
+                        Rgba::from_rgb_alpha(255, 255, 255, 0.40)
+                            .mix(theme.palette.purple, 0.26)
+                            .with_alpha(0.45)
+                            .to_color(),
+                        Color::from_argb(140, 255, 255, 255),
+                        Shadow::new().y(1.0).blur(3.0).color(Color::from_argb(26, 20, 22, 40)),
+                    ),
+                };
+                rect()
+                    .position(Position::new_absolute().top(animated_cursor_y).left(0.0))
+                    .width(Size::percent(100.0))
+                    .height(Size::px(VIM_ROW_HEIGHT))
+                    .corner_radius(CornerRadius::new_all(11.0))
+                    .background(cursor_bg)
+                    .border(
+                        Border::new()
+                            .width(1.0)
+                            .alignment(BorderAlignment::Inner)
+                            .fill(top_border),
+                    )
+                    .shadow(drop_shadow)
+                    .interactive(Interactive::No)
+            });
+
+            let scrollbar_base = theme.rgba(ThemeRole::Scrollbar);
+            let sb_thumb = scrollbar_base.with_alpha(0.45).to_color();
+            let sb_hover = scrollbar_base.with_alpha(0.75).to_color();
+            let sb_active = scrollbar_base.with_alpha(0.90).to_color();
+
+            let sv = ScrollView::new_controlled(scroll)
                 .width(Size::fill())
                 .height(Size::px(container_height))
-                .show_scrollbar(false)
+                .show_scrollbar(needs_scroll)
+                .auto_hide_scrollbars(false)
+                .scrollbar(move |context: ScrollBarContext| {
+                    ScrollBar::new(context)
+                        .theme(ScrollBarThemePartial {
+                            background: Some(Preference::Specific(Color::TRANSPARENT)),
+                            thumb_background: Some(Preference::Specific(sb_thumb)),
+                            hover_thumb_background: Some(Preference::Specific(sb_hover)),
+                            active_thumb_background: Some(Preference::Specific(sb_active)),
+                            thumb_cross_size: Some(Preference::Specific(3.5)),
+                            expanded_thumb_cross_size: Some(Preference::Specific(5.5)),
+                            opacity: Some(Preference::Specific(1.0)),
+                            expanded_opacity: Some(Preference::Specific(1.0)),
+                            cross_gap: Some(Preference::Specific(2.0)),
+                            expanded_cross_gap: Some(Preference::Specific(2.0)),
+                        })
+                        .into_element()
+                })
                 .child(
                     rect()
                         .a11y_role(AccessibilityRole::ListBox)
                         .width(Size::fill())
-                        .spacing(2.0)
-                        .children(children),
-                )
-                .into_element();
+                        .padding(Gaps::new(0.0, if needs_scroll { 8.0 } else { 0.0 }, 0.0, 0.0))
+                        .maybe_child(gliding_bar)
+                        .child(rect().width(Size::fill()).spacing(2.0).children(children)),
+                );
+            return sv.into_element();
         }
 
         let rows = self.items.iter().enumerate().map(|(index, item)| {
@@ -293,7 +493,8 @@ impl Component for PickerList {
                 item: item.clone(),
                 index,
                 highlighted: self.highlighted == Some(index),
-                on_hover: self.on_hover.clone(),
+                highlight_query: self.highlight_query.clone(),
+                on_hover: on_hover.clone(),
                 on_select: self.on_select.clone(),
                 key: DiffKey::from(&item.id),
             }
@@ -301,10 +502,10 @@ impl Component for PickerList {
         });
 
         // Estimate exact height (44px row + 2px spacing + 16px vertical padding) so rows never clip mid-line.
-        let estimated_height = self.items.len() as f32 * 46.0 + 14.0;
+        let estimated_height = self.items.len() as f32 * (ROW_HEIGHT + ROW_GAP) + LIST_PAD_VERTICAL;
         let container_height = estimated_height.min(self.max_height);
 
-        ScrollView::new()
+        ScrollView::new_controlled(scroll)
             .width(Size::fill())
             .height(Size::px(container_height))
             .show_scrollbar(false)
@@ -323,12 +524,110 @@ impl Component for PickerList {
         self.key.clone().or(self.default_key())
     }
 }
+/// The top of vim-style row `index` and the height of all rows with their section headings.
+fn vim_row_span(items: &[PickerItem], index: usize) -> (f32, f32) {
+    let mut y = 0.0;
+    let mut top = 0.0;
+    let mut previous_section: Option<&str> = None;
+    for (i, item) in items.iter().enumerate() {
+        if let Some(section) = item.section.as_deref()
+            && previous_section != Some(section)
+        {
+            y += VIM_SECTION_HEIGHT + ROW_GAP;
+            previous_section = Some(section);
+        }
+        if i == index {
+            top = y;
+        }
+        y += VIM_ROW_HEIGHT + ROW_GAP;
+    }
+    (top, y + 6.0)
+}
+
+/// Splits `text` into `(segment, matched)` runs where whitespace-separated tokens of `query` match case-insensitively.
+fn split_highlighted_runs(text: &str, query: Option<&str>) -> Vec<(String, bool)> {
+    let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) else {
+        return vec![(text.to_string(), false)];
+    };
+    let tokens: Vec<Vec<char>> = query
+        .split_whitespace()
+        .map(|tok| tok.chars().flat_map(char::to_lowercase).collect())
+        .filter(|tok: &Vec<char>| !tok.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return vec![(text.to_string(), false)];
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = chars.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect();
+    let mut marked = vec![false; chars.len()];
+    for tok in &tokens {
+        let len = tok.len();
+        if len == 0 || len > lower.len() {
+            continue;
+        }
+        let mut i = 0;
+        while i + len <= lower.len() {
+            if lower[i..i + len] == tok[..] {
+                for m in &mut marked[i..i + len] {
+                    *m = true;
+                }
+                i += len;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let flag = marked[i];
+        let start = i;
+        while i < chars.len() && marked[i] == flag {
+            i += 1;
+        }
+        runs.push((chars[start..i].iter().collect(), flag));
+    }
+    if runs.is_empty() {
+        runs.push((text.to_string(), false));
+    }
+    runs
+}
+
+fn highlighted_text_el(
+    text: &str,
+    query: Option<&str>,
+    font_size: f32,
+    base_weight: FontWeight,
+    color: Color,
+) -> Element {
+    let runs = split_highlighted_runs(text, query);
+    if runs.len() == 1 && !runs[0].1 {
+        return label()
+            .text(text.to_string())
+            .font_size(font_size)
+            .font_weight(base_weight)
+            .color(color)
+            .max_lines(1)
+            .text_overflow(TextOverflow::Ellipsis)
+            .into_element();
+    }
+    let mut p = paragraph().max_lines(1).text_overflow(TextOverflow::Ellipsis);
+    for (segment, is_match) in runs {
+        let weight = if is_match { FontWeight::BOLD } else { base_weight };
+        p = p.span(Span::new(segment).font_size(font_size).font_weight(weight).color(color));
+    }
+    p.into_element()
+}
+
 /// One keyed row inside [`PickerList`]. Kept as its own component so hover hooks stay unconditional per row.
 #[derive(Clone, PartialEq)]
 struct PickerRow {
     item: PickerItem,
     index: usize,
     highlighted: bool,
+    highlight_query: Option<String>,
     on_hover: Option<EventHandler<usize>>,
     on_select: Option<EventHandler<usize>>,
     key: DiffKey,
@@ -439,19 +738,23 @@ impl Component for PickerRow {
                 .cross_align(Alignment::center())
                 .spacing(6.0)
                 .child(label().text("—").font_size(13.5).color(subtitle_color))
-                .child(
-                    label()
-                        .text(sub.clone())
-                        .font_size(13.5)
-                        .font_weight(FontWeight::NORMAL)
-                        .color(subtitle_color)
-                        .max_lines(1)
-                        .text_overflow(TextOverflow::Ellipsis),
-                )
+                .child(highlighted_text_el(
+                    sub,
+                    self.highlight_query.as_deref(),
+                    13.5,
+                    FontWeight::NORMAL,
+                    subtitle_color,
+                ))
         });
 
         let trailing_el: Option<Element> = if let Some(action_label) = &self.item.action_chip {
-            let chip_bg = if is_accent {
+            let chip_bg = if let Some(custom) = self.item.action_chip_color {
+                if is_accent {
+                    Color::from_argb(235, 255, 255, 255)
+                } else {
+                    custom
+                }
+            } else if is_accent {
                 Color::from_argb(235, 255, 255, 255)
             } else if theme.scheme.is_dark() {
                 Color::from_argb(220, 232, 234, 240)
@@ -459,27 +762,34 @@ impl Component for PickerRow {
                 Color::from_argb(215, 58, 62, 74)
             };
             let chip_fg = if is_accent {
-                theme.color(ThemeRole::Accent)
+                self.item
+                    .action_chip_color
+                    .unwrap_or_else(|| theme.color(ThemeRole::Accent))
+            } else if self.item.action_chip_color.is_some() {
+                Color::WHITE
             } else if theme.scheme.is_dark() {
                 Color::from_rgb(28, 30, 38)
             } else {
                 Color::WHITE
             };
-            let arrow_el: Element = if let Some((canonical, bytes)) = prepared_icon_bytes("arrow-right") {
+            let arrow_el: Element = if let Some((canonical, bytes)) = prepared_icon_bytes("urlbar-arrow") {
                 SvgViewer::new((("zendia-icon", canonical), bytes))
-                    .width(Size::px(12.0))
-                    .height(Size::px(12.0))
+                    .width(Size::px(14.0))
+                    .height(Size::px(14.0))
                     .color(chip_fg)
                     .show_loader(false)
                     .into_element()
             } else {
                 label().text("→").font_size(11.0).color(chip_fg).into_element()
             };
+            let chip_opacity = if is_accent { 1.0 } else { 0.7 };
             Some(
                 rect()
                     .direction(Direction::Horizontal)
                     .cross_align(Alignment::center())
                     .spacing(8.0)
+                    .opacity(chip_opacity)
+                    .scale(0.93)
                     .child(
                         label()
                             .text(action_label.clone())
@@ -546,19 +856,17 @@ impl Component for PickerRow {
                     .cross_align(Alignment::center())
                     .spacing(6.0)
                     .overflow(Overflow::Clip)
-                    .child(
-                        label()
-                            .text(self.item.title.clone())
-                            .font_size(14.0)
-                            .font_weight(if self.highlighted || self.item.action_chip.is_some() {
-                                FontWeight::SEMI_BOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .color(title_color)
-                            .max_lines(1)
-                            .text_overflow(TextOverflow::Ellipsis),
-                    )
+                    .child(highlighted_text_el(
+                        &self.item.title,
+                        self.highlight_query.as_deref(),
+                        14.0,
+                        if self.highlighted || self.item.action_chip.is_some() {
+                            FontWeight::SEMI_BOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        },
+                        title_color,
+                    ))
                     .maybe_child(subtitle_el),
             )
             .maybe_child(trailing_el)
@@ -575,6 +883,7 @@ struct VimPickerRow {
     item: PickerItem,
     index: usize,
     highlighted: bool,
+    gliding_cursor: bool,
     on_hover: Option<EventHandler<usize>>,
     on_select: Option<EventHandler<usize>>,
     key: DiffKey,
@@ -594,7 +903,7 @@ impl Component for VimPickerRow {
         let is_selected = self.highlighted;
         let is_hovered = hovered() && !is_selected;
 
-        let (bg, border_color) = if is_selected {
+        let (bg, border_color) = if is_selected && !self.gliding_cursor {
             let accent_bg = match theme.scheme {
                 ResolvedScheme::Dark => Rgba::from_rgb_alpha(255, 255, 255, 0.08)
                     .mix(theme.palette.purple, 0.14)
@@ -686,7 +995,7 @@ impl Component for VimPickerRow {
             None => self.item.title.clone(),
         };
 
-        rect()
+        let row = rect()
             .a11y_role(AccessibilityRole::ListItem)
             .a11y_alt(a11y_label)
             .width(Size::fill())
@@ -700,7 +1009,7 @@ impl Component for VimPickerRow {
             .background(bg)
             .border(
                 Border::new()
-                    .width(if is_selected { 1.0 } else { 0.0 })
+                    .width(if is_selected && !self.gliding_cursor { 1.0 } else { 0.0 })
                     .alignment(BorderAlignment::Inner)
                     .fill(border_color),
             )
@@ -753,7 +1062,13 @@ impl Component for VimPickerRow {
                         .max_lines(1)
                         .text_overflow(TextOverflow::Ellipsis),
                 )
-            }))
+            }));
+
+        if let Some(tip) = &self.item.tooltip {
+            KitTooltip::new(tip.clone()).fill_width(true).child(row).into_element()
+        } else {
+            row.into_element()
+        }
     }
 
     fn render_key(&self) -> DiffKey {
@@ -769,6 +1084,7 @@ pub struct PickerGrid {
     highlighted: Option<usize>,
     max_height: f32,
     empty_message: Option<String>,
+    stagger_trigger: u64,
     on_hover: Option<EventHandler<usize>>,
     on_select: Option<EventHandler<usize>>,
     key: DiffKey,
@@ -788,6 +1104,7 @@ impl PickerGrid {
             highlighted: None,
             max_height: 360.0,
             empty_message: None,
+            stagger_trigger: 0,
             on_hover: None,
             on_select: None,
             key: DiffKey::None,
@@ -814,6 +1131,11 @@ impl PickerGrid {
         self
     }
 
+    pub fn stagger_trigger(mut self, trigger: u64) -> Self {
+        self.stagger_trigger = trigger;
+        self
+    }
+
     pub fn on_hover(mut self, handler: impl Into<EventHandler<usize>>) -> Self {
         self.on_hover = Some(handler.into());
         self
@@ -825,9 +1147,74 @@ impl PickerGrid {
     }
 }
 
+const GRID_TILE_HEIGHT: f32 = 130.0;
+const GRID_GAP: f32 = 4.0;
+
 impl Component for PickerGrid {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
+        let mut scroll = use_scroll_controller(ScrollConfig::default);
+        let mut grid_width = use_state(|| 486.0f32);
+        let mut shown = use_state(|| None::<(Option<usize>, usize)>);
+
+        let cols = self.columns.max(1);
+        let row_count = self.items.len().div_ceil(cols);
+        let estimated_height = row_count as f32 * (GRID_TILE_HEIGHT + GRID_GAP) + 4.0;
+        let container_height = estimated_height.min(self.max_height);
+        let needs_scroll = estimated_height > self.max_height;
+
+        let inner_w = (*grid_width.read() - if needs_scroll { 8.0 } else { 0.0 }).max(120.0);
+        let tile_w = ((inner_w - GRID_GAP * (cols.saturating_sub(1)) as f32) / cols as f32).max(40.0);
+        let target_pos: Option<(f32, f32)> = self.highlighted.filter(|&i| i < self.items.len()).map(|idx| {
+            let r = idx / cols;
+            let c = idx % cols;
+            (c as f32 * (tile_w + GRID_GAP), r as f32 * (GRID_TILE_HEIGHT + GRID_GAP))
+        });
+        let mut prev_pos = use_state(|| target_pos.unwrap_or((0.0, 0.0)));
+        let mut from_pos = use_state(|| target_pos.unwrap_or((0.0, 0.0)));
+        let mut glide_seq = use_state(|| 0u64);
+        if let Some((tx, ty)) = target_pos {
+            let (px, py) = *prev_pos.peek();
+            if (px - tx).abs() > 0.5 || (py - ty).abs() > 0.5 {
+                from_pos.set((px, py));
+                prev_pos.set((tx, ty));
+                let next = glide_seq.peek().wrapping_add(1);
+                glide_seq.set(next);
+            }
+        }
+        let g_seq = *glide_seq.read();
+        let (fx, fy) = *from_pos.read();
+        let (tx, ty) = target_pos.unwrap_or(*prev_pos.read());
+        let cursor_glide = use_animation_with_dependencies(
+            &(g_seq, fx.to_bits(), fy.to_bits(), tx.to_bits(), ty.to_bits()),
+            move |conf, _| {
+                conf.on_creation(OnCreation::Finish);
+                conf.on_change(OnChange::Rerun);
+                AnimNum::new(0.0, 1.0)
+                    .duration(motion::PICKER_CURSOR)
+                    .ease(Ease::Out)
+                    .function(motion::spring_fn())
+            },
+        );
+        let gt = cursor_glide.get().value();
+        let cur_x = fx + (tx - fx) * gt;
+        let cur_y = fy + (ty - fy) * gt;
+
+        let current = (self.highlighted, self.items.len());
+        if *shown.peek() != Some(current) {
+            shown.set(Some(current));
+            if let Some(idx) = self.highlighted
+                && idx < self.items.len()
+            {
+                let row = idx / cols;
+                let top = row as f32 * (GRID_TILE_HEIGHT + GRID_GAP);
+                if row == 0 {
+                    scroll.scroll_to_y(0);
+                } else {
+                    scroll_item_into_view(&mut scroll, top, GRID_TILE_HEIGHT, container_height, estimated_height);
+                }
+            }
+        }
 
         if self.items.is_empty() {
             let Some(message) = &self.empty_message else {
@@ -849,26 +1236,38 @@ impl Component for PickerGrid {
                 .into_element();
         }
 
-        let cols = self.columns.max(1);
-        let row_count = self.items.len().div_ceil(cols);
         let mut rows: Vec<Element> = Vec::with_capacity(row_count);
-
         for row_idx in 0..row_count {
             let start = row_idx * cols;
             let mut cells: Vec<Element> = Vec::with_capacity(cols);
             for col_idx in 0..cols {
                 let item_idx = start + col_idx;
                 if let Some(item) = self.items.get(item_idx) {
+                    let tile_el = PickerGridTile {
+                        item: item.clone(),
+                        index: item_idx,
+                        highlighted: self.highlighted == Some(item_idx),
+                        gliding_cursor: true,
+                        on_hover: self.on_hover.clone(),
+                        on_select: self.on_select.clone(),
+                        key: DiffKey::from(&item.id),
+                    }
+                    .into_element();
+                    let wrapped = if self.stagger_trigger > 0 {
+                        StaggeredRow::new(item_idx)
+                            .trigger(self.stagger_trigger)
+                            .key(("grid-tile-stagger", &item.id))
+                            .child(tile_el)
+                            .into_element()
+                    } else {
+                        tile_el
+                    };
                     cells.push(
-                        PickerGridTile {
-                            item: item.clone(),
-                            index: item_idx,
-                            highlighted: self.highlighted == Some(item_idx),
-                            on_hover: self.on_hover.clone(),
-                            on_select: self.on_select.clone(),
-                            key: DiffKey::from(&item.id),
-                        }
-                        .into_element(),
+                        rect()
+                            .key(format!("cell.{}", item.id))
+                            .width(Size::flex(1.0))
+                            .child(wrapped)
+                            .into_element(),
                     );
                 } else {
                     cells.push(
@@ -885,25 +1284,86 @@ impl Component for PickerGrid {
                     .width(Size::fill())
                     .direction(Direction::Horizontal)
                     .content(Content::Flex)
-                    .spacing(4.0)
+                    .spacing(GRID_GAP)
                     .children(cells)
                     .into_element(),
             );
         }
 
-        let estimated_height = row_count as f32 * 134.0 + (row_count.saturating_sub(1)) as f32 * 4.0 + 4.0;
-        let container_height = estimated_height.min(self.max_height);
+        let gliding_tile = target_pos.map(|_| {
+            let (cursor_bg, top_border, drop_shadow) = match theme.scheme {
+                ResolvedScheme::Dark => (
+                    Rgba::from_rgb_alpha(255, 255, 255, 0.08)
+                        .mix(theme.palette.purple, 0.26)
+                        .with_alpha(0.28)
+                        .to_color(),
+                    Color::from_argb(32, 255, 255, 255),
+                    Shadow::new().y(1.0).blur(3.0).color(Color::from_argb(64, 0, 0, 0)),
+                ),
+                ResolvedScheme::Light => (
+                    Rgba::from_rgb_alpha(255, 255, 255, 0.40)
+                        .mix(theme.palette.purple, 0.26)
+                        .with_alpha(0.45)
+                        .to_color(),
+                    Color::from_argb(140, 255, 255, 255),
+                    Shadow::new().y(1.0).blur(3.0).color(Color::from_argb(26, 20, 22, 40)),
+                ),
+            };
+            rect()
+                .position(Position::new_absolute().left(cur_x).top(cur_y))
+                .width(Size::px(tile_w))
+                .height(Size::px(GRID_TILE_HEIGHT))
+                .corner_radius(CornerRadius::new_all(14.0))
+                .background(cursor_bg)
+                .border(
+                    Border::new()
+                        .width(1.0)
+                        .alignment(BorderAlignment::Inner)
+                        .fill(top_border),
+                )
+                .shadow(drop_shadow)
+                .interactive(Interactive::No)
+        });
 
-        ScrollView::new()
+        let scrollbar_base = theme.rgba(ThemeRole::Scrollbar);
+        let sb_thumb = scrollbar_base.with_alpha(0.45).to_color();
+        let sb_hover = scrollbar_base.with_alpha(0.75).to_color();
+        let sb_active = scrollbar_base.with_alpha(0.90).to_color();
+
+        ScrollView::new_controlled(scroll)
             .width(Size::fill())
             .height(Size::px(container_height))
-            .show_scrollbar(false)
+            .show_scrollbar(needs_scroll)
+            .auto_hide_scrollbars(false)
+            .scrollbar(move |context: ScrollBarContext| {
+                ScrollBar::new(context)
+                    .theme(ScrollBarThemePartial {
+                        background: Some(Preference::Specific(Color::TRANSPARENT)),
+                        thumb_background: Some(Preference::Specific(sb_thumb)),
+                        hover_thumb_background: Some(Preference::Specific(sb_hover)),
+                        active_thumb_background: Some(Preference::Specific(sb_active)),
+                        thumb_cross_size: Some(Preference::Specific(3.5)),
+                        expanded_thumb_cross_size: Some(Preference::Specific(5.5)),
+                        opacity: Some(Preference::Specific(1.0)),
+                        expanded_opacity: Some(Preference::Specific(1.0)),
+                        cross_gap: Some(Preference::Specific(2.0)),
+                        expanded_cross_gap: Some(Preference::Specific(2.0)),
+                    })
+                    .into_element()
+            })
             .child(
                 rect()
                     .a11y_role(AccessibilityRole::ListBox)
                     .width(Size::fill())
-                    .spacing(4.0)
-                    .children(rows),
+                    .padding(Gaps::new(0.0, if needs_scroll { 8.0 } else { 0.0 }, 0.0, 0.0))
+                    .on_sized(move |e: Event<SizedEventData>| {
+                        let w = e.area.width();
+                        if w > 40.0 && (*grid_width.peek() - w).abs() > 0.5 {
+                            grid_width.set(w);
+                        }
+                    })
+                    .maybe_child(gliding_tile)
+                    .child(rect().width(Size::fill()).spacing(GRID_GAP).children(rows)),
             )
             .into_element()
     }
@@ -919,6 +1379,7 @@ struct PickerGridTile {
     item: PickerItem,
     index: usize,
     highlighted: bool,
+    gliding_cursor: bool,
     on_hover: Option<EventHandler<usize>>,
     on_select: Option<EventHandler<usize>>,
     key: DiffKey,
@@ -936,10 +1397,31 @@ impl Component for PickerGridTile {
         let mut hovered = use_state(|| false);
 
         let is_selected = self.highlighted;
+        let lift_anim = use_animation_with_dependencies(&is_selected, move |conf, selected| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *selected { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::PICKER_PLATE_LIFT)
+                .ease(Ease::Out)
+                .function(motion::spring_fn())
+        });
+        let glow_anim = use_animation_with_dependencies(&is_selected, move |conf, selected| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *selected { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::PICKER_PLATE_GLOW)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+
+        let lift_t = lift_anim.get().value().clamp(0.0, 1.05);
+        let glow_t = glow_anim.get().value().clamp(0.0, 1.0);
         let is_hovered = hovered() && !is_selected;
         let is_dimmed = self.item.dimmed && !is_selected;
 
-        let (bg, border_color) = if is_selected {
+        let (bg, border_color) = if is_selected && !self.gliding_cursor {
             let accent_bg = match theme.scheme {
                 ResolvedScheme::Dark => Rgba::from_rgb_alpha(255, 255, 255, 0.08)
                     .mix(theme.palette.purple, 0.14)
@@ -981,32 +1463,37 @@ impl Component for PickerGridTile {
         };
 
         let glow_color = self.item.accent_color.unwrap_or_else(|| theme.color(ThemeRole::Hint));
-        let plate_shadow = if is_selected {
-            Shadow::new()
-                .x(0.0)
-                .y(8.0)
-                .blur(22.0)
-                .spread(-2.0)
-                .color(Color::from_argb(135, glow_color.r(), glow_color.g(), glow_color.b()))
-        } else {
-            Shadow::new()
-                .x(0.0)
-                .y(3.0)
-                .blur(10.0)
-                .color(Color::from_argb(42, 20, 22, 40))
-        };
+        let rest_shadow = Shadow::new().x(0.0).y(3.0).blur(10.0).color(Color::from_argb(
+            ((1.0 - glow_t) * 41.0).round() as u8,
+            20,
+            22,
+            40,
+        ));
+        let glow_shadow = Shadow::new()
+            .x(0.0)
+            .y(10.0)
+            .blur(26.0)
+            .spread(-4.0)
+            .color(Color::from_argb(
+                (glow_t * 178.0).round() as u8,
+                glow_color.r(),
+                glow_color.g(),
+                glow_color.b(),
+            ));
 
+        let icon_dim = if self.item.icon_fill { 60.0 } else { 38.0 };
         let icon_el: Element = if let Some((cache_key, bytes)) = &self.item.custom_icon_svg {
             SvgViewer::new((cache_key.clone(), bytes.clone()))
-                .width(Size::px(38.0))
-                .height(Size::px(38.0))
+                .width(Size::px(icon_dim))
+                .height(Size::px(icon_dim))
                 .show_loader(false)
                 .into_element()
         } else if let Some(icon_name) = &self.item.icon {
+            let glyph_dim = if self.item.icon_fill { 60.0 } else { 34.0 };
             if let Some((canonical, bytes)) = prepared_icon_bytes(icon_name) {
                 SvgViewer::new((("zendia-icon", canonical), bytes))
-                    .width(Size::px(34.0))
-                    .height(Size::px(34.0))
+                    .width(Size::px(glyph_dim))
+                    .height(Size::px(glyph_dim))
                     .color(if is_dimmed {
                         Color::from_rgb(90, 92, 102)
                     } else {
@@ -1016,7 +1503,7 @@ impl Component for PickerGridTile {
                     .into_element()
             } else {
                 Icon::new(icon_name.clone())
-                    .size(34.0)
+                    .size(glyph_dim)
                     .role(ThemeRole::Ink)
                     .into_element()
             }
@@ -1024,22 +1511,26 @@ impl Component for PickerGridTile {
             Icon::new("sparkles").size(30.0).role(ThemeRole::Ink).into_element()
         };
 
+        let plate_scale = 1.0 + 0.08 * lift_t;
+        let plate_offset_y = -2.0 * lift_t;
         let plate = rect()
             .width(Size::px(60.0))
             .height(Size::px(60.0))
             .margin(Gaps::new(0.0, 0.0, 10.0, 0.0))
-            .offset_y(if is_selected { -2.0 } else { 0.0 })
-            .opacity(if is_dimmed { 0.62 } else { 1.0 })
+            .offset_y(plate_offset_y)
+            .scale((plate_scale, plate_scale))
+            .opacity(if is_dimmed { 0.55 } else { 1.0 })
             .corner_radius(CornerRadius::new_all(16.0))
             .overflow(Overflow::Clip)
             .background(plate_bg)
             .border(
                 Border::new()
-                    .width(1.0)
+                    .width(0.5)
                     .alignment(BorderAlignment::Inner)
                     .fill(Color::from_argb(30, 0, 0, 0)),
             )
-            .shadow(plate_shadow)
+            .shadow(rest_shadow)
+            .shadow(glow_shadow)
             .center()
             .child(icon_el);
 
@@ -1052,18 +1543,18 @@ impl Component for PickerGridTile {
             None => self.item.title.clone(),
         };
 
-        rect()
+        let tile = rect()
             .a11y_role(AccessibilityRole::ListItem)
             .a11y_alt(a11y_label)
-            .width(Size::flex(1.0))
-            .height(Size::px(130.0))
+            .width(Size::fill())
+            .height(Size::px(GRID_TILE_HEIGHT))
             .padding(Gaps::new(18.0, 8.0, 12.0, 8.0))
             .cross_align(Alignment::center())
             .corner_radius(CornerRadius::new_all(14.0))
             .background(bg)
             .border(
                 Border::new()
-                    .width(if is_selected { 1.0 } else { 0.0 })
+                    .width(if is_selected && !self.gliding_cursor { 1.0 } else { 0.0 })
                     .alignment(BorderAlignment::Inner)
                     .fill(border_color),
             )
@@ -1109,7 +1600,13 @@ impl Component for PickerGridTile {
                         .max_lines(1)
                         .text_overflow(TextOverflow::Ellipsis),
                 )
-            }))
+            }));
+
+        if let Some(tip) = &self.item.tooltip {
+            KitTooltip::new(tip.clone()).fill_width(true).child(tile).into_element()
+        } else {
+            tile.into_element()
+        }
     }
 
     fn render_key(&self) -> DiffKey {

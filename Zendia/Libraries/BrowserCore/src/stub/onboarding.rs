@@ -324,6 +324,27 @@ impl StubBackend {
         }
         self.apply_essential_choices()?;
 
+        // Create the starter "zendia basics" folder in the active space if it does not already exist (matching ZenWelcome.mjs).
+        let should_create_basics = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let active_space = state.model.active_space;
+            !state.model.folders.iter().any(|folder| {
+                folder.name.eq_ignore_ascii_case("zendia basics")
+                    && (active_space.is_none() || Some(folder.space_id) == active_space)
+            })
+        };
+        if should_create_basics {
+            let active_space = {
+                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.model.active_space
+            };
+            let _ = self.invoke(Command::FolderCreate {
+                name: Some("zendia basics".to_string()),
+                space_id: active_space,
+                tab_id: None,
+            });
+        }
+
         let onboarding = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.model.onboarding.seen = true;
@@ -633,6 +654,12 @@ mod tests {
                 .essential_tabs()
                 .iter()
                 .any(|tab| tab.url == "https://discord.com")
+        );
+        assert!(
+            view_model
+                .folders
+                .iter()
+                .any(|folder| folder.name.eq_ignore_ascii_case("zendia basics"))
         );
     }
 

@@ -85,6 +85,13 @@ fn build_onboarding_fixture(state_id: &str) -> BrowserModel {
             onb.choices.vim_enabled = true;
             onb.choices.agent_id = Some("codex".to_string());
         }
+        "agents-probing" => {
+            onb.page = OnboardingPage::Agents;
+            onb.reached = OnboardingPage::Agents;
+            onb.probing_agents = true;
+            onb.agent_catalog.clear();
+            onb.choices.agent_id = None;
+        }
         "shield-off" => {
             onb.page = OnboardingPage::Shield;
             onb.reached = OnboardingPage::Shield;

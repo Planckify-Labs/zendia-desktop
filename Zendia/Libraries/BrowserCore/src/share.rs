@@ -171,6 +171,109 @@ pub fn stub_share_link(title: &str, url: &str) -> String {
     format!("https://share.zendia.app/s/{:08x}", (hash & 0xffff_ffff) as u32)
 }
 
+/// Kind of shared collection represented by an incoming share link preview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharePreviewKind {
+    Space,
+    Folder,
+}
+
+/// One entry rendered inside an incoming share preview card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SharePreviewItem {
+    Tab {
+        title: String,
+        url: String,
+        icon: Option<String>,
+    },
+    Folder {
+        name: String,
+        icon: String,
+        items: Vec<SharePreviewItem>,
+    },
+    SplitView {
+        tabs: Vec<(String, String, Option<String>)>,
+    },
+}
+
+/// Preview metadata for an incoming Zendia share link (`.zen-share-overlay`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharePreview {
+    pub url: String,
+    pub share_id: String,
+    pub kind: SharePreviewKind,
+    pub name: String,
+    pub sharer_name: Option<String>,
+    pub items: Vec<SharePreviewItem>,
+}
+
+/// Extracts the share token if `url` is a Zendia or Zen share link, otherwise returns `None`.
+pub fn parse_share_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    for prefix in [
+        "https://share.zendia.app/s/",
+        "http://share.zendia.app/s/",
+        "https://zen-browser.app/share/",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let token = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Builds a deterministic stub preview for an incoming share URL until the share server backend is wired up.
+pub fn sample_share_preview(url: &str) -> SharePreview {
+    let share_id = parse_share_url(url).unwrap_or_else(|| "preview".to_string());
+    SharePreview {
+        url: url.to_string(),
+        share_id,
+        kind: SharePreviewKind::Space,
+        name: "Design & Research".to_string(),
+        sharer_name: Some("Alex".to_string()),
+        items: vec![
+            SharePreviewItem::Folder {
+                name: "UI Spec".to_string(),
+                icon: "folder".to_string(),
+                items: vec![
+                    SharePreviewItem::Tab {
+                        title: "Zendia Documentation".to_string(),
+                        url: "https://zendia.local/docs".to_string(),
+                        icon: Some("book".to_string()),
+                    },
+                    SharePreviewItem::Tab {
+                        title: "Design Tokens — Zendia".to_string(),
+                        url: "https://zendia.local/design".to_string(),
+                        icon: Some("flame".to_string()),
+                    },
+                ],
+            },
+            SharePreviewItem::SplitView {
+                tabs: vec![
+                    (
+                        "Architecture — Zendia".to_string(),
+                        "https://zendia.local/architecture".to_string(),
+                        Some("code".to_string()),
+                    ),
+                    (
+                        "Releases — Zendia".to_string(),
+                        "https://zendia.local/releases".to_string(),
+                        Some("rocket".to_string()),
+                    ),
+                ],
+            },
+            SharePreviewItem::Tab {
+                title: "Repository — Zendia".to_string(),
+                url: "https://zendia.local/code".to_string(),
+                icon: Some("code".to_string()),
+            },
+        ],
+    }
+}
+
 fn find_arg<'a>(args: &'a [(String, String)], key: &str) -> Option<&'a str> {
     args.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
@@ -399,5 +502,62 @@ mod tests {
         assert!(saw_close);
         assert_eq!(replica.share.display_name, "Alex");
         assert!(replica.share.dont_ask_again);
+    }
+
+    #[test]
+    fn parse_share_url_recognizes_zendia_and_zen_share_links() {
+        assert_eq!(
+            parse_share_url("https://share.zendia.app/s/deadbeef?v=1"),
+            Some("deadbeef".to_string())
+        );
+        assert_eq!(
+            parse_share_url("https://zen-browser.app/share/abc123"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(parse_share_url("https://example.org/docs"), None);
+        assert_eq!(parse_share_url("https://share.zendia.app/s/"), None);
+
+        let preview = sample_share_preview("https://share.zendia.app/s/deadbeef");
+        assert_eq!(preview.share_id, "deadbeef");
+        assert_eq!(preview.items.len(), 3);
+    }
+
+    #[test]
+    fn stub_share_open_rejects_internal_urls_with_toast() {
+        use crate::BrowserCore;
+        use crate::events::{Event, ViewRequest};
+        use crate::stub::StubBackend;
+
+        let core = StubBackend::new();
+        let sub = core.subscribe();
+        core.invoke(Command::TabNew {
+            url: Some("about:blank".to_string()),
+            after: None,
+            activate: true,
+        })
+        .unwrap();
+        while sub.try_recv().is_ok() {}
+
+        core.invoke(Command::ShareOpen {
+            tab_id: None,
+            space_id: None,
+            folder_id: None,
+        })
+        .unwrap();
+
+        let mut saw_dialog = false;
+        let mut saw_toast = false;
+        while let Ok(ev) = sub.try_recv() {
+            match ev {
+                Event::ViewRequested {
+                    request: ViewRequest::ShareConfirmOpen { .. },
+                    ..
+                } => saw_dialog = true,
+                Event::ToastShown { toast } if toast.message.contains("cannot be shared") => saw_toast = true,
+                _ => {}
+            }
+        }
+        assert!(!saw_dialog);
+        assert!(saw_toast);
     }
 }

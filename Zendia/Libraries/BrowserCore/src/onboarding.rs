@@ -463,6 +463,8 @@ pub struct OnboardingState {
     pub import_sources: Vec<ImportSource>,
     /// Coding agents offered on the Agent page (installed and missing).
     pub agent_catalog: Vec<OnboardingAgentInfo>,
+    /// True while probing the host for installed coding agent CLIs.
+    pub probing_agents: bool,
     /// Last stub-logged import invocation `(source_key, profile_id)`.
     pub last_import: Option<(String, Option<String>)>,
     /// Whether `import.set_default_browser` was invoked with `true`.
@@ -488,6 +490,7 @@ impl OnboardingState {
             choices: OnboardingChoices::default(),
             import_sources: sample_import_sources(),
             agent_catalog: sample_agent_catalog(),
+            probing_agents: false,
             last_import: None,
             default_browser_applied: false,
         }
@@ -504,6 +507,7 @@ impl OnboardingState {
             choices: OnboardingChoices::default(),
             import_sources: sample_import_sources(),
             agent_catalog: sample_agent_catalog(),
+            probing_agents: false,
             last_import: None,
             default_browser_applied: false,
         }

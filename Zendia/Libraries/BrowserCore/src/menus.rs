@@ -42,6 +42,83 @@ pub struct AboutLink {
     pub url: &'static str,
 }
 
+/// Current update-check status rendered in the About Zendia dialog (`#zen-about-update`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum AboutUpdateStatus {
+    /// Updater is unavailable; section stays hidden.
+    Hidden,
+    /// Never checked yet; shows a "Check for updates" button.
+    NeverChecked,
+    /// Actively checking for updates.
+    Checking,
+    /// Current version is up to date.
+    #[default]
+    UpToDate,
+    /// A newer version is available to download and install.
+    Available { version: String },
+    /// Downloading the update package with formatted transfer progress (e.g. `"12.3 of 90.1 MB"`).
+    Downloading { transfer: String },
+    /// Staging / applying the downloaded update.
+    Applying,
+    /// Update is ready; shows a primary "Restart to update" button.
+    ReadyForRestart,
+    /// Restarting to complete the update.
+    Restarting,
+    /// Checking or downloading failed; shows warning icon and retry or manual download action.
+    Failed { message: String, retryable: bool },
+    /// Updates are blocked by system/policy/another instance.
+    Blocked {
+        message: String,
+        learn_more_url: Option<String>,
+    },
+}
+
+impl AboutUpdateStatus {
+    /// Parses a named status preset (for commands, settings, and gallery previews).
+    pub fn from_preset(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "hidden" => Some(Self::Hidden),
+            "never-checked" | "never_checked" => Some(Self::NeverChecked),
+            "checking" => Some(Self::Checking),
+            "up-to-date" | "up_to_date" => Some(Self::UpToDate),
+            "available" => Some(Self::Available {
+                version: "0.2.0".to_string(),
+            }),
+            "downloading" => Some(Self::Downloading {
+                transfer: "18.4 of 64.0 MB".to_string(),
+            }),
+            "applying" => Some(Self::Applying),
+            "ready" | "ready-for-restart" | "ready_for_restart" => Some(Self::ReadyForRestart),
+            "restarting" => Some(Self::Restarting),
+            "failed" => Some(Self::Failed {
+                message: "Could not check for updates".to_string(),
+                retryable: true,
+            }),
+            "blocked" => Some(Self::Blocked {
+                message: "Updates are disabled by your organization".to_string(),
+                learn_more_url: None,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn preset_name(&self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::NeverChecked => "never-checked",
+            Self::Checking => "checking",
+            Self::UpToDate => "up-to-date",
+            Self::Available { .. } => "available",
+            Self::Downloading { .. } => "downloading",
+            Self::Applying => "applying",
+            Self::ReadyForRestart => "ready",
+            Self::Restarting => "restarting",
+            Self::Failed { .. } => "failed",
+            Self::Blocked { .. } => "blocked",
+        }
+    }
+}
+
 /// Core-owned metadata rendered by the About Zendia dialog.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AboutInfo {
@@ -121,6 +198,34 @@ pub fn about_info() -> AboutInfo {
         primary_links: ABOUT_PRIMARY_LINKS,
         legal_links: ABOUT_LEGAL_LINKS,
     }
+}
+
+/// Resolved entries for the sidebar bottom `+` button's Create New popup (`#zenCreateNewPopup`).
+pub fn builtin_create_new_menu_items(key_table: Option<&KeyTable>) -> Vec<ResolvedMenuItem> {
+    let hint = |cmd: &str| key_table.and_then(|t| shortcut_hint_from_table(t, cmd, &[]));
+    vec![
+        ResolvedMenuItem {
+            icon: Some("duplicate-tab".to_string()),
+            shortcut_hint: hint("space.create_form.open"),
+            ..ResolvedMenuItem::action("zendia.create.space", "New Space", "space.create_form.open")
+        },
+        ResolvedMenuItem {
+            icon: Some("folder".to_string()),
+            shortcut_hint: hint("folder.create"),
+            ..ResolvedMenuItem::action("zendia.create.folder", "New Folder", "folder.create")
+        },
+        ResolvedMenuItem::separator("zendia.create.sep"),
+        ResolvedMenuItem {
+            icon: Some("split".to_string()),
+            shortcut_hint: hint("split.new_empty"),
+            ..ResolvedMenuItem::action("zendia.create.split", "New Empty Split", "split.new_empty")
+        },
+        ResolvedMenuItem {
+            icon: Some("plus".to_string()),
+            shortcut_hint: hint("tab.new"),
+            ..ResolvedMenuItem::action("zendia.create.tab", "New Tab", "tab.new")
+        },
+    ]
 }
 
 /// A resolved menu entry ready for a UI view to draw (with separators inserted and submenus nested).
@@ -803,6 +908,15 @@ pub fn ask_site_pick(item: &ResolvedMenuItem) -> Option<ChatSiteId> {
         .map(|(_, value)| ChatSiteId::new(value.clone()))
 }
 
+fn ask_site_icon_token(chat_sites: &[ChatSite], chat_site_id: &str) -> String {
+    let icon = chat_sites
+        .iter()
+        .find(|site| site.id.0 == chat_site_id)
+        .map(|site| site.icon.as_str())
+        .unwrap_or(chat_site_id);
+    format!("chat-site:{icon}")
+}
+
 /// Points the Ask submenus among `items` at `site`: relabels them, checks `site` in their row of sites and sends their
 /// prompts to it.
 pub fn retarget_ask_menu(items: &mut [ResolvedMenuItem], site: &ChatSite) {
@@ -812,6 +926,7 @@ pub fn retarget_ask_menu(items: &mut [ResolvedMenuItem], site: &ChatSite) {
             PAGE_ASK_MENU_ID => page_ask_label(&site.name),
             _ => continue,
         };
+        item.icon = Some(format!("chat-site:{}", site.icon));
         for child in &mut item.children {
             if let Some(picked) = ask_site_pick(child) {
                 child.kind = MenuEntryKind::Checkable {
@@ -843,10 +958,11 @@ pub fn builtin_tab_context_entries_for_site(
     let loc = MenuLocation::TabContext;
     let ask_label = tab_ask_label(chat_site_name);
 
+    let ask_icon = ask_site_icon_token(chat_sites, chat_site_id);
     let mut entries = ask_site_entries(TAB_ASK_MENU_ID, loc, chat_sites, chat_site_id);
     entries.extend([
         // Group: zendia_ask
-        submenu_entry(TAB_ASK_MENU_ID, loc, &ask_label, Some("sparkles"), "zendia_ask", 10),
+        submenu_entry(TAB_ASK_MENU_ID, loc, &ask_label, Some(&ask_icon), "zendia_ask", 10),
         MenuEntry {
             command_args: vec![
                 ("site_id".to_string(), chat_site_id.to_string()),
@@ -1139,9 +1255,10 @@ pub fn builtin_page_context_entries_for_site(
     let loc = MenuLocation::PageContext;
     let ask_label = page_ask_label(chat_site_name);
 
+    let ask_icon = ask_site_icon_token(chat_sites, chat_site_id);
     let mut entries = ask_site_entries(PAGE_ASK_MENU_ID, loc, chat_sites, chat_site_id);
     entries.extend([
-        submenu_entry(PAGE_ASK_MENU_ID, loc, &ask_label, Some("sparkles"), "zendia", 10),
+        submenu_entry(PAGE_ASK_MENU_ID, loc, &ask_label, Some(&ask_icon), "zendia", 10),
         MenuEntry {
             command_args: vec![
                 ("site_id".to_string(), chat_site_id.to_string()),

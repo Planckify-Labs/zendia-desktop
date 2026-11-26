@@ -7,6 +7,7 @@
 //! View-local menu overlay state ([`MenuViewState`]), positioning/clamping helpers, and command dispatch.
 
 use crate::ui::core_view::CoreView;
+use crate::ui::kit::{PopupHorizontalAlign, anchor_popup_origin};
 use freya::prelude::*;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::menus::{ResolvedMenuItem, SelectDropdownItem};
@@ -73,9 +74,13 @@ pub struct MenuViewState {
     /// Whether the extensions menu (every installed extension, like Firefox's puzzle-piece panel) is open.
     pub extensions_menu_open: State<bool>,
     pub extensions_menu_anchor: State<AnchorRect>,
+    /// Whether the sidebar bottom `+` Create New popup (`#zenCreateNewPopup`) is open.
+    pub create_new_open: State<bool>,
+    pub create_new_anchor: State<AnchorRect>,
     pub about_open: State<bool>,
     pub context_menu: State<Option<OpenContextMenu>>,
     pub select_dropdown: State<Option<OpenSelectDropdown>>,
+    pub select_seq: State<u64>,
 }
 
 impl MenuViewState {
@@ -88,10 +93,37 @@ impl MenuViewState {
                 let mut anchor_state = self.app_menu_anchor;
                 anchor_state.set(rect);
             }
+            self.close_extensions_menu();
+            self.close_create_new();
             self.close_context_menu();
             self.close_select_dropdown();
+            self.close_about();
         }
         open.set(next);
+    }
+
+    /// Toggles the sidebar `+` Create New popup, closing any other open menu.
+    pub fn toggle_create_new(&self, anchor: Option<AnchorRect>) {
+        let mut open = self.create_new_open;
+        let next = !*open.peek();
+        if next {
+            if let Some(rect) = anchor {
+                let mut anchor_state = self.create_new_anchor;
+                anchor_state.set(rect);
+            }
+            self.close_app_menu();
+            self.close_extensions_menu();
+            self.close_context_menu();
+            self.close_select_dropdown();
+            self.close_about();
+        }
+        open.set(next);
+    }
+
+    /// Closes the sidebar `+` Create New popup.
+    pub fn close_create_new(&self) {
+        let mut open = self.create_new_open;
+        open.set_if_modified(false);
     }
 
     /// Opens the application menu anchored to `anchor`.
@@ -99,8 +131,11 @@ impl MenuViewState {
     pub fn open_app_menu(&self, anchor: AnchorRect) {
         let mut anchor_state = self.app_menu_anchor;
         anchor_state.set(anchor);
+        self.close_extensions_menu();
+        self.close_create_new();
         self.close_context_menu();
         self.close_select_dropdown();
+        self.close_about();
         let mut open = self.app_menu_open;
         open.set(true);
     }
@@ -117,8 +152,10 @@ impl MenuViewState {
         let next = !*open.peek();
         if next {
             self.close_app_menu();
+            self.close_create_new();
             self.close_context_menu();
             self.close_select_dropdown();
+            self.close_about();
         }
         open.set(next);
     }
@@ -132,6 +169,8 @@ impl MenuViewState {
     /// Opens the About Zendia modal dialog, closing transient menus first.
     pub fn open_about(&self) {
         self.close_app_menu();
+        self.close_extensions_menu();
+        self.close_create_new();
         self.close_context_menu();
         self.close_select_dropdown();
         let mut open = self.about_open;
@@ -147,7 +186,10 @@ impl MenuViewState {
     /// Opens a context menu at its requested window coordinates, closing any other open menu.
     pub fn open_context_menu(&self, menu: OpenContextMenu) {
         self.close_app_menu();
+        self.close_extensions_menu();
+        self.close_create_new();
         self.close_select_dropdown();
+        self.close_about();
         let mut state = self.context_menu;
         state.set(Some(menu));
     }
@@ -163,7 +205,13 @@ impl MenuViewState {
     /// Opens a `<select>` dropdown popup, closing any other open menu.
     pub fn open_select_dropdown(&self, dropdown: OpenSelectDropdown) {
         self.close_app_menu();
+        self.close_extensions_menu();
+        self.close_create_new();
         self.close_context_menu();
+        self.close_about();
+        let mut seq = self.select_seq;
+        let next_seq = seq.peek().wrapping_add(1);
+        seq.set(next_seq);
         let mut state = self.select_dropdown;
         state.set(Some(dropdown));
     }
@@ -181,6 +229,7 @@ impl MenuViewState {
     pub fn close_all(&self) {
         self.close_app_menu();
         self.close_extensions_menu();
+        self.close_create_new();
         self.close_context_menu();
         self.close_select_dropdown();
         self.close_about();
@@ -191,6 +240,7 @@ impl MenuViewState {
     pub fn has_open_overlay(&self) -> bool {
         *self.app_menu_open.read()
             || *self.extensions_menu_open.read()
+            || *self.create_new_open.read()
             || *self.about_open.read()
             || self.context_menu.read().is_some()
             || self.select_dropdown.read().is_some()
@@ -203,18 +253,24 @@ pub fn use_provide_menu_state() -> MenuViewState {
     let app_menu_anchor = use_state(AnchorRect::default);
     let extensions_menu_open = use_state(|| false);
     let extensions_menu_anchor = use_state(AnchorRect::default);
+    let create_new_open = use_state(|| false);
+    let create_new_anchor = use_state(AnchorRect::default);
     let about_open = use_state(|| false);
     let context_menu = use_state(|| None::<OpenContextMenu>);
     let select_dropdown = use_state(|| None::<OpenSelectDropdown>);
+    let select_seq = use_state(|| 0u64);
 
     use_provide_context(|| MenuViewState {
         app_menu_open,
         app_menu_anchor,
         extensions_menu_open,
         extensions_menu_anchor,
+        create_new_open,
+        create_new_anchor,
         about_open,
         context_menu,
         select_dropdown,
+        select_seq,
     })
 }
 
@@ -280,14 +336,10 @@ pub fn clamp_popup_origin(
     (x.clamp(margin, max_x), y.clamp(margin, max_y))
 }
 
-/// Computes the anchored origin for the application menu below `anchor`, clamped inside `window_size`.
+/// Computes the anchored origin for the application menu below (or above when near the bottom) `anchor`, right-aligned
+/// when anchored on the right side of the window and clamped inside `window_size`.
 pub fn compute_app_menu_origin(anchor: AnchorRect, popup_size: (f32, f32), window_size: (f32, f32)) -> (f32, f32) {
-    let margin = 8.0;
-    let desired_x = anchor.x;
-    let desired_y = anchor.y + anchor.height + 6.0;
-    let max_x = (window_size.0 - popup_size.0 - margin).max(margin);
-    let max_y = (window_size.1 - popup_size.1 - margin).max(margin);
-    (desired_x.clamp(margin, max_x), desired_y.clamp(margin, max_y))
+    anchor_popup_origin(anchor, popup_size, window_size, PopupHorizontalAlign::Auto, 6.0, 8.0)
 }
 
 /// Places a popup under its anchor, or above it when there is no room below (a button at the sidebar's bottom edge),
@@ -297,17 +349,7 @@ pub fn compute_popup_origin_above_or_below(
     popup_size: (f32, f32),
     window_size: (f32, f32),
 ) -> (f32, f32) {
-    let margin = 8.0;
-    let gap = 6.0;
-    let max_x = (window_size.0 - popup_size.0 - margin).max(margin);
-    let below = anchor.y + anchor.height + gap;
-    let above = anchor.y - gap - popup_size.1;
-    let y = if below + popup_size.1 + margin <= window_size.1 || above < margin {
-        below.min((window_size.1 - popup_size.1 - margin).max(margin))
-    } else {
-        above
-    };
-    (anchor.x.clamp(margin, max_x), y)
+    anchor_popup_origin(anchor, popup_size, window_size, PopupHorizontalAlign::Auto, 6.0, 8.0)
 }
 
 /// Computes the floating origin for a cascading submenu next to a parent menu row, flipping left if near the right edge.
@@ -392,9 +434,10 @@ mod tests {
             width: 28.0,
             height: 28.0,
         };
+        // Top-right anchor right-aligns the popup to the button's right edge (1200 + 28 - 320 = 908).
         assert_eq!(
             compute_popup_origin_above_or_below(top_button, (320.0, 300.0), window),
-            (952.0, 42.0)
+            (908.0, 42.0)
         );
         let bottom_button = AnchorRect {
             x: 40.0,

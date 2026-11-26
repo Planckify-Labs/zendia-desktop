@@ -18,9 +18,9 @@ use freya::prelude::*;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::contributions::MenuLocation;
 use zendia_browser_core::menus::{
-    APP_MENU_GROUPS, MediaMenuContext, PageContextMenuKind, PageContextMenuRequest, SelectDropdownItem, SelectOption,
-    TAB_CONTEXT_GROUPS, build_page_context_menu, builtin_app_menu_entries, builtin_page_context_entries,
-    builtin_tab_context_entries, resolve_contributed_menu,
+    APP_MENU_GROUPS, AboutUpdateStatus, MediaMenuContext, PageContextMenuKind, PageContextMenuRequest,
+    SelectDropdownItem, SelectOption, build_page_context_menu, build_tab_context_menu, builtin_app_menu_entries,
+    builtin_page_context_entries, resolve_contributed_menu,
 };
 use zendia_browser_core::model::TabId;
 use zendia_keymap::KeyTable;
@@ -40,13 +40,24 @@ impl Component for MenusSection {
         let core = use_core();
         let menu_state = use_menu_state();
         let key_table = use_hook(KeyTable::standard);
+        let mut preview_vim = use_state(|| self.state_id == "app-menu-vim-on");
+        let mut last_state_id = use_state(|| self.state_id.clone());
+        if *last_state_id.peek() != self.state_id {
+            last_state_id.set(self.state_id.clone());
+            preview_vim.set(self.state_id == "app-menu-vim-on");
+        }
 
         let content: Element = match self.state_id.as_str() {
-            "app-menu-vim-off" => render_app_menu_state(&theme, &core, &menu_state, &key_table, false, None),
-            "app-menu-vim-on" => render_app_menu_state(&theme, &core, &menu_state, &key_table, true, None),
-            "app-menu-submenu" => {
-                render_app_menu_state(&theme, &core, &menu_state, &key_table, false, Some("zendia.app.help"))
-            }
+            "app-menu-vim-off" => render_app_menu_state(&theme, &core, &menu_state, &key_table, preview_vim, None),
+            "app-menu-vim-on" => render_app_menu_state(&theme, &core, &menu_state, &key_table, preview_vim, None),
+            "app-menu-submenu" => render_app_menu_state(
+                &theme,
+                &core,
+                &menu_state,
+                &key_table,
+                preview_vim,
+                Some("zendia.app.help"),
+            ),
             "context-page" => render_page_context_state(&key_table),
             "context-editable" => render_editable_context_state(&key_table),
             "context-selection" => render_selection_context_state(&key_table),
@@ -56,7 +67,7 @@ impl Component for MenusSection {
             "context-tab" => render_tab_context_state(&key_table),
             "select-dropdown" => render_select_dropdown_state(),
             "about-dialog" => render_about_dialog_state(&theme, &menu_state),
-            _ => render_app_menu_state(&theme, &core, &menu_state, &key_table, false, None),
+            _ => render_app_menu_state(&theme, &core, &menu_state, &key_table, preview_vim, None),
         };
 
         ScrollView::new().width(Size::fill()).height(Size::fill()).child(
@@ -122,14 +133,21 @@ fn render_app_menu_state(
     core: &crate::ui::core_view::CoreView,
     menu_state: &crate::ui::chrome::menus::MenuViewState,
     key_table: &KeyTable,
-    vim_enabled: bool,
+    mut preview_vim: State<bool>,
     initial_submenu: Option<&str>,
 ) -> Element {
+    let vim_enabled = *preview_vim.read();
     let entries = builtin_app_menu_entries(vim_enabled);
     let items = resolve_contributed_menu(&entries, MenuLocation::AppMenu, Some(key_table), APP_MENU_GROUPS);
     let zoom_level = core.model().read().zoom_level;
 
-    let mut panel = AppMenuInteractive::new(items, zoom_level).key((vim_enabled, initial_submenu.unwrap_or("")));
+    let mut panel = AppMenuInteractive::new(items, zoom_level)
+        .on_toggle(move |(cmd, next): (String, bool)| {
+            if cmd == "vim.set_enabled" {
+                preview_vim.set(next);
+            }
+        })
+        .key(initial_submenu.unwrap_or("main"));
     if let Some(sub) = initial_submenu {
         panel = panel.initial_open_submenu(sub);
     }
@@ -323,12 +341,17 @@ fn render_media_context_state(key_table: &KeyTable) -> Element {
 }
 
 fn render_tab_context_state(key_table: &KeyTable) -> Element {
-    let entries = builtin_tab_context_entries("ChatGPT", 0);
-    let items = resolve_contributed_menu(&entries, MenuLocation::TabContext, Some(key_table), TAB_CONTEXT_GROUPS);
+    let core = use_core();
+    let model = core.model().read().clone();
+    let tab_id = model
+        .active_tab
+        .or_else(|| model.tabs.first().map(|t| t.id))
+        .unwrap_or(TabId(1));
+    let items = build_tab_context_menu(&model, tab_id, Some(key_table));
 
     demo_card(
         "Tab Context Menu (Zendia entries in Ladybird native menu look)",
-        "Contributed via MenuLocation::TabContext with Ask ChatGPT submenu, Move to Folder, Split View, Essentials quota badge, and tab actions.",
+        "Contributed via MenuLocation::TabContext with Ask ChatGPT site-picker row, Move to Folder, Split View, Essentials quota badge, and tab actions.",
         ContextMenuCard::new(items)
             .key("ctx-tab")
             .initial_open_submenu("zendia.tab.ask"),
@@ -407,13 +430,38 @@ fn render_about_dialog_state(
     let core = use_core();
     let modal_state = *menu_state;
     let cmd_core = core.clone();
+    let current_status = core.model().read().about_update_status.clone();
+
+    let preset_chips = [
+        ("up-to-date", "Up to date"),
+        ("checking", "Checking"),
+        ("available", "Available"),
+        ("downloading", "Downloading"),
+        ("ready", "Restart ready"),
+        ("failed", "Failed"),
+        ("blocked", "Blocked"),
+    ]
+    .into_iter()
+    .map(|(preset, caption)| {
+        let chip_core = core.clone();
+        let active = current_status.preset_name() == preset;
+        KitChip::new(caption)
+            .selected(active)
+            .on_press(move |_| {
+                if let Some(status) = AboutUpdateStatus::from_preset(preset) {
+                    chip_core.invoke_or_log(Command::AppSetUpdateStatus { status });
+                }
+            })
+            .key(preset)
+            .into_element()
+    });
 
     demo_card(
         "About Zendia Dialog",
-        "Matches Zen's compact About layout with geometric Tokyonight emblem, Cargo version copy button, Ladybird attribution, and clickable links.",
+        "Matches Zen's compact About layout with Living Emblem mascot, timed version copy feedback, update status section, Ladybird attribution, and keyboard-focusable links.",
         rect()
             .width(Size::fill())
-            .spacing(16.0)
+            .spacing(12.0)
             .child(
                 rect()
                     .direction(Direction::Horizontal)
@@ -428,6 +476,12 @@ fn render_about_dialog_state(
                                 cmd_core.invoke_or_log(Command::AppAbout);
                             }),
                     ),
+            )
+            .child(
+                rect()
+                    .direction(Direction::Horizontal)
+                    .spacing(6.0)
+                    .children(preset_chips),
             )
             .child(
                 rect()

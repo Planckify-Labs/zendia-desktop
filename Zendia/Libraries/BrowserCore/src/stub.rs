@@ -32,7 +32,7 @@ use crate::model::{
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
 use crate::site_info::{
-    PermissionState, SiteDataSummary, SiteExtension, SiteInfo, SitePermission, SitePermissionKind, origin_for_url,
+    PermissionState, SiteDataSummary, SiteInfo, SitePermission, SitePermissionKind, origin_for_url,
 };
 use crate::tab_source::{TabSource, TabUpdate};
 use std::cell::Cell;
@@ -83,6 +83,7 @@ struct StubState {
     debug_input_step: usize,
     /// The last tab opened, so a command that opens a tab through the engine can find it.
     last_opened_tab: Option<TabId>,
+    suppress_bg_tab_toast: bool,
     last_toast_id: u64,
     registered_pickers: BTreeMap<PickerRequestId, PickerRequest>,
     active_picker: Option<PickerRequest>,
@@ -141,6 +142,7 @@ impl StubBackend {
                 next_step_id,
                 debug_input_step: 0,
                 last_opened_tab: None,
+                suppress_bg_tab_toast: false,
                 last_toast_id: 0,
                 registered_pickers: BTreeMap::new(),
                 active_picker: None,
@@ -148,6 +150,26 @@ impl StubBackend {
             }),
             tab_source: Mutex::new(None),
             bus: EventBus::new(),
+        }
+    }
+
+    /// Applies a persisted shell layout and side-panel preference record on startup.
+    pub fn apply_shell_layout_profile(&self, record: Option<crate::shell_layout::ShellLayoutRecord>) {
+        let Some(mut record) = record else {
+            return;
+        };
+        record.layout.normalize_compact_state();
+        let (layout, panel_prefs) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.layout = record.layout.clone();
+            for (panel_id, prefs) in record.panel_prefs {
+                state.model.side_panel_prefs.insert(panel_id, prefs);
+            }
+            (state.model.layout.clone(), state.model.side_panel_prefs.clone())
+        };
+        self.bus.publish(Event::LayoutSettingsChanged { layout });
+        for (panel_id, prefs) in panel_prefs {
+            self.bus.publish(Event::PanelPrefsChanged { panel_id, prefs });
         }
     }
 
@@ -231,7 +253,7 @@ impl StubBackend {
 
     /// Records a tab opened by an attached [`TabSource`] and publishes the corresponding events.
     pub fn feed_tab_opened(&self, mut tab: Tab, after: Option<TabId>, activate: bool) {
-        let (opened_event, activated_event) = {
+        let (opened_event, activated_event, bg_toast_tab) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.model.tabs.iter().any(|existing| existing.id == tab.id) {
                 return;
@@ -260,13 +282,34 @@ impl StubBackend {
             } else {
                 None
             };
-            (Event::TabOpened { tab, index }, activated)
+            let bg_toast_tab = (!should_activate
+                && !state.suppress_bg_tab_toast
+                && state.model.layout.compact_hides_sidebar()
+                && state.model.settings.compact_show_background_tab_toast)
+                .then_some(tab.id);
+            (Event::TabOpened { tab, index }, activated, bg_toast_tab)
         };
 
         self.bus.publish(opened_event);
         if let Some(activated_event) = activated_event {
             self.bus.publish(activated_event);
         }
+        if let Some(bg_tab_id) = bg_toast_tab {
+            self.show_background_tab_toast(bg_tab_id);
+        }
+    }
+
+    fn show_background_tab_toast(&self, tab_id: TabId) {
+        let action = crate::toasts::ToastAction {
+            label: "Switch".to_string(),
+            command: "tab.activate".to_string(),
+            command_args: vec![("tab_id".to_string(), tab_id.0.to_string())],
+        };
+        self.show_toast(
+            crate::toasts::messages::BACKGROUND_TAB_OPENED.to_string(),
+            Some(action),
+            None,
+        );
     }
 
     /// Applies incremental field updates from an attached [`TabSource`] and publishes [`Event::TabUpdated`].
@@ -327,11 +370,25 @@ impl StubBackend {
     /// Records a tab closed by an attached [`TabSource`] and returns the suggested next tab to activate if the closed
     /// tab was active.
     pub fn feed_tab_closed(&self, tab_id: TabId) -> Option<TabId> {
-        let (removed, was_active, next_tab) = {
+        let (removed, was_active, next_tab, closed_tabs_snapshot) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let index = state.model.tabs.iter().position(|tab| tab.id == tab_id)?;
-            let closed_space = state.model.tabs[index].space_id;
-            state.model.tabs.remove(index);
+            let closed_tab = state.model.tabs.remove(index);
+            let closed_space = closed_tab.space_id;
+            let mut closed_tabs_snapshot = None;
+            if !closed_tab.url.is_empty() && closed_tab.url != "about:blank" {
+                let next_closed_id = state.model.closed_tabs.iter().map(|e| e.id.0).max().unwrap_or(100_000) + 1;
+                let entry = HistoryEntry {
+                    id: HistoryEntryId(next_closed_id),
+                    url: closed_tab.url.clone(),
+                    title: closed_tab.display_title(),
+                    visited_at_unix: crate::history::current_unix_secs(),
+                    visit_count: 1,
+                };
+                state.model.closed_tabs.insert(0, entry);
+                state.model.closed_tabs.truncate(50);
+                closed_tabs_snapshot = Some(state.model.closed_tabs.clone());
+            }
             state.model.essentials.retain(|item| item.tab_id != tab_id);
             normalize_essential_orders(&mut state.model.essentials);
             state.model.pinned_tabs.retain(|item| item.tab_id != tab_id);
@@ -383,11 +440,14 @@ impl StubBackend {
             } else {
                 None
             };
-            (true, was_active, next_tab)
+            (true, was_active, next_tab, closed_tabs_snapshot)
         };
 
         if removed {
             self.bus.publish(Event::TabClosed { tab_id });
+            if let Some(closed_tabs) = closed_tabs_snapshot {
+                self.bus.publish(Event::ClosedTabsChanged { closed_tabs });
+            }
             if was_active && next_tab.is_none() {
                 self.bus.publish(Event::TabActivated { tab_id: None });
             }
@@ -480,7 +540,7 @@ impl StubBackend {
     }
 
     fn handle_stub_tab_new(&self, url: Option<String>, after: Option<TabId>, activate: bool) -> CommandResult {
-        let (opened_event, activated_event) = {
+        let (opened_event, activated_event, bg_toast_tab) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let id = TabId(state.next_tab_id);
             state.next_tab_id += 1;
@@ -509,7 +569,8 @@ impl StubBackend {
                 .unwrap_or(state.model.tabs.len());
             state.model.tabs.insert(index, tab.clone());
             state.last_opened_tab = Some(id);
-            let activated = if activate || state.model.active_tab.is_none() {
+            let should_activate = activate || state.model.active_tab.is_none();
+            let activated = if should_activate {
                 state.model.active_tab = Some(id);
                 if let Some(window) = state.model.windows.first_mut() {
                     window.active_tab = Some(id);
@@ -523,11 +584,19 @@ impl StubBackend {
             } else {
                 None
             };
-            (Event::TabOpened { tab, index }, activated)
+            let bg_toast_tab = (!should_activate
+                && !state.suppress_bg_tab_toast
+                && state.model.layout.compact_hides_sidebar()
+                && state.model.settings.compact_show_background_tab_toast)
+                .then_some(id);
+            (Event::TabOpened { tab, index }, activated, bg_toast_tab)
         };
         self.bus.publish(opened_event);
         if let Some(event) = activated_event {
             self.bus.publish(event);
+        }
+        if let Some(bg_tab_id) = bg_toast_tab {
+            self.show_background_tab_toast(bg_tab_id);
         }
         Ok(())
     }
@@ -1376,6 +1445,10 @@ impl StubBackend {
                         state.model.share.dont_ask_again,
                     )
                 };
+                if matches!(payload.target, share::ShareTarget::Page { .. }) && !share::is_shareable_url(&payload.url) {
+                    self.show_toast("This page cannot be shared.".to_string(), None, None);
+                    return Ok(());
+                }
                 if skip_confirm {
                     let link = share::stub_share_link(&payload.title, &payload.url);
                     eprintln!(
@@ -1383,7 +1456,12 @@ impl StubBackend {
                         payload.title, payload.url, payload.initial_name, link
                     );
                     self.bus.publish(Event::ClipboardCopyRequested { text: link });
-                    self.show_toast("Share link copied!".to_string(), None, Some(6000));
+                    self.show_toast_with_description(
+                        "Share link copied!".to_string(),
+                        Some("Expires in 30 days".to_string()),
+                        None,
+                        Some(6000),
+                    );
                 } else {
                     self.request_view(ViewRequest::ShareConfirmOpen { payload });
                 }
@@ -1416,7 +1494,12 @@ impl StubBackend {
                 );
                 self.bus.publish(Event::ShareSettingsChanged { settings });
                 self.bus.publish(Event::ClipboardCopyRequested { text: link });
-                self.show_toast("Share link copied!".to_string(), None, Some(6000));
+                self.show_toast_with_description(
+                    "Share link copied!".to_string(),
+                    Some("Expires in 30 days".to_string()),
+                    None,
+                    Some(6000),
+                );
                 self.request_view(ViewRequest::ShareConfirmClose);
                 Ok(())
             }
@@ -1429,7 +1512,7 @@ impl StubBackend {
     }
 
     fn handle_tab_pin(&self, tab_id: TabId) -> CommandResult {
-        let (updated_tab, pinned_tabs, essentials_changed, updated_folder) = {
+        let (updated_tab, pinned_tabs, pinned_urls, essentials_changed, updated_folder) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let active_space = state.model.active_space.unwrap_or(SpaceId(1));
             let Some(tab) = state.model.tabs.iter_mut().find(|t| t.id == tab_id) else {
@@ -1443,7 +1526,9 @@ impl StubBackend {
             let was_essential = tab.kind == TabKind::Essential;
             tab.kind = TabKind::Pinned;
             tab.space_id = Some(target_space);
+            let pinned_origin_url = tab.url.clone();
             let updated_tab = tab.clone();
+            state.model.pinned_urls.insert(tab_id, pinned_origin_url);
 
             let mut updated_folder = None;
             if let Some(folder_id) = old_folder
@@ -1485,6 +1570,7 @@ impl StubBackend {
             (
                 updated_tab,
                 state.model.pinned_tabs.clone(),
+                state.model.pinned_urls.clone(),
                 essentials_changed,
                 updated_folder,
             )
@@ -1492,6 +1578,7 @@ impl StubBackend {
 
         self.bus.publish(Event::TabUpdated { tab: updated_tab });
         self.bus.publish(Event::PinnedTabsChanged { pinned_tabs });
+        self.bus.publish(Event::TabPinnedUrlsChanged { pinned_urls });
         if let Some(essentials) = essentials_changed {
             self.bus.publish(Event::EssentialsChanged { essentials });
         }
@@ -1502,7 +1589,7 @@ impl StubBackend {
     }
 
     fn handle_tab_unpin(&self, tab_id: TabId) -> CommandResult {
-        let (updated_tab, pinned_tabs) = {
+        let (updated_tab, pinned_tabs, pinned_urls) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let active_space = state.model.active_space.unwrap_or(SpaceId(1));
             let Some(tab) = state.model.tabs.iter_mut().find(|t| t.id == tab_id) else {
@@ -1519,12 +1606,15 @@ impl StubBackend {
             }
             let updated_tab = tab.clone();
             state.model.pinned_tabs.retain(|item| item.tab_id != tab_id);
+            state.model.pinned_urls.remove(&tab_id);
             normalize_pinned_orders(&mut state.model.pinned_tabs);
-            (updated_tab, state.model.pinned_tabs.clone())
+            let pinned_urls = state.model.pinned_urls.clone();
+            (updated_tab, state.model.pinned_tabs.clone(), pinned_urls)
         };
 
         self.bus.publish(Event::TabUpdated { tab: updated_tab });
         self.bus.publish(Event::PinnedTabsChanged { pinned_tabs });
+        self.bus.publish(Event::TabPinnedUrlsChanged { pinned_urls });
         Ok(())
     }
 
@@ -1719,6 +1809,217 @@ impl StubBackend {
             tab.clone()
         };
         self.bus.publish(Event::TabUpdated { tab: updated_tab });
+        self.show_toast("Tab renamed".to_string(), None, None);
+        Ok(())
+    }
+
+    fn handle_tab_unload(&self, tab_id: TabId) -> CommandResult {
+        let (unloaded_tabs, next_active) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.model.tab(tab_id).is_none() {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.unload".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            }
+            state.model.unloaded_tabs.insert(tab_id);
+            let mut next_active = None;
+            if state.model.active_tab == Some(tab_id) {
+                let space_id = state.model.active_space;
+                next_active = state
+                    .model
+                    .tabs
+                    .iter()
+                    .find(|t| {
+                        t.id != tab_id
+                            && !state.model.unloaded_tabs.contains(&t.id)
+                            && (t.space_id == space_id || t.kind == TabKind::Essential)
+                    })
+                    .map(|t| t.id);
+                if let Some(next_id) = next_active {
+                    state.model.active_tab = Some(next_id);
+                }
+            }
+            (state.model.unloaded_tabs.clone(), next_active)
+        };
+        self.bus.publish(Event::TabUnloadedChanged { unloaded_tabs });
+        if let Some(next_id) = next_active {
+            self.bus.publish(Event::TabActivated { tab_id: Some(next_id) });
+        }
+        Ok(())
+    }
+
+    fn handle_tab_reset_pin(&self, tab_id: TabId, tab_source: Option<&Arc<dyn TabSource>>) -> CommandResult {
+        let (updated_tab, reset_url) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(pinned_url) = state.model.pinned_urls.get(&tab_id).cloned() else {
+                return Ok(());
+            };
+            let Some(tab) = state.model.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.reset_pin".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            tab.url = pinned_url.clone();
+            (tab.clone(), pinned_url)
+        };
+        if let Some(source) = tab_source {
+            let _ = source.load_url(tab_id, &reset_url);
+        }
+        self.bus.publish(Event::TabUpdated { tab: updated_tab });
+        Ok(())
+    }
+
+    fn handle_tab_pinned_close_action(&self, tab_id: TabId, tab_source: Option<&Arc<dyn TabSource>>) -> CommandResult {
+        use crate::settings::PinnedTabCloseBehavior;
+        let (behavior, already_unloaded) = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            (
+                state.model.settings.pinned_tab_close_behavior,
+                state.model.is_tab_unloaded(tab_id),
+            )
+        };
+        if already_unloaded || behavior == PinnedTabCloseBehavior::Close {
+            return if let Some(source) = tab_source {
+                source.close_tab(tab_id, false)
+            } else {
+                self.handle_stub_tab_close(tab_id)
+            };
+        }
+        match behavior {
+            PinnedTabCloseBehavior::ResetUnloadSwitch => {
+                self.handle_tab_reset_pin(tab_id, tab_source)?;
+                self.handle_tab_unload(tab_id)
+            }
+            PinnedTabCloseBehavior::UnloadSwitch => self.handle_tab_unload(tab_id),
+            PinnedTabCloseBehavior::ResetSwitch => {
+                self.handle_tab_reset_pin(tab_id, tab_source)?;
+                if let Some(next_id) = self.adjacent_tab_id(1)
+                    && next_id != tab_id
+                {
+                    if let Some(source) = tab_source {
+                        source.activate_tab(next_id)?;
+                    } else {
+                        self.feed_tab_activated(Some(next_id));
+                    }
+                }
+                Ok(())
+            }
+            PinnedTabCloseBehavior::Switch => {
+                if let Some(next_id) = self.adjacent_tab_id(1)
+                    && next_id != tab_id
+                {
+                    if let Some(source) = tab_source {
+                        source.activate_tab(next_id)?;
+                    } else {
+                        self.feed_tab_activated(Some(next_id));
+                    }
+                }
+                Ok(())
+            }
+            PinnedTabCloseBehavior::Reset => self.handle_tab_reset_pin(tab_id, tab_source),
+            PinnedTabCloseBehavior::Close => Ok(()),
+        }
+    }
+
+    fn handle_tab_close_multiple(&self, tab_ids: Vec<TabId>, tab_source: Option<&Arc<dyn TabSource>>) -> CommandResult {
+        for tab_id in tab_ids {
+            let exists = {
+                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.model.tab(tab_id).is_some()
+            };
+            if !exists {
+                continue;
+            }
+            if let Some(source) = tab_source {
+                let _ = source.close_tab(tab_id, false);
+            } else {
+                let _ = self.handle_stub_tab_close(tab_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_folder_unload_tabs(&self, folder_id: FolderId) -> CommandResult {
+        let tab_ids: Vec<TabId> = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(folder) = state.model.folder(folder_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "folder.unload_tabs".to_string(),
+                    target: format!("folder {}", folder_id.0),
+                });
+            };
+            folder.tab_ids.clone()
+        };
+        for tab_id in tab_ids {
+            let _ = self.handle_tab_unload(tab_id);
+        }
+        Ok(())
+    }
+
+    fn handle_folder_reorder(
+        &self,
+        folder_id: FolderId,
+        target_index: usize,
+        parent_folder_id: Option<FolderId>,
+    ) -> CommandResult {
+        let (folders, folder_parents) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(from_idx) = state.model.folders.iter().position(|f| f.id == folder_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "folder.reorder".to_string(),
+                    target: format!("folder {}", folder_id.0),
+                });
+            };
+            let folder = state.model.folders.remove(from_idx);
+            let clamped = target_index.min(state.model.folders.len());
+            state.model.folders.insert(clamped, folder);
+            match parent_folder_id {
+                Some(parent_id) if parent_id != folder_id && state.model.folder(parent_id).is_some() => {
+                    state.model.folder_parents.insert(folder_id, parent_id);
+                }
+                _ => {
+                    state.model.folder_parents.remove(&folder_id);
+                }
+            }
+            (state.model.folders.clone(), state.model.folder_parents.clone())
+        };
+        self.bus.publish(Event::FolderHierarchyChanged {
+            folders,
+            folder_parents,
+        });
+        Ok(())
+    }
+
+    fn handle_tab_detach_to_new_window(&self, tab_id: TabId) -> CommandResult {
+        let title = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(tab) = state.model.tab(tab_id) else {
+                return Err(CommandError::TargetNotFound {
+                    command: "tab.detach_to_new_window".to_string(),
+                    target: format!("tab {}", tab_id.0),
+                });
+            };
+            tab.display_title()
+        };
+        let next_window_id = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let id = WindowId(state.model.windows.iter().map(|w| w.id.0).max().unwrap_or(0) + 1);
+            let active_space = state.model.active_space;
+            state.model.windows.push(Window {
+                id,
+                title: title.clone(),
+                active_space,
+                active_tab: Some(tab_id),
+            });
+            id
+        };
+        self.show_toast(
+            format!("Detached \"{title}\" to window {}", next_window_id.0),
+            None,
+            None,
+        );
         Ok(())
     }
 
@@ -2432,8 +2733,10 @@ impl StubBackend {
         let toast = crate::toasts::Toast {
             id: crate::toasts::ToastId(9020),
             message: format!("Opened {site_name}: {prompt}"),
+            description: None,
             timeout_ms: 3000,
             action: None,
+            bounce_seq: 0,
         };
         {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -2483,6 +2786,7 @@ impl StubBackend {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.model.layout.toolbar_layout = layout;
             state.model.layout.sidebar_expanded = !matches!(layout, ToolbarLayout::Collapsed);
+            state.model.layout.normalize_compact_state();
             state.model.layout.clone()
         };
         self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
@@ -2493,6 +2797,7 @@ impl StubBackend {
         let updated = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.model.layout.compact_mode = enabled;
+            state.model.layout.normalize_compact_state();
             state.model.layout.clone()
         };
         self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
@@ -2509,6 +2814,7 @@ impl StubBackend {
             } else {
                 ToolbarLayout::Collapsed
             };
+            state.model.layout.normalize_compact_state();
             state.model.layout.clone()
         };
         self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
@@ -2524,6 +2830,7 @@ impl StubBackend {
             } else if state.model.layout.toolbar_layout == ToolbarLayout::Collapsed {
                 state.model.layout.toolbar_layout = ToolbarLayout::Multiple;
             }
+            state.model.layout.normalize_compact_state();
             state.model.layout.clone()
         };
         self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
@@ -2534,6 +2841,7 @@ impl StubBackend {
         let updated = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.model.layout.sidebar_side = side;
+            state.model.layout.normalize_compact_state();
             state.model.layout.clone()
         };
         self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
@@ -2549,7 +2857,8 @@ impl StubBackend {
         }
         let updated = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            state.model.layout.sidebar_width = LayoutSettings::clamp_sidebar_width(width);
+            let clamped = crate::shell_layout::clamp_sidebar_width_for_layout(&state.model.layout, width);
+            state.model.layout.sidebar_width = clamped;
             state.model.layout.clone()
         };
         self.bus.publish(Event::LayoutSettingsChanged { layout: updated });
@@ -2734,16 +3043,24 @@ impl BrowserCore for StubBackend {
                 new_tab,
                 in_background,
             } => {
-                let resolved_url = url.or_else(|| {
-                    let id = entry_id?;
-                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                    state
-                        .model
-                        .history
-                        .iter()
-                        .find(|entry| entry.id == id)
-                        .map(|entry| entry.url.clone())
-                });
+                let (resolved_url, updated_closed_tabs) = if let Some(u) = url {
+                    (Some(u), None)
+                } else if let Some(id) = entry_id {
+                    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    if let Some(found) = state.model.history.iter().find(|entry| entry.id == id) {
+                        (Some(found.url.clone()), None)
+                    } else if let Some(pos) = state.model.closed_tabs.iter().position(|entry| entry.id == id) {
+                        let entry = state.model.closed_tabs.remove(pos);
+                        (Some(entry.url), Some(state.model.closed_tabs.clone()))
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                };
+                if let Some(closed_tabs) = updated_closed_tabs {
+                    self.bus.publish(Event::ClosedTabsChanged { closed_tabs });
+                }
                 let Some(target_url) = resolved_url else {
                     return Err(CommandError::TargetNotFound {
                         command: name,
@@ -2789,19 +3106,31 @@ impl BrowserCore for StubBackend {
                 }
             }
             Command::HistoryDelete { entry_id } => {
-                let history = {
+                let (history_update, closed_update) = {
                     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                     let before = state.model.history.len();
                     state.model.history.retain(|entry| entry.id != entry_id);
-                    if state.model.history.len() == before {
-                        return Err(CommandError::TargetNotFound {
-                            command: name,
-                            target: format!("history entry {}", entry_id.0),
-                        });
+                    if state.model.history.len() != before {
+                        (Some(state.model.history.clone()), None)
+                    } else {
+                        let before_closed = state.model.closed_tabs.len();
+                        state.model.closed_tabs.retain(|entry| entry.id != entry_id);
+                        if state.model.closed_tabs.len() != before_closed {
+                            (None, Some(state.model.closed_tabs.clone()))
+                        } else {
+                            return Err(CommandError::TargetNotFound {
+                                command: name,
+                                target: format!("history entry {}", entry_id.0),
+                            });
+                        }
                     }
-                    state.model.history.clone()
                 };
-                self.bus.publish(Event::HistoryChanged { history });
+                if let Some(history) = history_update {
+                    self.bus.publish(Event::HistoryChanged { history });
+                }
+                if let Some(closed_tabs) = closed_update {
+                    self.bus.publish(Event::ClosedTabsChanged { closed_tabs });
+                }
                 Ok(())
             }
             Command::HistoryForgetSite { host } => {
@@ -3094,6 +3423,20 @@ impl BrowserCore for StubBackend {
                 let target = self.resolve_target_tab(tab_id, &name)?;
                 self.handle_tab_toggle_pin(target)
             }
+            Command::TabUnload { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_unload(target)
+            }
+            Command::TabResetPin { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_reset_pin(target, tab_source.as_ref())
+            }
+            Command::TabPinnedCloseAction { tab_id } => {
+                let target = self.resolve_target_tab(tab_id, &name)?;
+                self.handle_tab_pinned_close_action(target, tab_source.as_ref())
+            }
+            Command::TabCloseMultiple { tab_ids } => self.handle_tab_close_multiple(tab_ids, tab_source.as_ref()),
+            Command::TabDetachToNewWindow { tab_id } => self.handle_tab_detach_to_new_window(tab_id),
             Command::TabAddToEssentials { tab_id } => {
                 let target = self.resolve_target_tab(tab_id, &name)?;
                 self.handle_tab_add_to_essentials(target)
@@ -3137,6 +3480,12 @@ impl BrowserCore for StubBackend {
             Command::FolderDelete { folder_id } => self.handle_folder_delete(folder_id),
             Command::FolderUnpack { folder_id } => self.handle_folder_unpack(folder_id),
             Command::FolderToggleCollapsed { folder_id } => self.handle_folder_toggle_collapsed(folder_id),
+            Command::FolderUnloadTabs { folder_id } => self.handle_folder_unload_tabs(folder_id),
+            Command::FolderReorder {
+                folder_id,
+                target_index,
+                parent_folder_id,
+            } => self.handle_folder_reorder(folder_id, target_index, parent_folder_id),
             Command::NotificationDismiss { notification_id } => self.handle_notification_dismiss(notification_id),
             Command::SplitAdd { tab_id, direction } => self.handle_split_add(tab_id, direction),
             Command::PanelToggle { panel_id } => self.handle_panel_toggle(panel_id),
@@ -3199,6 +3548,7 @@ impl BrowserCore for StubBackend {
             | Command::StatuslineAnnounce { .. }
             | Command::StatuslineClearAnnouncement
             | Command::WhichKeyShowAll
+            | Command::WhichKeyBack
             | Command::WhichKeyHide) => self.handle_input_state_command(command),
             Command::VimSetEnabled { enabled } => self.handle_vim_set_enabled(enabled),
             Command::ZoomIn { tab_id } => {
@@ -3231,6 +3581,25 @@ impl BrowserCore for StubBackend {
             }
             Command::AppAbout => {
                 self.request_view(ViewRequest::AboutDialog);
+                Ok(())
+            }
+            Command::AppCheckUpdates => {
+                let status = crate::menus::AboutUpdateStatus::Checking;
+                self.state
+                    .lock()
+                    .expect("stub state poisoned")
+                    .model
+                    .about_update_status = status.clone();
+                self.bus.publish(Event::AboutUpdateStatusChanged { status });
+                Ok(())
+            }
+            Command::AppSetUpdateStatus { status } => {
+                self.state
+                    .lock()
+                    .expect("stub state poisoned")
+                    .model
+                    .about_update_status = status.clone();
+                self.bus.publish(Event::AboutUpdateStatusChanged { status });
                 Ok(())
             }
             Command::AppQuit => {
@@ -3484,30 +3853,11 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::SidebarBottom,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarBottom),
+                    single_toolbar_compact: Some(ToolbarArea::SidebarBottom),
                     multiple_toolbars: Some(ToolbarArea::SidebarBottom),
                     collapsed_toolbar: Some(ToolbarArea::SidebarBottom),
                 },
                 order: -50,
-                badge: None,
-                visible: true,
-                enabled: true,
-                source: ContributionSource::BuiltIn,
-            },
-            ToolbarItem {
-                id: ContributionId::new("builtin.extensions"),
-                title: "Extensions".to_string(),
-                tooltip: Some("Extensions".to_string()),
-                icon: "extension".to_string(),
-                command: "extensions.menu.toggle".to_string(),
-                command_args: Vec::new(),
-                kind: ToolbarItemKind::Button,
-                placement: ToolbarPlacement::NavigationEnd,
-                placement_rules: ToolbarPlacementRules {
-                    single_toolbar: Some(ToolbarArea::SidebarBottom),
-                    multiple_toolbars: Some(ToolbarArea::TopBarEnd),
-                    collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
-                },
-                order: -4,
                 badge: None,
                 visible: true,
                 enabled: true,
@@ -3524,6 +3874,7 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::NavigationEnd,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarBottom),
+                    single_toolbar_compact: Some(ToolbarArea::TopBarEnd),
                     multiple_toolbars: Some(ToolbarArea::TopBarEnd),
                     collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
                 },
@@ -3544,6 +3895,7 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::NavigationEnd,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarBottom),
+                    single_toolbar_compact: Some(ToolbarArea::TopBarEnd),
                     multiple_toolbars: Some(ToolbarArea::TopBarEnd),
                     collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
                 },
@@ -3564,6 +3916,7 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::NavigationEnd,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: None,
+                    single_toolbar_compact: None,
                     multiple_toolbars: Some(ToolbarArea::TopBarEnd),
                     collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
                 },
@@ -3584,6 +3937,7 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::SidebarTop,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarTopStart),
+                    single_toolbar_compact: Some(ToolbarArea::SidebarTopStart),
                     multiple_toolbars: Some(ToolbarArea::TopBarEnd),
                     collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
                 },
@@ -3595,15 +3949,16 @@ fn sample_contributions() -> Contributions {
             },
             ToolbarItem {
                 id: ContributionId::new("builtin.sidebar_toggle"),
-                title: "Toggle Sidebar".to_string(),
-                tooltip: Some("Expand or Collapse Sidebar".to_string()),
+                title: "Compact Mode".to_string(),
+                tooltip: Some("Toggle Compact Mode".to_string()),
                 icon: "sidebar".to_string(),
-                command: "sidebar.toggle_expanded".to_string(),
+                command: "layout.toggle_compact_mode".to_string(),
                 command_args: Vec::new(),
                 kind: ToolbarItemKind::Button,
                 placement: ToolbarPlacement::SidebarTop,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarTopStart),
+                    single_toolbar_compact: Some(ToolbarArea::SidebarTopStart),
                     multiple_toolbars: Some(ToolbarArea::TopBarStart),
                     collapsed_toolbar: Some(ToolbarArea::TopBarStart),
                 },
@@ -3624,6 +3979,7 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::NavigationStart,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarTopEnd),
+                    single_toolbar_compact: Some(ToolbarArea::SidebarTopEnd),
                     multiple_toolbars: Some(ToolbarArea::TopBarStart),
                     collapsed_toolbar: Some(ToolbarArea::TopBarStart),
                 },
@@ -3644,6 +4000,7 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::NavigationStart,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarTopEnd),
+                    single_toolbar_compact: Some(ToolbarArea::SidebarTopEnd),
                     multiple_toolbars: Some(ToolbarArea::TopBarStart),
                     collapsed_toolbar: Some(ToolbarArea::TopBarStart),
                 },
@@ -3664,6 +4021,7 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::NavigationStart,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarTopEnd),
+                    single_toolbar_compact: Some(ToolbarArea::SidebarTopEnd),
                     multiple_toolbars: Some(ToolbarArea::TopBarStart),
                     collapsed_toolbar: Some(ToolbarArea::TopBarStart),
                 },
@@ -3684,6 +4042,7 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::AddressBarEnd,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarUrlBar),
+                    single_toolbar_compact: Some(ToolbarArea::SidebarUrlBar),
                     multiple_toolbars: Some(ToolbarArea::TopBarCenter),
                     collapsed_toolbar: Some(ToolbarArea::TopBarCenter),
                 },
@@ -3704,6 +4063,7 @@ fn sample_contributions() -> Contributions {
                 placement: ToolbarPlacement::SidebarBottom,
                 placement_rules: ToolbarPlacementRules {
                     single_toolbar: Some(ToolbarArea::SidebarBottom),
+                    single_toolbar_compact: Some(ToolbarArea::SidebarBottom),
                     multiple_toolbars: Some(ToolbarArea::SidebarBottom),
                     collapsed_toolbar: Some(ToolbarArea::SidebarBottom),
                 },
@@ -3741,7 +4101,7 @@ fn sample_contributions() -> Contributions {
                 icon: "webchat".to_string(),
                 default_layout: SidePanelLayout::Float,
                 default_side: SidePanelSide::Right,
-                default_width: 460.0,
+                default_width: 480.0,
                 source: ContributionSource::BuiltIn,
             },
         ],
@@ -4262,17 +4622,7 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
     ];
     site_info.insert(zendia_site.origin.clone(), zendia_site);
 
-    let site_extensions = vec![SiteExtension {
-        id: ContributionId::new("ext.ublock_origin"),
-        name: "uBlock Origin".to_string(),
-        icon: "tracking-protection-fill".to_string(),
-        enabled: true,
-        has_site_access: true,
-        command: "extension.ublock.toggle".to_string(),
-        source: ContributionSource::Extension {
-            extension_id: "ublock-origin@zendia".to_string(),
-        },
-    }];
+    let site_extensions = crate::modules::unpinned_site_extensions(&crate::modules::sample_extensions());
 
     let claude_agent = AgentId::new("claude-code");
     let codex_agent = AgentId::new("codex");
@@ -4494,6 +4844,13 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         active_tab,
     }];
 
+    let mut pinned_urls = BTreeMap::new();
+    for item in &pinned_tabs {
+        if let Some(tab) = tabs.iter().find(|t| t.id == item.tab_id) {
+            pinned_urls.insert(tab.id, tab.url.clone());
+        }
+    }
+
     BrowserModel {
         windows,
         spaces,
@@ -4512,6 +4869,7 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         library_media: Vec::new(),
         library_media_folders: Vec::new(),
         history,
+        closed_tabs: Vec::new(),
         bookmarks,
         search_engine: SearchEngine::default(),
         site_info,
@@ -4553,6 +4911,10 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         shield_enabled: true,
         onboarding: crate::onboarding::OnboardingState::default_seen(),
         zoom_level: 1.0,
+        about_update_status: crate::menus::AboutUpdateStatus::UpToDate,
+        pinned_urls,
+        unloaded_tabs: std::collections::BTreeSet::new(),
+        folder_parents: BTreeMap::new(),
     }
 }
 
@@ -5227,12 +5589,17 @@ mod tests {
         let sub = core.subscribe();
 
         assert_eq!(view_model.layout.toolbar_layout, ToolbarLayout::Single);
-        assert_eq!(view_model.layout.sidebar_side, SidebarSide::Left);
+        assert_eq!(view_model.layout.sidebar_side, SidebarSide::Right);
         assert!(view_model.layout.sidebar_expanded);
         assert_eq!(view_model.layout.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
         assert!(!view_model.layout.compact_mode);
+        assert_eq!(view_model.layout.compact_hide, crate::model::CompactHide::Sidebar);
         assert!(!view_model.layout.has_top_toolbar());
-        assert_eq!(view_model.layout.effective_sidebar_width(), SIDEBAR_DEFAULT_WIDTH);
+        // A single toolbar with the sidebar on the right also holds the window buttons, so it is wider.
+        assert_eq!(
+            view_model.layout.effective_sidebar_width(),
+            crate::shell_layout::SIDEBAR_RIGHT_SINGLE_MIN_WIDTH
+        );
 
         core.invoke(Command::LayoutSetToolbarLayout {
             layout: ToolbarLayout::Multiple,
@@ -5342,9 +5709,19 @@ mod tests {
             );
         }
 
+        assert!(
+            !items.iter().any(|item| item.id.as_str() == "builtin.extensions"),
+            "builtin.extensions must not be placed on toolbars (extensions live in the site panel)"
+        );
+
         let item = |id: &str| items.iter().find(|i| i.id.as_str() == id).unwrap();
         let single = LayoutSettings {
             toolbar_layout: ToolbarLayout::Single,
+            ..LayoutSettings::default()
+        };
+        let single_compact = LayoutSettings {
+            toolbar_layout: ToolbarLayout::Single,
+            compact_mode: true,
             ..LayoutSettings::default()
         };
         let multiple = LayoutSettings {
@@ -5366,7 +5743,28 @@ mod tests {
             Some(ToolbarArea::TopBarCenter)
         );
         assert_eq!(
+            single.resolve_toolbar_area(item("zendia.agents").placement_rules),
+            Some(ToolbarArea::SidebarBottom)
+        );
+        assert_eq!(
             single.resolve_toolbar_area(item("zendia.chat").placement_rules),
+            Some(ToolbarArea::SidebarBottom)
+        );
+        // Single-toolbar compact mode moves Agents and Chat out of the sidebar bottom row into the compact top bar.
+        assert_eq!(
+            single_compact.resolve_toolbar_area(item("zendia.agents").placement_rules),
+            Some(ToolbarArea::TopBarEnd)
+        );
+        assert_eq!(
+            single_compact.resolve_toolbar_area(item("zendia.chat").placement_rules),
+            Some(ToolbarArea::TopBarEnd)
+        );
+        assert_eq!(
+            single_compact.resolve_toolbar_area(item("builtin.library").placement_rules),
+            Some(ToolbarArea::SidebarBottom)
+        );
+        assert_eq!(
+            single_compact.resolve_toolbar_area(item("builtin.new_tab").placement_rules),
             Some(ToolbarArea::SidebarBottom)
         );
         assert_eq!(
@@ -5916,5 +6314,70 @@ mod tests {
                 state: PermissionState::Block,
             }
         );
+    }
+
+    #[test]
+    fn pinned_reset_unload_and_multi_close_commands_work() {
+        let core = StubBackend::new();
+        let pinned_id = core.model().pinned_tabs[0].tab_id;
+        let orig_url = core.model().pinned_url_for(pinned_id).unwrap().to_string();
+
+        // Navigate the pinned tab away to trigger URL drift (`PIN-02`).
+        core.invoke(Command::NavigationLoadUrl {
+            tab_id: Some(pinned_id),
+            input: "https://zendia.local/drifted".to_string(),
+        })
+        .unwrap();
+        assert!(core.model().has_pinned_url_drift(pinned_id));
+
+        // Reset restores the original pinned URL.
+        core.invoke(Command::TabResetPin {
+            tab_id: Some(pinned_id),
+        })
+        .unwrap();
+        assert_eq!(core.model().tab(pinned_id).unwrap().url, orig_url);
+        assert!(!core.model().has_pinned_url_drift(pinned_id));
+
+        // Pinned close action unloads first, then closes when already unloaded (`PIN-01`).
+        core.invoke(Command::TabPinnedCloseAction {
+            tab_id: Some(pinned_id),
+        })
+        .unwrap();
+        assert!(core.model().is_tab_unloaded(pinned_id));
+        assert!(core.model().tab(pinned_id).is_some());
+
+        // Rename emits "Tab renamed" toast (`REN-03`).
+        let normal_tabs: Vec<TabId> = core
+            .model()
+            .tabs
+            .iter()
+            .filter(|t| t.kind == TabKind::Normal)
+            .map(|t| t.id)
+            .collect();
+        core.invoke(Command::TabRename {
+            tab_id: Some(normal_tabs[0]),
+            title: "Custom Name".to_string(),
+        })
+        .unwrap();
+        assert!(core.model().toasts.iter().any(|t| t.message == "Tab renamed"));
+
+        // Multi-close removes every listed tab (`TAB-04`).
+        let to_close = normal_tabs[..2].to_vec();
+        core.invoke(Command::TabCloseMultiple {
+            tab_ids: to_close.clone(),
+        })
+        .unwrap();
+        for id in to_close {
+            assert!(core.model().tab(id).is_none());
+        }
+
+        // Space reorder moves Work space before default space (`SPC-01`).
+        let work_id = core.model().spaces[1].id;
+        core.invoke(Command::SpaceReorder {
+            space_id: work_id,
+            index: 0,
+        })
+        .unwrap();
+        assert_eq!(core.model().spaces[0].id, work_id);
     }
 }

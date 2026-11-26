@@ -10,9 +10,10 @@
 
 use crate::ui::chrome::menus::{OpenContextMenu, try_use_menu_state};
 use crate::ui::core_view::use_core;
+use crate::ui::kit::list_nav::scroll_item_into_view;
 use crate::ui::kit::{Icon, IconButton, KitChip};
 use crate::ui::library::nav::{LibraryCursorRing, LibraryNavLayout, LibraryNavRow, use_library_nav};
-use crate::ui::library::search::LibrarySearchBar;
+use crate::ui::library::search::{LibraryFilterChip, LibraryFilterGroup, LibrarySearchBar};
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_theme};
 use freya::engine::prelude::{Canvas, Color as SkColor, Paint, PaintCap, PaintStyle, PathBuilder, Point as SkPoint};
 use freya::prelude::*;
@@ -28,8 +29,8 @@ use zendia_browser_core::downloads::{
 use zendia_browser_core::library::LibrarySection;
 use zendia_browser_core::model::{Download, DownloadId, DownloadStatus};
 
-/// Width of this section's body next to the rail.
-pub const WIDTH: f32 = 320.0;
+/// Width of this section's body next to the rail (Zen's `418px - 110px`).
+pub const WIDTH: f32 = 308.0;
 
 const DOWNLOAD_TICK_MS: u64 = 250;
 
@@ -76,9 +77,12 @@ impl Component for DownloadsSection {
         let local_when = use_state(|| None::<DownloadWhenFilter>);
 
         let mut query = provided.map(|s| s.query).unwrap_or(local_query);
-        let mut filters_open = provided.map(|s| s.filters_open).unwrap_or(local_filters_open);
+        let filters_open = provided.map(|s| s.filters_open).unwrap_or(local_filters_open);
         let mut selected_groups = provided.map(|s| s.file_groups).unwrap_or(local_groups);
         let mut selected_when = provided.map(|s| s.when).unwrap_or(local_when);
+        let mut scroll_controller = use_scroll_controller(ScrollConfig::default);
+        let mut viewport_height = use_state(|| 480.0f32);
+        let mut last_scrolled_cursor = use_state(|| None::<String>);
 
         // Advance any simulated sample downloads while this section is mounted.
         use_hook({
@@ -110,10 +114,17 @@ impl Component for DownloadsSection {
         };
         let day_groups = group_downloads_by_day(&downloads, &filter, now_unix);
 
-        let nav_rows: Vec<LibraryNavRow> = day_groups
-            .iter()
-            .flat_map(|group| group.downloads.iter())
-            .map(|download| {
+        let mut nav_rows = Vec::new();
+        let mut row_offsets: Vec<(String, f32, f32)> = Vec::new();
+        let mut y_cursor = 0.0f32;
+        const ROW_HEIGHT: f32 = 56.0;
+        const GROUP_HEADER_HEIGHT: f32 = 32.0;
+        for group in &day_groups {
+            y_cursor += GROUP_HEADER_HEIGHT;
+            for download in &group.downloads {
+                let key = format!("download:{}", download.id.0);
+                row_offsets.push((key.clone(), y_cursor, ROW_HEIGHT));
+                y_cursor += ROW_HEIGHT + 2.0;
                 let activate = if download.status == DownloadStatus::InProgress {
                     Some(Command::DownloadToggleOpenWhenDone {
                         download_id: download.id,
@@ -131,193 +142,77 @@ impl Component for DownloadsSection {
                         download_id: download.id,
                     })
                 };
-                LibraryNavRow::new(format!("download:{}", download.id.0), activate)
-            })
-            .collect();
+                nav_rows.push(LibraryNavRow::new(key, activate));
+            }
+            y_cursor += 10.0;
+        }
+        let content_height = y_cursor + 12.0;
 
         let focused_key = use_library_nav(LibrarySection::Downloads, LibraryNavLayout::List, nav_rows);
 
-        let is_filters_open = *filters_open.read();
+        if *last_scrolled_cursor.peek() != focused_key {
+            last_scrolled_cursor.set(focused_key.clone());
+            if let Some(target_key) = focused_key.as_deref()
+                && let Some(&(_, item_top, item_h)) = row_offsets.iter().find(|(k, _, _)| k == target_key)
+            {
+                let vh = *viewport_height.peek();
+                scroll_item_into_view(&mut scroll_controller, item_top, item_h, vh, content_height);
+            }
+        }
+
+        let current_groups = selected_groups.read().clone();
+        let current_when = *selected_when.read();
         let active_filter_count = filter.active_filter_count();
         let has_finished = downloads.iter().any(is_finished);
 
-        let pill_bg = match theme.scheme {
-            ResolvedScheme::Dark => Color::from_argb(22, 255, 255, 255),
-            ResolvedScheme::Light => Color::from_argb(18, 0, 0, 0),
-        };
-        let pill_active_bg = theme.rgba(ThemeRole::Accent).with_alpha(0.24).to_color();
+        let filter_groups = vec![
+            LibraryFilterGroup::new(
+                "type",
+                "File type",
+                DownloadFileGroup::ALL
+                    .into_iter()
+                    .map(|g| LibraryFilterChip::new(g.id(), g.label(), current_groups.contains(&g)))
+                    .collect(),
+            ),
+            LibraryFilterGroup::new(
+                "when",
+                "When was it downloaded?",
+                DownloadWhenFilter::ALL
+                    .into_iter()
+                    .map(|w| LibraryFilterChip::new(w.id(), w.label(), current_when == Some(w)))
+                    .collect(),
+            ),
+        ];
 
-        let top_bar = if !is_filters_open {
-            rect()
-                .width(Size::fill())
-                .padding(Gaps::new(10.0, 12.0, 6.0, 10.0))
-                .direction(Direction::Horizontal)
-                .content(Content::Flex)
-                .cross_align(Alignment::center())
-                .spacing(6.0)
-                .child(
-                    rect()
-                        .width(Size::flex(1.0))
-                        .child(LibrarySearchBar::new("Search Downloads…", query)),
-                )
-                .child(
-                    rect()
-                        .height(Size::px(34.0))
-                        .padding(Gaps::new(0.0, 10.0, 0.0, 10.0))
-                        .corner_radius(CornerRadius::new_all(10.0))
-                        .background(if active_filter_count > 0 {
-                            pill_active_bg
+        let top_bar = LibrarySearchBar::new("Search Downloads…", query)
+            .filter_title("Filter Downloads…")
+            .filter_groups(filter_groups)
+            .filters_open(filters_open)
+            .active_filter_count(active_filter_count)
+            .on_toggle_filter(move |(group_id, option_id): (String, String)| match group_id.as_str() {
+                "type" => {
+                    if let Some(group) = DownloadFileGroup::from_id(&option_id) {
+                        let mut list = selected_groups.write();
+                        if let Some(pos) = list.iter().position(|g| *g == group) {
+                            list.remove(pos);
                         } else {
-                            pill_bg
-                        })
-                        .direction(Direction::Horizontal)
-                        .cross_align(Alignment::center())
-                        .spacing(6.0)
-                        .cursor(CursorIcon::Pointer)
-                        .on_press(move |_| {
-                            filters_open.set(true);
-                        })
-                        .child(
-                            Icon::new("circle-bars-filter")
-                                .size(15.0)
-                                .role(if active_filter_count > 0 {
-                                    ThemeRole::Accent
-                                } else {
-                                    ThemeRole::TextMuted
-                                }),
-                        )
-                        .child(
-                            label()
-                                .text(if active_filter_count > 0 {
-                                    format!("Filter ({active_filter_count})")
-                                } else {
-                                    "Filter".to_string()
-                                })
-                                .font_size(13.0)
-                                .font_weight(FontWeight::MEDIUM)
-                                .color(if active_filter_count > 0 {
-                                    theme.color(ThemeRole::Accent)
-                                } else {
-                                    theme.color(ThemeRole::Text)
-                                }),
-                        ),
-                )
-                .into_element()
-        } else {
-            let current_groups = selected_groups.read().clone();
-            let current_when = *selected_when.read();
-
-            rect()
-                .width(Size::fill())
-                .padding(Gaps::new(12.0, 14.0, 10.0, 14.0))
-                .spacing(12.0)
-                .child(
-                    rect()
-                        .width(Size::fill())
-                        .direction(Direction::Horizontal)
-                        .main_align(Alignment::SpaceBetween)
-                        .cross_align(Alignment::center())
-                        .child(
-                            label()
-                                .text("Filter Downloads…")
-                                .font_size(14.0)
-                                .font_weight(FontWeight::BOLD)
-                                .color(theme.color(ThemeRole::Text)),
-                        )
-                        .child(
-                            rect()
-                                .padding(Gaps::new(6.0, 14.0, 6.0, 14.0))
-                                .corner_radius(CornerRadius::new_all(10.0))
-                                .background(pill_bg)
-                                .cursor(CursorIcon::Pointer)
-                                .on_press(move |_| {
-                                    filters_open.set(false);
-                                })
-                                .child(
-                                    label()
-                                        .text("Done")
-                                        .font_size(13.0)
-                                        .font_weight(FontWeight::SEMI_BOLD)
-                                        .color(theme.color(ThemeRole::Text)),
-                                ),
-                        ),
-                )
-                .child(
-                    rect()
-                        .width(Size::fill())
-                        .spacing(8.0)
-                        .child(
-                            label()
-                                .text("File type")
-                                .font_size(12.5)
-                                .font_weight(FontWeight::SEMI_BOLD)
-                                .color(theme.color(ThemeRole::TextMuted)),
-                        )
-                        .child(
-                            rect()
-                                .width(Size::fill())
-                                .direction(Direction::Horizontal)
-                                .content(Content::wrap())
-                                .spacing(6.0)
-                                .children(DownloadFileGroup::ALL.into_iter().map(|group| {
-                                    let active = current_groups.contains(&group);
-                                    KitChip::new(group.label())
-                                        .key(group.id())
-                                        .selected(active)
-                                        .on_press(move |_| {
-                                            let mut list = selected_groups.write();
-                                            if let Some(pos) = list.iter().position(|g| *g == group) {
-                                                list.remove(pos);
-                                            } else {
-                                                list.push(group);
-                                            }
-                                        })
-                                })),
-                        ),
-                )
-                .child(
-                    rect()
-                        .width(Size::fill())
-                        .spacing(8.0)
-                        .child(
-                            label()
-                                .text("When was it downloaded?")
-                                .font_size(12.5)
-                                .font_weight(FontWeight::SEMI_BOLD)
-                                .color(theme.color(ThemeRole::TextMuted)),
-                        )
-                        .child(
-                            rect()
-                                .width(Size::fill())
-                                .direction(Direction::Horizontal)
-                                .content(Content::wrap())
-                                .spacing(6.0)
-                                .children(DownloadWhenFilter::ALL.into_iter().map(|when_opt| {
-                                    let active = current_when == Some(when_opt);
-                                    KitChip::new(when_opt.label())
-                                        .key(when_opt.id())
-                                        .selected(active)
-                                        .on_press(move |_| {
-                                            let next = if *selected_when.peek() == Some(when_opt) {
-                                                None
-                                            } else {
-                                                Some(when_opt)
-                                            };
-                                            selected_when.set(next);
-                                        })
-                                })),
-                        ),
-                )
-                .maybe_child((active_filter_count > 0).then(|| {
-                    rect()
-                        .width(Size::fill())
-                        .child(KitChip::new("Reset filters").on_press(move |_| {
-                            selected_groups.set(Vec::new());
-                            selected_when.set(None);
-                        }))
-                }))
-                .into_element()
-        };
+                            list.push(group);
+                        }
+                    }
+                }
+                "when" => {
+                    let chosen = DownloadWhenFilter::ALL.into_iter().find(|w| w.id() == option_id);
+                    if let Some(when_opt) = chosen {
+                        let next = if *selected_when.peek() == Some(when_opt) {
+                            None
+                        } else {
+                            Some(when_opt)
+                        };
+                        selected_when.set(next);
+                    }
+                }
+                _ => {}
+            });
 
         let clear_core = core.clone();
         let sub_bar = (has_finished || active_filter_count > 0).then(|| {
@@ -433,15 +328,26 @@ impl Component for DownloadsSection {
                 })
                 .collect();
 
-            ScrollView::new()
+            rect()
                 .width(Size::fill())
                 .height(Size::flex(1.0))
+                .on_sized(move |e: Event<SizedEventData>| {
+                    let h = e.area.height();
+                    if (*viewport_height.peek() - h).abs() > 1.0 {
+                        viewport_height.set(h);
+                    }
+                })
                 .child(
-                    rect()
+                    ScrollView::new_controlled(scroll_controller)
                         .width(Size::fill())
-                        .padding(Gaps::new(0.0, 8.0, 12.0, 8.0))
-                        .spacing(2.0)
-                        .children(group_nodes),
+                        .height(Size::fill())
+                        .child(
+                            rect()
+                                .width(Size::fill())
+                                .padding(Gaps::new(0.0, 8.0, 12.0, 8.0))
+                                .spacing(2.0)
+                                .children(group_nodes),
+                        ),
                 )
                 .into_element()
         };
@@ -483,8 +389,6 @@ impl Component for DownloadRow {
         let download_id = download.id;
         let pending = is_pending(download);
         let missing = download.status == DownloadStatus::Completed && !download.file_exists;
-        let paused = download.status == DownloadStatus::Paused;
-        let progress = progress_fraction(download);
 
         let status_line = if is_hovered && !pending {
             format_display_url(&download.url)
@@ -529,9 +433,9 @@ impl Component for DownloadRow {
             }
         };
 
-        // Action buttons: active/paused/failed controls stay visible; completed show-in-folder & more appear on hover/focus.
+        // Action buttons appear on hover or keyboard focus, matching Zen's `zen-library.css:998-1023`.
         let show_controls = is_hovered || self.focused;
-        let actions = build_row_actions(download, show_controls, &core, menu_state, row_area);
+        let actions = show_controls.then(|| build_row_actions(download, &core, menu_state, row_area));
 
         let row_bg = if is_hovered {
             theme.color(ThemeRole::Hover)
@@ -542,7 +446,7 @@ impl Component for DownloadRow {
         let content = rect()
             .width(Size::fill())
             .padding(Gaps::new(9.0, 10.0, 9.0, 10.0))
-            .corner_radius(CornerRadius::new_all(14.0))
+            .corner_radius(CornerRadius::new_all(16.0))
             .background(row_bg)
             .maybe(missing, |r| r.opacity(0.6))
             .direction(Direction::Horizontal)
@@ -582,12 +486,11 @@ impl Component for DownloadRow {
                             .max_lines(1)
                             .text_overflow(TextOverflow::Ellipsis)
                             .color(status_color),
-                    )
-                    .maybe_child(pending.then(|| build_progress_bar(progress, paused, &theme))),
+                    ),
             )
-            .child(actions);
+            .maybe_child(actions);
 
-        LibraryCursorRing::new(self.focused, content).corner_radius(14.0)
+        LibraryCursorRing::new(self.focused, content).corner_radius(16.0)
     }
 
     fn render_key(&self) -> DiffKey {
@@ -597,7 +500,6 @@ impl Component for DownloadRow {
 
 fn build_row_actions(
     download: &Download,
-    show_secondary: bool,
     core: &crate::ui::core_view::CoreView,
     menu_state: Option<crate::ui::chrome::menus::MenuViewState>,
     row_area: State<(f32, f32, f32, f32)>,
@@ -661,7 +563,7 @@ fn build_row_actions(
         );
     }
 
-    if show_secondary && has_file(download) {
+    if has_file(download) {
         let show_core = core.clone();
         actions = actions.child(
             IconButton::new("folder", "Show in folder")
@@ -694,35 +596,6 @@ fn build_row_actions(
     );
 
     actions.into_element()
-}
-
-fn build_progress_bar(fraction: Option<f32>, paused: bool, theme: &crate::ui::theme::ResolvedTheme) -> Element {
-    let track = match theme.scheme {
-        ResolvedScheme::Dark => Color::from_argb(32, 255, 255, 255),
-        ResolvedScheme::Light => Color::from_argb(26, 0, 0, 0),
-    };
-    let accent = theme.rgba(ThemeRole::Accent);
-    let fill_color = if paused {
-        accent.with_alpha(0.45).to_color()
-    } else {
-        accent.to_color()
-    };
-    let pct = fraction.unwrap_or(0.32).clamp(0.04, 1.0) * 100.0;
-
-    rect()
-        .width(Size::fill())
-        .height(Size::px(3.5))
-        .corner_radius(CornerRadius::new_all(2.0))
-        .overflow(Overflow::Clip)
-        .background(track)
-        .child(
-            rect()
-                .width(Size::percent(pct))
-                .height(Size::fill())
-                .corner_radius(CornerRadius::new_all(2.0))
-                .background(fill_color),
-        )
-        .into_element()
 }
 
 fn build_download_icon_box(download: &Download, theme: &crate::ui::theme::ResolvedTheme) -> Element {

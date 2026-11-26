@@ -19,7 +19,7 @@ use freya::prelude::*;
 use std::sync::Arc;
 use zendia_browser_core::BrowserCore;
 use zendia_browser_core::commands::Command;
-use zendia_browser_core::history::{SAMPLE_NOW_UNIX, sample_library_history};
+use zendia_browser_core::history::{SAMPLE_NOW_UNIX, sample_closed_tabs, sample_library_history};
 use zendia_browser_core::library::LibrarySection;
 use zendia_browser_core::model::{BrowserModel, InputMode, SidebarSide, ToolbarLayout};
 use zendia_module_api::ui::UiTone;
@@ -69,6 +69,11 @@ fn build_fixture_model(state_id: &str) -> BrowserModel {
         Vec::new()
     } else {
         sample_library_history(SAMPLE_NOW_UNIX)
+    };
+    model.closed_tabs = if state_id == "history-empty" {
+        Vec::new()
+    } else {
+        sample_closed_tabs(SAMPLE_NOW_UNIX)
     };
 
     if state_id == "vim-focus" {

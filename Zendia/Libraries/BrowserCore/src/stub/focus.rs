@@ -26,7 +26,7 @@ impl StubBackend {
     ) -> CommandResult {
         match command {
             Command::ExplorerOpen => self.handle_explorer_open(),
-            Command::ExplorerClose => self.handle_focus_close(FocusSurface::Explorer),
+            Command::ExplorerClose => self.handle_explorer_close(),
             Command::ExplorerMove { direction } => self.handle_explorer_move(direction),
             Command::ExplorerSelect { range } => self.handle_explorer_select(range),
             Command::ExplorerActivate => self.handle_explorer_activate(tab_source),
@@ -113,6 +113,25 @@ impl StubBackend {
         self.set_input_mode(InputMode::Explorer);
         self.publish_focus(focus);
         Ok(())
+    }
+
+    /// First Escape / `explorer.close` clears active visual selection while staying in Explorer; second closes Explorer (`VIM-EX-03`).
+    fn handle_explorer_close(&self) -> CommandResult {
+        let cleared_selection = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.model.focus.surface == Some(FocusSurface::Explorer) && !state.model.focus.selection.is_empty() {
+                state.model.focus.selection.clear();
+                state.model.focus.visual_anchor = None;
+                Some(state.model.focus.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(focus) = cleared_selection {
+            self.publish_focus(focus);
+            return Ok(());
+        }
+        self.handle_focus_close(FocusSurface::Explorer)
     }
 
     fn handle_focus_close(&self, surface: FocusSurface) -> CommandResult {
@@ -267,6 +286,23 @@ impl StubBackend {
                 self.publish_focus(focus);
                 Ok(())
             }
+            FocusTarget::SidebarFooter(item_id) => {
+                let command_to_run = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state
+                        .model
+                        .contributions
+                        .toolbar_items
+                        .iter()
+                        .find(|item| item.id == item_id)
+                        .and_then(|item| Command::from_name_and_args(&item.command, &item.command_args).ok())
+                };
+                self.handle_focus_close(FocusSurface::Explorer)?;
+                if let Some(command) = command_to_run {
+                    let _ = crate::BrowserCore::invoke(self, command);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -343,7 +379,8 @@ impl StubBackend {
                 | FocusTarget::PinnedTab(_)
                 | FocusTarget::Folder(_)
                 | FocusTarget::Tab(_)
-                | FocusTarget::SplitGroup(_) => {
+                | FocusTarget::SplitGroup(_)
+                | FocusTarget::SidebarFooter(_) => {
                     return self.activate_explorer_target(target, tab_source);
                 }
                 FocusTarget::ToolbarItem(_) => {
@@ -695,6 +732,14 @@ mod tests {
         assert_eq!(view_model.focus.selection.len(), 1);
 
         let cursor_before_activate = view_model.focus.cursor.clone();
+        // First ExplorerClose clears active selection while staying in Explorer (`VIM-EX-03`).
+        core.invoke(Command::ExplorerClose).unwrap();
+        while let Ok(event) = sub.try_recv() {
+            view_model.apply_event(&event);
+        }
+        assert_eq!(view_model.input_mode, InputMode::Explorer);
+        assert!(view_model.focus.selection.is_empty());
+
         core.invoke(Command::ExplorerActivate).unwrap();
         while let Ok(event) = sub.try_recv() {
             view_model.apply_event(&event);

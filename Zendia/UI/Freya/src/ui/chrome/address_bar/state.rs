@@ -11,6 +11,10 @@
 
 use crate::ui::chrome::menus::AnchorRect;
 use freya::prelude::*;
+use std::time::{Duration, Instant};
+
+/// How long an unsubmitted new-tab floating address bar draft is remembered when reopened.
+const NEW_TAB_WAIT_TO_CLEAR: Duration = Duration::from_secs(10);
 
 /// Operating mode of the floating address bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,15 +36,16 @@ impl Default for AddressBarMode {
 pub struct AddressBarViewState {
     pub open: State<bool>,
     pub mode: State<AddressBarMode>,
+    /// Preserves whether the current floating session was opened for a new tab across Actions mode toggles.
+    pub new_tab_session: State<bool>,
     pub query: State<String>,
     pub highlighted: State<Option<usize>>,
     pub open_seq: State<u64>,
     pub input_a11y_id: AccessibilityId,
+    /// Last unsubmitted query typed during a new-tab floating bar session, with close timestamp.
+    pub last_new_tab_query: State<Option<(String, Instant)>>,
     pub site_panel_open: State<bool>,
     pub site_panel_anchor: State<AnchorRect>,
-    /// The page URL the bar opened with, while it stands unedited. Like selected text, it gives way to what the user
-    /// types (Freya's input cannot select text from outside).
-    pub prefill: State<Option<String>>,
 }
 
 impl AddressBarViewState {
@@ -49,14 +54,17 @@ impl AddressBarViewState {
     pub fn open_floating(&self, new_tab: bool, initial_query: Option<String>) {
         let mut open = self.open;
         let mut mode = self.mode;
+        let mut new_tab_session = self.new_tab_session;
         let mut query = self.query;
         let mut highlighted = self.highlighted;
         let mut seq = self.open_seq;
+        let mut last_new_tab_query = self.last_new_tab_query;
 
         let already_open = *open.peek();
         if already_open
             && new_tab
-            && matches!(*mode.peek(), AddressBarMode::Normal { new_tab: true })
+            && (*new_tab_session.peek() || matches!(*mode.peek(), AddressBarMode::Normal { new_tab: true }))
+            && matches!(*mode.peek(), AddressBarMode::Normal { .. })
             && initial_query.is_none()
         {
             self.close();
@@ -64,10 +72,23 @@ impl AddressBarViewState {
         }
 
         self.close_site_panel();
-        let text = initial_query.unwrap_or_default();
+        let text = match initial_query {
+            Some(q) => q,
+            None if new_tab => {
+                let remembered = last_new_tab_query
+                    .peek()
+                    .clone()
+                    .filter(|(_, saved_at)| saved_at.elapsed() <= NEW_TAB_WAIT_TO_CLEAR)
+                    .map(|(saved, _)| saved);
+                if remembered.is_none() {
+                    last_new_tab_query.set(None);
+                }
+                remembered.unwrap_or_default()
+            }
+            None => String::new(),
+        };
         let initial_highlight = if text.trim().is_empty() { None } else { Some(0) };
-        let mut prefill = self.prefill;
-        prefill.set((!new_tab && !text.trim().is_empty()).then(|| text.clone()));
+        new_tab_session.set(new_tab);
         mode.set(AddressBarMode::Normal { new_tab });
         query.set(text);
         highlighted.set(initial_highlight);
@@ -81,6 +102,7 @@ impl AddressBarViewState {
     pub fn open_actions(&self, initial_query: Option<String>) {
         let mut open = self.open;
         let mut mode = self.mode;
+        let mut new_tab_session = self.new_tab_session;
         let mut query = self.query;
         let mut highlighted = self.highlighted;
         let mut seq = self.open_seq;
@@ -93,8 +115,7 @@ impl AddressBarViewState {
 
         self.close_site_panel();
         let text = initial_query.unwrap_or_default();
-        let mut prefill = self.prefill;
-        prefill.set_if_modified(None);
+        new_tab_session.set(false);
         mode.set(AddressBarMode::Actions);
         query.set(text);
         highlighted.set(Some(0));
@@ -112,64 +133,52 @@ impl AddressBarViewState {
         highlighted.set(Some(0));
     }
 
-    /// Leaves Actions mode back to normal address bar mode (triggered by Backspace on an empty query).
+    /// Leaves Actions mode back to normal address bar mode, preserving whether the session was opened for a new tab.
     pub fn exit_actions_mode(&self) {
         let mut mode = self.mode;
         let mut highlighted = self.highlighted;
-        mode.set(AddressBarMode::Normal { new_tab: false });
+        let new_tab = *self.new_tab_session.peek();
+        mode.set(AddressBarMode::Normal { new_tab });
         highlighted.set(None);
     }
 
-    /// Closes the floating address bar.
+    /// Closes the floating address bar without submitting (preserving any unsubmitted new-tab draft briefly).
     pub fn close(&self) {
+        let mut open = self.open;
+        let mut highlighted = self.highlighted;
+        let mut last_new_tab_query = self.last_new_tab_query;
+        if *open.peek() && *self.new_tab_session.peek() && matches!(*self.mode.peek(), AddressBarMode::Normal { .. }) {
+            let draft = self.query.peek().clone();
+            if !draft.trim().is_empty() {
+                last_new_tab_query.set(Some((draft, Instant::now())));
+            } else {
+                last_new_tab_query.set(None);
+            }
+        }
+        open.set_if_modified(false);
+        highlighted.set(None);
+        self.input_a11y_id.request_unfocus();
+    }
+
+    /// Closes the floating address bar after submitting a URL, search, or action (clears remembered draft).
+    pub fn close_after_submit(&self) {
+        let mut last_new_tab_query = self.last_new_tab_query;
+        last_new_tab_query.set(None);
         let mut open = self.open;
         let mut highlighted = self.highlighted;
         open.set_if_modified(false);
         highlighted.set(None);
-        let mut prefill = self.prefill;
-        prefill.set_if_modified(None);
         self.input_a11y_id.request_unfocus();
-    }
-
-    /// Replaces an unedited prefilled URL with what was typed into it. The input inserts the first character in front
-    /// of the URL, so a query that is the URL with text before it becomes just that text.
-    pub fn settle_prefill(&self) {
-        let Some(original) = self.prefill.peek().clone() else {
-            return;
-        };
-        let current = self.query.peek().clone();
-        if current == original {
-            return;
-        }
-        let mut prefill = self.prefill;
-        prefill.set(None);
-        if current.len() > original.len() && current.ends_with(&original) {
-            let mut query = self.query;
-            query.set(current[..current.len() - original.len()].to_string());
-        }
-    }
-
-    /// Clears an unedited prefilled URL, as Backspace clears selected text. Returns whether it did.
-    pub fn clear_prefill(&self) -> bool {
-        if self.prefill.peek().is_none() {
-            return false;
-        }
-        let mut prefill = self.prefill;
-        prefill.set(None);
-        let mut query = self.query;
-        query.set(String::new());
-        true
-    }
-
-    /// Keeps the prefilled URL as ordinary text, once the user moves the cursor into it.
-    pub fn keep_prefill(&self) {
-        let mut prefill = self.prefill;
-        prefill.set_if_modified(None);
     }
 
     /// Returns whether the floating address bar is currently open.
     pub fn is_open(&self) -> bool {
         *self.open.peek()
+    }
+
+    /// Reactively returns whether the floating address bar is currently open for a new-tab session.
+    pub fn is_new_tab_open(&self) -> bool {
+        *self.open.read() && *self.new_tab_session.read()
     }
 
     /// Toggles the anchored Site Data Panel popover, updating its anchor when provided.
@@ -203,12 +212,13 @@ impl AddressBarViewState {
 pub fn use_provide_address_bar_state() -> AddressBarViewState {
     let open = use_state(|| false);
     let mode = use_state(AddressBarMode::default);
+    let new_tab_session = use_state(|| false);
     let query = use_state(String::new);
     let highlighted = use_state(|| None::<usize>);
     let open_seq = use_state(|| 0u64);
     let input_a11y_id = use_hook(AccessibilityId::new_unique);
+    let last_new_tab_query = use_state(|| None::<(String, Instant)>);
     let site_panel_open = use_state(|| false);
-    let prefill = use_state(|| None::<String>);
     let site_panel_anchor = use_state(|| AnchorRect {
         x: 152.0,
         y: 44.0,
@@ -219,13 +229,14 @@ pub fn use_provide_address_bar_state() -> AddressBarViewState {
     use_provide_context(|| AddressBarViewState {
         open,
         mode,
+        new_tab_session,
         query,
         highlighted,
         open_seq,
         input_a11y_id,
+        last_new_tab_query,
         site_panel_open,
         site_panel_anchor,
-        prefill,
     })
 }
 

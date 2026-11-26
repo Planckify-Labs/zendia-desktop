@@ -78,6 +78,12 @@ pub enum Event {
     PinnedTabsChanged {
         pinned_tabs: Vec<PinnedTab>,
     },
+    TabPinnedUrlsChanged {
+        pinned_urls: std::collections::BTreeMap<TabId, String>,
+    },
+    TabUnloadedChanged {
+        unloaded_tabs: std::collections::BTreeSet<TabId>,
+    },
     FolderCreated {
         folder: Folder,
     },
@@ -86,6 +92,10 @@ pub enum Event {
     },
     FolderDeleted {
         folder_id: FolderId,
+    },
+    FolderHierarchyChanged {
+        folders: Vec<Folder>,
+        folder_parents: std::collections::BTreeMap<FolderId, FolderId>,
     },
     SidebarNotificationAdded {
         notification: SidebarNotification,
@@ -176,6 +186,9 @@ pub enum Event {
     HistoryChanged {
         history: Vec<HistoryEntry>,
     },
+    ClosedTabsChanged {
+        closed_tabs: Vec<HistoryEntry>,
+    },
     SiteInfoUpdated {
         info: SiteInfo,
     },
@@ -246,6 +259,9 @@ pub enum Event {
     },
     ZoomChanged {
         zoom_level: f32,
+    },
+    AboutUpdateStatusChanged {
+        status: crate::menus::AboutUpdateStatus,
     },
     QuitRequested,
     ClipboardCopyRequested {

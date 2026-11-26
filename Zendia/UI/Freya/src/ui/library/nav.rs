@@ -80,6 +80,10 @@ pub struct LibraryNavState {
     pub list_focus_a11y_id: AccessibilityId,
     /// True while a section's filter panel is open (Escape closes it before closing the library).
     pub filter_panel_open: State<Option<State<bool>>>,
+    /// True while a section has an inline subview (such as the Space Routing form) that Escape should close first.
+    pub subview_open: State<bool>,
+    /// Incremented whenever Escape is directed to the active section's inline subview.
+    pub subview_escape_seq: State<u64>,
     /// Pending `g` prefix in LIBRARY mode (`gg`, `gh`, `gd`, `gs`, `gm`, `gr`).
     pub pending_g: State<bool>,
     /// True while the library holds keyboard focus (false after clicking on the page card).
@@ -151,6 +155,17 @@ impl LibraryNavState {
         false
     }
 
+    /// Routes Escape to an open inline subview (such as the Space Routing add/edit form) if active.
+    pub fn close_subview_if_open(&self) -> bool {
+        if *self.subview_open.peek() {
+            let mut seq = self.subview_escape_seq;
+            let next = *seq.peek() + 1;
+            seq.set(next);
+            return true;
+        }
+        false
+    }
+
     /// Opens the active section's filter panel if the section exposes one.
     pub fn open_filter_panel(&self) -> bool {
         if let Some(mut open) = *self.filter_panel_open.peek() {
@@ -174,6 +189,8 @@ pub(super) fn use_library_nav_state() -> LibraryNavState {
         search_a11y_id: use_state(|| None),
         list_focus_a11y_id: use_hook(AccessibilityId::new_unique),
         filter_panel_open: use_state(|| None),
+        subview_open: use_state(|| false),
+        subview_escape_seq: use_state(|| 0u64),
         pending_g: use_state(|| false),
         keyboard_focused: use_state(|| false),
     }
@@ -209,6 +226,8 @@ pub fn use_library_nav(section: LibrarySection, layout: LibraryNavLayout, rows: 
             search_id.set_if_modified(None);
             let mut filter_panel = state.nav.filter_panel_open;
             filter_panel.set_if_modified(None);
+            let mut subview = state.nav.subview_open;
+            subview.set_if_modified(false);
             state.nav.reset_pending();
         }
 
@@ -470,7 +489,7 @@ pub fn handle_library_key_down(e: &KeyboardEventData, core: &CoreView, library: 
     // Standard keys that work whether vim mode is enabled or not.
     match &e.key {
         Key::Named(NamedKey::Escape) => {
-            if !library.nav.close_filter_panel_if_open() {
+            if !library.nav.close_subview_if_open() && !library.nav.close_filter_panel_if_open() {
                 core.invoke_or_log(Command::LibraryClose);
             }
             return true;
@@ -489,6 +508,14 @@ pub fn handle_library_key_down(e: &KeyboardEventData, core: &CoreView, library: 
         }
         Key::Named(NamedKey::ArrowRight) => {
             library.nav.move_cursor(NavMove::Right);
+            return true;
+        }
+        Key::Named(NamedKey::PageDown) => {
+            library.nav.move_cursor(NavMove::HalfPageDown);
+            return true;
+        }
+        Key::Named(NamedKey::PageUp) => {
+            library.nav.move_cursor(NavMove::HalfPageUp);
             return true;
         }
         Key::Named(NamedKey::Home) => {
@@ -593,6 +620,7 @@ fn cursor_history_entry_id(library: &super::LibraryViewState) -> Option<HistoryE
 pub struct LibraryCursorRing {
     pub focused: bool,
     pub corner_radius: f32,
+    pub fill: bool,
     pub child: Element,
 }
 
@@ -600,13 +628,21 @@ impl LibraryCursorRing {
     pub fn new(focused: bool, child: impl IntoElement) -> Self {
         Self {
             focused,
-            corner_radius: 8.0,
+            corner_radius: 16.0,
+            fill: true,
             child: child.into_element(),
         }
     }
 
     pub fn corner_radius(mut self, radius: f32) -> Self {
         self.corner_radius = radius;
+        self
+    }
+
+    /// Controls whether the focused state draws an 18% tinted fill inside the teal ring (disable for Space card
+    /// headers and media tiles to match `zendia.css`).
+    pub fn fill(mut self, fill: bool) -> Self {
+        self.fill = fill;
         self
     }
 }
@@ -616,11 +652,16 @@ impl Component for LibraryCursorRing {
         let theme = use_theme();
         let teal = theme.rgba(ThemeRole::ModeLibrary);
         let (ring, fill) = if self.focused {
-            let fill_alpha = match theme.scheme {
-                ResolvedScheme::Dark => 0.14,
-                ResolvedScheme::Light => 0.14,
+            let fill_color = if self.fill {
+                let fill_alpha = match theme.scheme {
+                    ResolvedScheme::Dark => 0.18,
+                    ResolvedScheme::Light => 0.18,
+                };
+                teal.with_alpha(fill_alpha).to_color()
+            } else {
+                Color::TRANSPARENT
             };
-            (teal.to_color(), teal.with_alpha(fill_alpha).to_color())
+            (teal.to_color(), fill_color)
         } else {
             (Color::TRANSPARENT, Color::TRANSPARENT)
         };
@@ -628,7 +669,7 @@ impl Component for LibraryCursorRing {
             .width(Size::fill())
             .corner_radius(CornerRadius::new_all(self.corner_radius))
             .background(fill)
-            .border(Border::new().width(1.5).alignment(BorderAlignment::Inner).fill(ring))
+            .border(Border::new().width(2.0).alignment(BorderAlignment::Inner).fill(ring))
             .child(self.child.clone())
     }
 }

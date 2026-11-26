@@ -7,9 +7,10 @@
 //! Look and Feel settings group: Browser Layout preview cards, vertical tabs, compact mode, window dragging, and theme.
 
 use crate::ui::core_view::use_core;
-use crate::ui::kit::{KitSlider, Pill};
+use crate::ui::kit::{KitSlider, focus_ring_border, use_interactive_feedback};
 use crate::ui::settings::controls::{
-    SettingsChoiceRow, SettingsToggleRow, section_heading, settings_card, subsection_heading,
+    SettingsButton, SettingsCheckboxRow, SettingsChoiceRow, section_heading, section_heading_with_action,
+    settings_group_section, subsection_heading,
 };
 use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, use_theme};
 use freya::prelude::*;
@@ -17,7 +18,7 @@ use zendia_browser_core::commands::Command;
 use zendia_browser_core::model::{
     CompactHide, SidebarSide, ThemeGlassOverrides, ThemeOverrides, ThemeScheme, ToolbarLayout,
 };
-use zendia_module_api::ui::UiTone;
+use zendia_browser_core::settings::SettingsGroupId;
 
 #[derive(Clone, PartialEq)]
 pub struct LookAndFeelGroup;
@@ -43,11 +44,15 @@ impl Component for LookAndFeelGroup {
         let core_compact = core.clone();
         let core_compact_hide = core.clone();
         let core_flash = core.clone();
+        let core_hover = core.clone();
+        let core_animate = core.clone();
+        let core_toast = core.clone();
         let core_drag = core.clone();
         let core_motion = core.clone();
         let core_scheme = core.clone();
         let core_opacity = core.clone();
         let core_blur = core.clone();
+        let core_reset = core.clone();
 
         let scheme_str = match theme_settings.scheme {
             ThemeScheme::System => "system",
@@ -64,9 +69,19 @@ impl Component for LookAndFeelGroup {
         rect()
             .width(Size::fill())
             .spacing(22.0)
-            .child(section_heading(
+            .child(section_heading_with_action(
                 "Sidebar and tabs layout",
                 Some("Configure how toolbars, vertical tabs, compact mode, and theme colors appear."),
+                Some(
+                    SettingsButton::new("Reset defaults", move |_| {
+                        core_reset.invoke_or_log(Command::SettingsResetGroup {
+                            group: SettingsGroupId::LookAndFeel,
+                        });
+                    })
+                    .icon("reload")
+                    .key("reset-look-and-feel")
+                    .into_element(),
+                ),
             ))
             .child(
                 rect()
@@ -81,7 +96,7 @@ impl Component for LookAndFeelGroup {
                             .width(Size::fill())
                             .direction(Direction::Horizontal)
                             .content(Content::wrap())
-                            .spacing(16.0)
+                            .spacing(20.0)
                             .child(LayoutPreviewCard {
                                 layout: ToolbarLayout::Single,
                                 title: "Only Sidebar",
@@ -117,7 +132,7 @@ impl Component for LookAndFeelGroup {
                             }),
                     ),
             )
-            .child(settings_card(vec![
+            .child(settings_group_section(vec![
                 subsection_heading("Vertical Tabs", Some("Manage your tabs in a vertical layout")),
                 SettingsChoiceRow::new(
                     "Sidebar position",
@@ -137,7 +152,7 @@ impl Component for LookAndFeelGroup {
                 )
                 .key("sidebar-side")
                 .into_element(),
-                SettingsToggleRow::new(
+                SettingsCheckboxRow::new(
                     "Show New Tab Button on Tab List",
                     browser_settings.show_new_tab_on_tab_list,
                     move |next: bool| {
@@ -149,7 +164,7 @@ impl Component for LookAndFeelGroup {
                 )
                 .key("show-newtab")
                 .into_element(),
-                SettingsToggleRow::new(
+                SettingsCheckboxRow::new(
                     "Move the new tab button to the top",
                     browser_settings.new_tab_button_top,
                     move |next: bool| {
@@ -163,7 +178,7 @@ impl Component for LookAndFeelGroup {
                 .disabled(!browser_settings.show_new_tab_on_tab_list)
                 .key("newtab-top")
                 .into_element(),
-                SettingsToggleRow::new(
+                SettingsCheckboxRow::new(
                     "Animate page transition when switching tabs",
                     layout.tab_switch_motion,
                     move |next| {
@@ -174,7 +189,7 @@ impl Component for LookAndFeelGroup {
                 .into_element(),
             ]))
             .child(section_heading("Theme Settings", None))
-            .child(settings_card(vec![
+            .child(settings_group_section(vec![
                 subsection_heading(
                     "Tokyonight Appearance",
                     Some("Switch between system appearance, Dark (Tokyonight Moon), and Light (Tokyonight Day)."),
@@ -203,7 +218,7 @@ impl Component for LookAndFeelGroup {
                 .into_element(),
                 rect()
                     .width(Size::fill())
-                    .padding(Gaps::new(4.0, 8.0, 4.0, 8.0))
+                    .padding(Gaps::new(4.0, 4.0, 4.0, 4.0))
                     .direction(Direction::Horizontal)
                     .content(Content::Flex)
                     .cross_align(Alignment::center())
@@ -249,7 +264,7 @@ impl Component for LookAndFeelGroup {
                             )
                             .child(
                                 KitSlider::new(glass_blur)
-                                    .range(0.0, 28.0)
+                                    .range(0.0, 64.0)
                                     .step(Some(2.0))
                                     .width(Size::fill())
                                     .on_change(move |val| {
@@ -267,9 +282,9 @@ impl Component for LookAndFeelGroup {
                     )
                     .into_element(),
             ]))
-            .child(settings_card(vec![
+            .child(settings_group_section(vec![
                 subsection_heading("Show in compact view", Some("Only show the toolbars you use!")),
-                SettingsToggleRow::new("Enable Zendia's compact mode", layout.compact_mode, move |next| {
+                SettingsCheckboxRow::new("Enable Zendia's compact mode", layout.compact_mode, move |next| {
                     core_compact.invoke_or_log(Command::LayoutSetCompactMode { enabled: next });
                 })
                 .key("compact-enabled")
@@ -290,7 +305,7 @@ impl Component for LookAndFeelGroup {
                 )
                 .key("compact-hide")
                 .into_element(),
-                SettingsToggleRow::new(
+                SettingsCheckboxRow::new(
                     "Briefly make the toolbar popup when switching or opening new tabs in compact mode",
                     browser_settings.compact_toolbar_flash_popup,
                     move |next: bool| {
@@ -303,13 +318,52 @@ impl Component for LookAndFeelGroup {
                 .indent(true)
                 .key("compact-flash")
                 .into_element(),
+                SettingsCheckboxRow::new(
+                    "Show hidden toolbars when hovering near the window edge",
+                    browser_settings.compact_show_on_hover,
+                    move |next: bool| {
+                        core_hover.invoke_or_log(Command::SettingsSet {
+                            key: "compact.show_on_hover".to_string(),
+                            value: next.to_string(),
+                        });
+                    },
+                )
+                .indent(true)
+                .key("compact-hover")
+                .into_element(),
+                SettingsCheckboxRow::new(
+                    "Animate sidebar reveal in compact mode",
+                    browser_settings.compact_animate_sidebar,
+                    move |next: bool| {
+                        core_animate.invoke_or_log(Command::SettingsSet {
+                            key: "compact.animate_sidebar".to_string(),
+                            value: next.to_string(),
+                        });
+                    },
+                )
+                .indent(true)
+                .key("compact-animate")
+                .into_element(),
+                SettingsCheckboxRow::new(
+                    "Show notification toast when opening a tab in the background",
+                    browser_settings.compact_show_background_tab_toast,
+                    move |next: bool| {
+                        core_toast.invoke_or_log(Command::SettingsSet {
+                            key: "compact.show_background_tab_toast".to_string(),
+                            value: next.to_string(),
+                        });
+                    },
+                )
+                .indent(true)
+                .key("compact-toast")
+                .into_element(),
             ]))
-            .child(settings_card(vec![
+            .child(settings_group_section(vec![
                 subsection_heading(
                     "Window dragging",
                     Some("Move the window by dragging empty space at the top of websites, just like the titlebar."),
                 ),
-                SettingsToggleRow::new(
+                SettingsCheckboxRow::new(
                     "Allow dragging the window from web pages",
                     browser_settings.window_drag_from_content,
                     move |next: bool| {
@@ -325,7 +379,8 @@ impl Component for LookAndFeelGroup {
     }
 }
 
-/// Visual layout picker card matching Zen's three Browser Layout preview tiles.
+/// Visual layout picker card matching Zen's three Browser Layout preview tiles (`250px` wide, `4px` selected border,
+/// `3px` label gap, bold title, no `"Active"` pill badge).
 #[derive(Clone, PartialEq)]
 struct LayoutPreviewCard {
     layout: ToolbarLayout,
@@ -344,7 +399,7 @@ impl KeyExt for LayoutPreviewCard {
 impl Component for LayoutPreviewCard {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
-        let mut hovered = use_state(|| false);
+        let feedback = use_interactive_feedback(true);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
         let on_press = self.on_press.clone();
@@ -371,7 +426,7 @@ impl Component for LayoutPreviewCard {
 
         let has_top = !matches!(self.layout, ToolbarLayout::Single);
         let collapsed = matches!(self.layout, ToolbarLayout::Collapsed);
-        let sb_width = if collapsed { 24.0 } else { 74.0 };
+        let sb_width = if collapsed { 24.0 } else { 76.0 };
 
         let mini_top_bar = has_top.then(|| {
             rect()
@@ -390,7 +445,7 @@ impl Component for LayoutPreviewCard {
                 )
                 .child(
                     rect()
-                        .width(Size::px(76.0))
+                        .width(Size::px(80.0))
                         .height(Size::px(9.0))
                         .corner_radius(CornerRadius::new_all(4.0))
                         .background(pill_col),
@@ -433,8 +488,8 @@ impl Component for LayoutPreviewCard {
 
         let mini_browser = rect()
             .position(Position::new_absolute().left(32.0).top(24.0))
-            .width(Size::px(206.0))
-            .height(Size::px(124.0))
+            .width(Size::px(220.0))
+            .height(Size::px(128.0))
             .corner_radius(CornerRadius::new_all(8.0))
             .overflow(Overflow::Clip)
             .background(chrome_bg)
@@ -458,59 +513,68 @@ impl Component for LayoutPreviewCard {
                     ),
             );
 
-        let border_col = if self.selected || focus() == Focus::Keyboard {
+        // Matches `#zenLayoutList .zenThemeMarketplaceItem` (`border: 4px solid transparent`, active `4px solid accent`).
+        let tile_border_col = if self.selected {
             theme.color(ThemeRole::Accent)
-        } else if *hovered.read() {
-            theme.color(ThemeRole::Border)
+        } else if feedback.is_hovered() {
+            theme.rgba(ThemeRole::Accent).with_alpha(0.35).to_color()
         } else {
-            theme.color(ThemeRole::BorderSubtle)
+            Color::TRANSPARENT
         };
-        let border_w = if self.selected || focus() == Focus::Keyboard {
-            2.5
-        } else {
-            1.0
-        };
+        let tile_border = focus_ring_border(
+            focus() == Focus::Keyboard && !self.selected,
+            &theme,
+            Border::new()
+                .width(4.0)
+                .alignment(BorderAlignment::Inner)
+                .fill(tile_border_col),
+        );
 
         rect()
             .a11y_id(a11y_id)
             .a11y_focusable(true)
             .a11y_role(AccessibilityRole::Button)
             .a11y_alt(format!("Browser layout: {}", self.title))
-            .width(Size::px(236.0))
-            .spacing(8.0)
+            .width(Size::px(250.0))
+            .spacing(3.0)
+            .scale(feedback.scale())
             .cursor(CursorIcon::Pointer)
-            .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
+            .on_pointer_down(feedback.on_pointer_down())
+            .on_global_pointer_up(feedback.on_pointer_up())
             .on_press(move |_| on_press.call(()))
+            .on_key_down(move |e: Event<KeyboardEventData>| {
+                if e.key == Key::Named(NamedKey::Enter) || matches!(&e.key, Key::Character(c) if c == " ") {
+                    e.stop_propagation();
+                }
+            })
             .child(
                 rect()
-                    .width(Size::px(236.0))
-                    .height(Size::px(140.0))
+                    .width(Size::px(250.0))
+                    .height(Size::px(146.0))
                     .corner_radius(CornerRadius::new_all(10.0))
                     .overflow(Overflow::Clip)
                     .background(backdrop)
-                    .border(
-                        Border::new()
-                            .width(border_w)
-                            .alignment(BorderAlignment::Inner)
-                            .fill(border_col),
-                    )
+                    .border(tile_border)
                     .child(mini_browser),
             )
             .child(
                 rect()
                     .width(Size::fill())
-                    .direction(Direction::Horizontal)
-                    .main_align(Alignment::SpaceBetween)
+                    .padding(Gaps::new(3.0, 2.0, 0.0, 2.0))
                     .cross_align(Alignment::center())
                     .child(
                         label()
                             .text(self.title)
                             .font_size(13.0)
                             .font_weight(FontWeight::SEMI_BOLD)
-                            .color(theme.color(ThemeRole::Text)),
-                    )
-                    .maybe_child(self.selected.then(|| Pill::new("Active").tone(UiTone::Accent))),
+                            .color(if self.selected {
+                                theme.color(ThemeRole::Accent)
+                            } else {
+                                theme.color(ThemeRole::Text)
+                            }),
+                    ),
             )
     }
 

@@ -8,11 +8,12 @@
 //! [`ConfirmationCard`].
 
 use crate::ui::kit::controls::IconButton;
+use crate::ui::kit::focus_trap::focus_ring_border;
 use crate::ui::kit::icons::Icon;
+use crate::ui::kit::interactive::use_interactive_feedback;
 use crate::ui::kit::panel::GlassPanel;
-use crate::ui::theme::POPUP_OVERLAY_LEVEL;
-use crate::ui::theme::{ThemeRole, motion, use_theme};
-use freya::animation::Ease;
+use crate::ui::kit::popup_presence::PopupPresence;
+use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ThemeRole, use_theme};
 use freya::prelude::*;
 use zendia_module_api::ui::{UiPlacement, UiTone};
 
@@ -154,7 +155,55 @@ pub fn compute_popover_origin(anchor: Area, content: Area, placement: UiPlacemen
     }
 }
 
-/// Popover anchored to a trigger element and lifted to the overlay layer via Freya's [`Portal`].
+/// Computes the global top-left coordinates for a popover relative to its anchor area, flipping to the opposite side
+/// when it overflows `viewport` and clamping inside `[margin, viewport - content - margin]`.
+pub fn compute_popover_origin_in_viewport(
+    anchor: Area,
+    content: Area,
+    placement: UiPlacement,
+    gap: f32,
+    viewport: (f32, f32),
+    margin: f32,
+) -> (f32, f32) {
+    let (mut x, mut y) = compute_popover_origin(anchor, content, placement, gap);
+    let (vw, vh) = viewport;
+    if vw > 0.0 && vh > 0.0 {
+        match placement {
+            UiPlacement::Bottom if y + content.height() + margin > vh => {
+                let flipped_y = anchor.min_y() - content.height() - gap;
+                if flipped_y >= margin {
+                    y = flipped_y;
+                }
+            }
+            UiPlacement::Top if y < margin => {
+                let flipped_y = anchor.max_y() + gap;
+                if flipped_y + content.height() + margin <= vh {
+                    y = flipped_y;
+                }
+            }
+            UiPlacement::Right if x + content.width() + margin > vw => {
+                let flipped_x = anchor.min_x() - content.width() - gap;
+                if flipped_x >= margin {
+                    x = flipped_x;
+                }
+            }
+            UiPlacement::Left if x < margin => {
+                let flipped_x = anchor.max_x() + gap;
+                if flipped_x + content.width() + margin <= vw {
+                    x = flipped_x;
+                }
+            }
+            _ => {}
+        }
+        let max_x = (vw - content.width() - margin).max(margin);
+        let max_y = (vh - content.height() - margin).max(margin);
+        x = x.clamp(margin, max_x);
+        y = y.clamp(margin, max_y);
+    }
+    (x.max(0.0), y.max(0.0))
+}
+
+/// Popover anchored to a trigger element and lifted to the overlay layer with enter/exit presence motion.
 #[derive(Clone, PartialEq)]
 pub struct AnchoredPopover {
     id: String,
@@ -219,65 +268,61 @@ impl Component for AnchoredPopover {
         let theme = use_theme();
         let mut anchor_area = use_state(|| None::<Area>);
         let mut content_area = use_state(|| None::<Area>);
+        let mut viewport_size = use_state(|| (0.0_f32, 0.0_f32));
 
         let measured = anchor_area.read().zip(*content_area.read());
+        let vp = *viewport_size.read();
+        let origin = match measured {
+            Some((anchor, content)) => {
+                compute_popover_origin_in_viewport(anchor, content, self.placement, self.gap, vp, 8.0)
+            }
+            None => (0.0, 0.0),
+        };
 
-        let on_dismiss_key = self.on_dismiss.clone();
-        let on_dismiss_backdrop = self.on_dismiss.clone();
+        let on_dismiss_esc = self.on_dismiss.clone();
+        let on_dismiss_bg = self.on_dismiss.clone();
+
+        let mut presence = PopupPresence::anchored(self.open && measured.is_some(), origin)
+            .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL));
+        if let Some(cb) = on_dismiss_esc {
+            presence = presence.on_escape(cb);
+        }
+        if let Some(cb) = on_dismiss_bg {
+            presence = presence.on_backdrop_mouse_down(move |_| cb.call(()));
+        }
+
+        let panel = rect()
+            .on_press(|e: Event<PressEventData>| e.stop_propagation())
+            .on_sized(move |e: Event<SizedEventData>| {
+                if e.area.width() > 0.0 && e.area.height() > 0.0 {
+                    content_area.set_if_modified(Some(e.area));
+                }
+            })
+            .child(
+                GlassPanel::new()
+                    .padding(Gaps::new_all(theme.spacing.md))
+                    .spacing(theme.spacing.sm)
+                    .children(self.content.clone()),
+            );
 
         rect()
             .on_sized(move |e: Event<SizedEventData>| anchor_area.set_if_modified(Some(e.area)))
             .child(self.anchor.clone())
-            .maybe_child(self.open.then(|| {
+            .maybe_child((self.open && measured.is_none()).then(|| {
+                // Hidden 1-frame probe to measure viewport and popover content size before animating in.
                 rect()
                     .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
                     .position(Position::new_global().top(0.0).left(0.0))
                     .width(Size::window_percent(100.0))
                     .height(Size::window_percent(100.0))
-                    .on_global_key_down(move |e: Event<KeyboardEventData>| {
-                        if e.key == Key::Named(NamedKey::Escape)
-                            && let Some(handler) = &on_dismiss_key
-                        {
-                            handler.call(());
+                    .interactive(Interactive::No)
+                    .on_sized(move |e: Event<SizedEventData>| {
+                        if e.area.width() > 0.0 && e.area.height() > 0.0 {
+                            viewport_size.set_if_modified((e.area.width(), e.area.height()));
                         }
                     })
                     .child(
                         rect()
-                            .position(Position::new_global().top(0.0).left(0.0))
-                            .width(Size::window_percent(100.0))
-                            .height(Size::window_percent(100.0))
-                            .on_press(move |_| {
-                                if let Some(handler) = &on_dismiss_backdrop {
-                                    handler.call(());
-                                }
-                            }),
-                    )
-                    .child(match measured {
-                        Some((anchor, content)) => {
-                            let (x, y) = compute_popover_origin(anchor, content, self.placement, self.gap);
-                            rect()
-                                .position(Position::new_global().left(x.max(0.0)).top(y.max(0.0)))
-                                .child(
-                                    Portal::new(self.id.clone())
-                                        .width(Size::px(content.width()))
-                                        .height(Size::px(content.height()))
-                                        .show(self.open)
-                                        .duration(motion::FLOAT_IN)
-                                        .ease(Ease::Out)
-                                        .function(motion::spring_fn())
-                                        .child(
-                                            rect().on_press(|e: Event<PressEventData>| e.stop_propagation()).child(
-                                                GlassPanel::new()
-                                                    .width(Size::fill())
-                                                    .padding(Gaps::new_all(theme.spacing.md))
-                                                    .spacing(theme.spacing.sm)
-                                                    .children(self.content.clone()),
-                                            ),
-                                        ),
-                                )
-                                .into_element()
-                        }
-                        None => rect()
                             .position(Position::new_global().left(0.0).top(0.0))
                             .opacity(0.0)
                             .on_sized(move |e: Event<SizedEventData>| {
@@ -290,10 +335,10 @@ impl Component for AnchoredPopover {
                                     .padding(Gaps::new_all(theme.spacing.md))
                                     .spacing(theme.spacing.sm)
                                     .children(self.content.clone()),
-                            )
-                            .into_element(),
-                    })
+                            ),
+                    )
             }))
+            .child(presence.child(panel))
     }
 
     fn render_key(&self) -> DiffKey {
@@ -375,47 +420,22 @@ impl Component for ConfirmationCard {
             theme.color(ThemeRole::TextOnAccent)
         };
 
-        let mut cancel_button = Button::new()
-            .outline()
-            .compact()
-            .background(Color::TRANSPARENT)
-            .hover_background(theme.color(ThemeRole::Hover))
-            .border_fill(theme.color(ThemeRole::Border))
-            .focus_border_fill(theme.color(ThemeRole::FocusRing))
-            .color(theme.color(ThemeRole::Text))
-            .corner_radius(CornerRadius::new_all(theme.radii.md))
-            .padding(Gaps::new(6.0, 12.0, 6.0, 12.0))
-            .cursor(CursorIcon::Pointer)
-            .child(
-                label()
-                    .text(self.cancel_label.clone())
-                    .font_size(theme.font_sizes.sm)
-                    .font_weight(FontWeight::MEDIUM),
-            );
-        if let Some(on_cancel) = &self.on_cancel {
-            cancel_button = cancel_button.on_press(on_cancel.clone());
-        }
-
-        let mut confirm_button = Button::new()
-            .filled()
-            .compact()
-            .background(accent.to_color())
-            .hover_background(accent.with_alpha(0.88).to_color())
-            .border_fill(accent.to_color())
-            .focus_border_fill(theme.color(ThemeRole::FocusRing))
-            .color(confirm_fg)
-            .corner_radius(CornerRadius::new_all(theme.radii.md))
-            .padding(Gaps::new(6.0, 14.0, 6.0, 14.0))
-            .cursor(CursorIcon::Pointer)
-            .child(
-                label()
-                    .text(self.confirm_label.clone())
-                    .font_size(theme.font_sizes.sm)
-                    .font_weight(FontWeight::SEMI_BOLD),
-            );
-        if let Some(on_confirm) = &self.on_confirm {
-            confirm_button = confirm_button.on_press(on_confirm.clone());
-        }
+        let cancel_button = ConfirmActionButton {
+            label: self.cancel_label.clone(),
+            filled: false,
+            accent_role,
+            confirm_fg,
+            on_press: self.on_cancel.clone(),
+            key: DiffKey::from(&"confirm-cancel"),
+        };
+        let confirm_button = ConfirmActionButton {
+            label: self.confirm_label.clone(),
+            filled: true,
+            accent_role,
+            confirm_fg,
+            on_press: self.on_confirm.clone(),
+            key: DiffKey::from(&"confirm-ok"),
+        };
 
         rect()
             .a11y_role(AccessibilityRole::AlertDialog)
@@ -478,6 +498,109 @@ impl Component for ConfirmationCard {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct ConfirmActionButton {
+    label: String,
+    filled: bool,
+    accent_role: ThemeRole,
+    confirm_fg: Color,
+    on_press: Option<EventHandler<Event<PressEventData>>>,
+    key: DiffKey,
+}
+
+impl KeyExt for ConfirmActionButton {
+    fn key_mut(&mut self) -> &mut DiffKey {
+        &mut self.key
+    }
+}
+
+impl Component for ConfirmActionButton {
+    fn render(&self) -> impl IntoElement {
+        let theme = use_theme();
+        let feedback = use_interactive_feedback(true);
+        let a11y_id = use_a11y();
+        let focus = use_focus(a11y_id);
+        let accent = theme.rgba(self.accent_role);
+
+        let (bg, border_col, fg, pad_h, weight) = if self.filled {
+            (
+                feedback.background(
+                    accent.to_color(),
+                    accent.with_alpha(0.88).to_color(),
+                    accent.with_alpha(0.76).to_color(),
+                ),
+                accent.to_color(),
+                self.confirm_fg,
+                14.0,
+                FontWeight::SEMI_BOLD,
+            )
+        } else {
+            (
+                feedback.background(
+                    Color::TRANSPARENT,
+                    theme.color(ThemeRole::Hover),
+                    theme.rgba(ThemeRole::Text).with_alpha(0.14).to_color(),
+                ),
+                theme.color(ThemeRole::Border),
+                theme.color(ThemeRole::Text),
+                12.0,
+                FontWeight::MEDIUM,
+            )
+        };
+
+        let border = focus_ring_border(
+            focus() == Focus::Keyboard,
+            &theme,
+            Border::new()
+                .width(1.0)
+                .alignment(BorderAlignment::Inner)
+                .fill(border_col),
+        );
+        let on_press = self.on_press.clone();
+        let on_press_key = self.on_press.clone();
+
+        rect()
+            .a11y_id(a11y_id)
+            .a11y_focusable(true)
+            .a11y_role(AccessibilityRole::Button)
+            .a11y_alt(self.label.clone())
+            .padding(Gaps::new(6.0, pad_h, 6.0, pad_h))
+            .corner_radius(CornerRadius::new_all(theme.radii.md))
+            .background(bg)
+            .border(border)
+            .scale(feedback.scale())
+            .center()
+            .cursor(CursorIcon::Pointer)
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
+            .on_pointer_down(feedback.on_pointer_down())
+            .on_global_pointer_up(feedback.on_pointer_up())
+            .on_press(move |e| {
+                if let Some(handler) = &on_press {
+                    handler.call(e);
+                }
+            })
+            .on_key_down(move |e: Event<KeyboardEventData>| {
+                if (e.key == Key::Named(NamedKey::Enter) || matches!(&e.key, Key::Character(c) if c == " "))
+                    && on_press_key.is_some()
+                {
+                    e.stop_propagation();
+                }
+            })
+            .child(
+                label()
+                    .text(self.label.clone())
+                    .font_size(theme.font_sizes.sm)
+                    .font_weight(weight)
+                    .color(fg),
+            )
+    }
+
+    fn render_key(&self) -> DiffKey {
+        self.key.clone().or(self.default_key())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,5 +627,29 @@ mod tests {
             compute_popover_origin(anchor, content, UiPlacement::Left, 6.0),
             (-26.0, 35.0)
         );
+    }
+
+    #[test]
+    fn popover_origin_in_viewport_flips_and_clamps_to_edges() {
+        let content = Area::new(Point2D::new(0.0, 0.0), Size2D::new(200.0, 100.0));
+        // Anchor near bottom-right corner of 400x300 viewport -> flips above and clamps left.
+        let near_bottom_right = Area::new(Point2D::new(340.0, 260.0), Size2D::new(40.0, 28.0));
+        let (x, y) = compute_popover_origin_in_viewport(
+            near_bottom_right,
+            content,
+            UiPlacement::Bottom,
+            6.0,
+            (400.0, 300.0),
+            8.0,
+        );
+        assert_eq!(x, 192.0);
+        assert_eq!(y, 154.0);
+
+        // Anchor near top-left corner placing Top -> flips below and clamps to margin 8.0.
+        let near_top_left = Area::new(Point2D::new(4.0, 12.0), Size2D::new(40.0, 24.0));
+        let (x2, y2) =
+            compute_popover_origin_in_viewport(near_top_left, content, UiPlacement::Top, 6.0, (400.0, 300.0), 8.0);
+        assert_eq!(x2, 8.0);
+        assert_eq!(y2, 42.0);
     }
 }

@@ -10,25 +10,23 @@
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
 use crate::ui::page::page_area::SPLIT_GAP;
-use crate::ui::theme::{ResolvedScheme, ResolvedTheme, Rgba, ThemeRole, use_theme};
+use crate::ui::theme::{ResolvedScheme, ResolvedTheme, Rgba, ThemeRole, motion, use_theme};
 use crate::ui::vim::hints::inline_hint_badge;
+use freya::animation::*;
 use freya::prelude::*;
 use zendia_browser_core::commands::Command;
-use zendia_browser_core::focus::{FocusSurface, FocusTarget, LandingKind, LandingTarget, WindowCarryState};
+use zendia_browser_core::focus::{FocusSurface, FocusTarget, WindowCarryState};
 use zendia_browser_core::model::{BrowserModel, InputMode, TabId};
-use zendia_browser_core::split::{self, DropZone, PaneRect};
+use zendia_browser_core::split::{self, PaneRect};
 
 const PANE_RADIUS: f32 = 8.0;
-const CHIP_HEIGHT: f32 = 28.0;
-const CHIP_TOP_INSET: f32 = 8.0;
+const CHIP_HEIGHT: f32 = 30.0;
+const CHIP_TOP_INSET: f32 = 4.0;
 
-/// Active pane border role: WINDOW orange while window mode is active, otherwise the standard accent ring.
-pub fn active_pane_ring_role(model: &BrowserModel) -> ThemeRole {
-    if model.vim_mode_enabled && model.input_mode == InputMode::Window {
-        ThemeRole::ModeWindow
-    } else {
-        ThemeRole::Accent
-    }
+/// Active pane border role: keeps the pink accent outline even in Window mode while the outer window chrome turns
+/// orange (`VIM-WM-05`, matching `window-mode-active-dark.png`).
+pub fn active_pane_ring_role(_model: &BrowserModel) -> ThemeRole {
+    ThemeRole::Accent
 }
 
 /// Overlay drawn over `PageArea` while vim window mode is active: numbered pane chips and carry landing labels.
@@ -120,18 +118,35 @@ impl Component for WindowModeOverlay {
                 .map(|(p, s)| (p.to_string(), s.to_string()));
             let pane_number = index + 1;
             let focus_core = core.clone();
+            let zoom_core = core.clone();
+            let detach_core = core.clone();
+            let close_core = core.clone();
+            let target_tab = *tab_id;
 
             overlay = overlay.child(PaneChip {
                 pane_number,
                 title,
                 favicon,
                 active: is_active,
+                in_split,
                 hint_parts,
                 pane_left: px,
                 pane_top: py,
                 pane_width: pw,
                 on_focus: EventHandler::new(move |_| {
                     focus_core.invoke_or_log(Command::WindowModeFocusPane { pane: pane_number });
+                }),
+                on_zoom: EventHandler::new(move |_| {
+                    zoom_core.invoke_or_log(Command::WindowModeFocusPane { pane: pane_number });
+                }),
+                on_detach: EventHandler::new(move |_| {
+                    detach_core.invoke_or_log(Command::SplitRemoveTab { tab_id: target_tab });
+                }),
+                on_close: EventHandler::new(move |_| {
+                    close_core.invoke_or_log(Command::TabClose {
+                        tab_id: Some(target_tab),
+                        force: false,
+                    });
                 }),
                 key: DiffKey::from(&("pane-chip", tab_id.0)),
             });
@@ -147,11 +162,15 @@ struct PaneChip {
     title: String,
     favicon: Option<String>,
     active: bool,
+    in_split: bool,
     hint_parts: Option<(String, String)>,
     pane_left: f32,
     pane_top: f32,
     pane_width: f32,
     on_focus: EventHandler<()>,
+    on_zoom: EventHandler<()>,
+    on_detach: EventHandler<()>,
+    on_close: EventHandler<()>,
     key: DiffKey,
 }
 
@@ -165,22 +184,32 @@ impl Component for PaneChip {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let mut hovered = use_state(|| false);
+        let zoom_hovered = use_state(|| false);
+        let detach_hovered = use_state(|| false);
+        let close_hovered = use_state(|| false);
 
-        let window_rgba = theme.rgba(ThemeRole::ModeWindow);
-        let window_color = window_rgba.to_color();
-        let (chip_bg, chip_border, chip_shadow) = match theme.scheme {
+        // `120ms` ease-out entrance (`translateY(-4px) scale(0.96) -> scale(1)`, `zen-split-view.css:246-251`, `VIM-WM-02`).
+        let entrance = use_animation(|conf| {
+            conf.on_creation(OnCreation::Run);
+            AnimNum::new(0.0, 1.0)
+                .duration(motion::SPLIT_CHIP_IN)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let t = entrance.get().value().clamp(0.0, 1.0);
+        let chip_scale = 0.96 + 0.04 * t;
+        let chip_offset_y = -4.0 * (1.0 - t);
+
+        let (chip_bg, chip_border, chip_shadow, btn_hover_bg) = match theme.scheme {
             ResolvedScheme::Dark => (
                 if *hovered.read() {
                     Rgba::from_rgb_alpha(38, 42, 60, 0.96).to_color()
                 } else {
                     Rgba::from_rgb_alpha(28, 31, 46, 0.92).to_color()
                 },
-                if self.active {
-                    window_rgba.with_alpha(0.92).to_color()
-                } else {
-                    Rgba::from_rgb_alpha(255, 255, 255, 0.14).to_color()
-                },
-                Shadow::new().y(4.0).blur(14.0).color(Color::from_argb(110, 0, 0, 0)),
+                Rgba::from_rgb_alpha(255, 255, 255, 0.14).to_color(),
+                Shadow::new().y(2.0).blur(10.0).color(Color::from_argb(46, 0, 0, 0)),
+                Rgba::from_rgb_alpha(255, 255, 255, 0.12).to_color(),
             ),
             ResolvedScheme::Light => (
                 if *hovered.read() {
@@ -188,55 +217,92 @@ impl Component for PaneChip {
                 } else {
                     Rgba::from_rgb_alpha(250, 251, 255, 0.94).to_color()
                 },
-                if self.active {
-                    window_rgba.with_alpha(0.92).to_color()
-                } else {
-                    Rgba::from_rgb_alpha(20, 24, 40, 0.14).to_color()
-                },
-                Shadow::new().y(3.0).blur(12.0).color(Color::from_argb(42, 20, 24, 40)),
+                Rgba::from_rgb_alpha(20, 24, 40, 0.14).to_color(),
+                Shadow::new().y(2.0).blur(10.0).color(Color::from_argb(46, 20, 24, 40)),
+                Rgba::from_rgb_alpha(0, 0, 0, 0.08).to_color(),
             ),
         };
 
-        let (num_bg, num_fg) = if self.active {
-            let fg = match theme.scheme {
-                ResolvedScheme::Dark => theme.color(ThemeRole::Ink),
-                ResolvedScheme::Light => Color::WHITE,
-            };
-            (window_color, fg)
-        } else {
-            (window_rgba.with_alpha(0.20).to_color(), window_color)
-        };
-
-        let max_chip_width = (self.pane_width - 24.0).clamp(110.0, 260.0);
-        let estimated_width = (self.title.len() as f32 * 6.8 + 76.0).clamp(110.0, max_chip_width);
+        let actions_w = if self.in_split { 76.0 } else { 26.0 };
+        let hint_w = if self.hint_parts.is_some() { 26.0 } else { 0.0 };
+        let max_chip_width = (self.pane_width - 16.0).clamp(130.0, 340.0);
+        let estimated_width = (self.title.len() as f32 * 6.5 + 52.0 + actions_w + hint_w).clamp(130.0, max_chip_width);
         let chip_left = self.pane_left + ((self.pane_width - estimated_width) * 0.5).max(8.0);
         let chip_top = self.pane_top + CHIP_TOP_INSET;
 
         let on_focus = self.on_focus.clone();
+        let on_zoom = self.on_zoom.clone();
+        let on_detach = self.on_detach.clone();
+        let on_close = self.on_close.clone();
         let hint_badge = self
             .hint_parts
             .as_ref()
             .map(|(prefix, suffix)| inline_hint_badge(prefix, suffix, &theme));
         let icon_name = self.favicon.clone().unwrap_or_else(|| "globe".to_string());
 
+        let action_btn =
+            |icon: &'static str, alt: &'static str, is_hov: bool, mut hov_state: State<bool>, cb: EventHandler<()>| {
+                rect()
+                    .width(Size::px(24.0))
+                    .height(Size::px(24.0))
+                    .corner_radius(CornerRadius::new_all(6.0))
+                    .background(if is_hov { btn_hover_bg } else { Color::TRANSPARENT })
+                    .opacity(if is_hov { 1.0 } else { 0.75 })
+                    .center()
+                    .cursor(CursorIcon::Pointer)
+                    .a11y_role(AccessibilityRole::Button)
+                    .a11y_alt(alt)
+                    .on_pointer_enter(move |_| hov_state.set_if_modified(true))
+                    .on_pointer_leave(move |_| hov_state.set_if_modified(false))
+                    .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
+                    .on_press(move |e: Event<PressEventData>| {
+                        e.stop_propagation();
+                        cb.call(());
+                    })
+                    .child(Icon::new(icon).size(13.0).role(ThemeRole::Text))
+            };
+
+        let zoom_btn = self.in_split.then(|| {
+            action_btn(
+                "arrows-expand",
+                "Focus pane",
+                *zoom_hovered.read(),
+                zoom_hovered,
+                on_zoom,
+            )
+        });
+        let detach_btn = self.in_split.then(|| {
+            action_btn(
+                "split",
+                "Detach pane from split",
+                *detach_hovered.read(),
+                detach_hovered,
+                on_detach,
+            )
+        });
+        let close_btn = action_btn("close", "Close pane", *close_hovered.read(), close_hovered, on_close);
+
         rect()
             .position(Position::new_absolute().left(chip_left).top(chip_top))
             .width(Size::px(estimated_width))
             .height(Size::px(CHIP_HEIGHT))
-            .padding(Gaps::new(0.0, 10.0, 0.0, 6.0))
-            .spacing(6.0)
+            .padding(Gaps::new_all(3.0))
+            .spacing(2.0)
             .direction(Direction::Horizontal)
             .content(Content::Flex)
             .cross_align(Alignment::center())
-            .corner_radius(CornerRadius::new_all(8.0))
+            .corner_radius(CornerRadius::new_all(9.0))
             .background(chip_bg)
             .border(
                 Border::new()
-                    .width(if self.active { 1.5 } else { 1.0 })
+                    .width(1.0)
                     .alignment(BorderAlignment::Inner)
                     .fill(chip_border),
             )
             .shadow(chip_shadow)
+            .opacity(t)
+            .offset_y(chip_offset_y)
+            .scale((chip_scale, chip_scale))
             .overflow(Overflow::Clip)
             .cursor(CursorIcon::Pointer)
             .a11y_role(AccessibilityRole::Button)
@@ -252,35 +318,34 @@ impl Component for PaneChip {
             .child(
                 rect()
                     .width(Size::px(18.0))
-                    .height(Size::px(18.0))
-                    .corner_radius(CornerRadius::new_all(5.0))
-                    .background(num_bg)
+                    .height(Size::px(24.0))
                     .center()
-                    .child(
-                        label()
-                            .text(self.pane_number.to_string())
-                            .font_size(11.0)
-                            .font_weight(FontWeight::BOLD)
-                            .font_family("monospace")
-                            .color(num_fg)
-                            .max_lines(1),
-                    ),
+                    .opacity(0.65)
+                    .child(Icon::new("drag-indicator").size(12.0).role(ThemeRole::TextMuted)),
             )
-            .child(Icon::new(icon_name).size(13.0).role(ThemeRole::Text))
+            .child(
+                rect()
+                    .margin(Gaps::new(0.0, 4.0, 0.0, 2.0))
+                    .center()
+                    .child(Icon::new(icon_name).size(14.0).role(ThemeRole::Text)),
+            )
             .child(
                 label()
                     .text(self.title.clone())
                     .width(Size::flex(1.0))
                     .font_size(12.0)
                     .font_weight(if self.active {
-                        FontWeight::SEMI_BOLD
-                    } else {
                         FontWeight::MEDIUM
+                    } else {
+                        FontWeight::NORMAL
                     })
-                    .color(theme.color(ThemeRole::Text))
+                    .color(theme.rgba(ThemeRole::Text).with_alpha(0.85).to_color())
                     .max_lines(1)
                     .text_overflow(TextOverflow::Ellipsis),
             )
+            .maybe_child(zoom_btn)
+            .maybe_child(detach_btn)
+            .child(close_btn)
     }
 
     fn render_key(&self) -> DiffKey {
@@ -304,12 +369,12 @@ fn render_carry_layer(
         .height(Size::px(height))
         .interactive(false);
 
-    // 1. Dim the pane currently being carried.
+    // 1. Dim the carried pane to ~0.35 perceived visibility without a cluttering pill (`VIM-WM-03`, `zen-split-view.css:272`).
     if let Some((_, carried_rect)) = panes.iter().find(|(id, _)| *id == carry.carried_tab) {
         let (cx, cy, cw, ch) = pane_pixels(*carried_rect, size, in_split);
         let scrim = match theme.scheme {
-            ResolvedScheme::Dark => Rgba::from_rgb_alpha(15, 17, 26, 0.45).to_color(),
-            ResolvedScheme::Light => Rgba::from_rgb_alpha(240, 242, 248, 0.55).to_color(),
+            ResolvedScheme::Dark => Rgba::from_rgb_alpha(15, 17, 26, 0.65).to_color(),
+            ResolvedScheme::Light => Rgba::from_rgb_alpha(240, 242, 248, 0.65).to_color(),
         };
         layer = layer.child(
             rect()
@@ -317,13 +382,11 @@ fn render_carry_layer(
                 .width(Size::px(cw))
                 .height(Size::px(ch))
                 .corner_radius(CornerRadius::new_all(PANE_RADIUS))
-                .background(scrim)
-                .center()
-                .child(landing_pill("Carrying pane", false, true, theme)),
+                .background(scrim),
         );
     }
 
-    // 2. Highlighted drop preview for the selected landing target.
+    // 2. Render ONLY the single active drop-preview highlight box + label (`VIM-WM-03`).
     if let Some(selected) = carry.selected_target() {
         let px = selected.rect.x * width;
         let py = selected.rect.y * height;
@@ -343,98 +406,31 @@ fn render_carry_layer(
                         .fill(orange_color),
                 )
                 .center()
-                .child(landing_pill(&selected.label, true, false, theme)),
+                .child(landing_pill(&selected.label, theme)),
         );
-    }
-
-    // 3. Landing labels at each side of every non-carried pane and at each outer split edge.
-    for (idx, target) in carry.targets.iter().enumerate() {
-        if idx == carry.selected {
-            continue;
-        }
-        if let Some((lx, ly, caption)) = landing_label_anchor(panes, target, size, in_split) {
-            layer = layer.child(
-                rect()
-                    .position(Position::new_absolute().left(lx).top(ly))
-                    .child(landing_pill(caption, false, false, theme)),
-            );
-        }
     }
 
     layer.into_element()
 }
 
-fn landing_label_anchor(
-    panes: &[(TabId, PaneRect)],
-    target: &LandingTarget,
-    size: (f32, f32),
-    in_split: bool,
-) -> Option<(f32, f32, &'static str)> {
-    let (width, height) = size;
-    let pill_h = 22.0;
-    match target.kind {
-        LandingKind::PaneSide { target_tab, zone } => {
-            let (_, pane_rect) = panes.iter().find(|(id, _)| *id == target_tab)?;
-            let (px, py, pw, ph) = pane_pixels(*pane_rect, size, in_split);
-            if pw < 140.0 || ph < 110.0 {
-                return None;
-            }
-            let (x, y, caption) = match zone {
-                DropZone::Left => (px + 12.0, py + (ph - pill_h) * 0.5, "Left"),
-                DropZone::Right => (px + pw - 62.0, py + (ph - pill_h) * 0.5, "Right"),
-                DropZone::Top => (px + pw * 0.5 - 24.0, py + 44.0, "Top"),
-                DropZone::Bottom => (px + pw * 0.5 - 32.0, py + ph - pill_h - 12.0, "Bottom"),
-            };
-            Some((x.max(4.0), y.max(4.0), caption))
-        }
-        LandingKind::PaneSwap { target_tab } => {
-            let (_, pane_rect) = panes.iter().find(|(id, _)| *id == target_tab)?;
-            let (px, py, pw, ph) = pane_pixels(*pane_rect, size, in_split);
-            if pw < 100.0 || ph < 90.0 {
-                return None;
-            }
-            Some((px + pw * 0.5 - 26.0, py + (ph - pill_h) * 0.5, "Swap"))
-        }
-        LandingKind::SplitEdge { zone } => {
-            let (x, y, caption) = match zone {
-                DropZone::Left => (8.0, (height - pill_h) * 0.5, "Left edge"),
-                DropZone::Right => (width - 82.0, (height - pill_h) * 0.5, "Right edge"),
-                DropZone::Top => (width * 0.5 - 38.0, 8.0, "Top edge"),
-                DropZone::Bottom => (width * 0.5 - 46.0, height - pill_h - 8.0, "Bottom edge"),
-            };
-            Some((x.max(4.0), y.max(4.0), caption))
-        }
-    }
-}
-
-fn landing_pill(text: &str, active: bool, muted: bool, theme: &ResolvedTheme) -> Element {
+fn landing_pill(text: &str, theme: &ResolvedTheme) -> Element {
     let orange = theme.rgba(ThemeRole::ModeWindow);
-    let (bg, border, fg) = if active {
-        let fg = match theme.scheme {
-            ResolvedScheme::Dark => theme.color(ThemeRole::Ink),
-            ResolvedScheme::Light => Color::WHITE,
-        };
-        (orange.to_color(), orange.to_color(), fg)
-    } else if muted {
-        (
-            theme.rgba(ThemeRole::SurfaceRaised).with_alpha(0.90).to_color(),
-            theme.color(ThemeRole::Border),
-            theme.color(ThemeRole::TextMuted),
-        )
-    } else {
-        let bg = match theme.scheme {
-            ResolvedScheme::Dark => Rgba::from_rgb_alpha(26, 29, 44, 0.90).to_color(),
-            ResolvedScheme::Light => Rgba::from_rgb_alpha(255, 255, 255, 0.92).to_color(),
-        };
-        (bg, orange.with_alpha(0.65).to_color(), theme.color(ThemeRole::Text))
+    let fg = match theme.scheme {
+        ResolvedScheme::Dark => theme.color(ThemeRole::Ink),
+        ResolvedScheme::Light => Color::WHITE,
     };
 
     rect()
         .height(Size::px(22.0))
         .padding(Gaps::new(0.0, 8.0, 0.0, 8.0))
         .corner_radius(CornerRadius::new_all(999.0))
-        .background(bg)
-        .border(Border::new().width(1.0).alignment(BorderAlignment::Inner).fill(border))
+        .background(orange.to_color())
+        .border(
+            Border::new()
+                .width(1.0)
+                .alignment(BorderAlignment::Inner)
+                .fill(orange.to_color()),
+        )
         .center()
         .overflow(Overflow::Clip)
         .child(

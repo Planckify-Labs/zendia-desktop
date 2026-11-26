@@ -6,10 +6,12 @@
 
 //! Per-window reactive state for Zendia's side panel dock host (`DockHostState`).
 //!
-//! Tracks which side panels are open in this window, keyboard focus, hover/slide auto-hide state, live resize drag
-//! preview, and view-local overlays for the agent panel (model card, instructions page, dictation state).
+//! Tracks which side panels are open (or animating closed) in this window, keyboard focus, per-panel hover/slide
+//! auto-hide state, live resize drag preview, and view-local overlays for the agent and web chat panels.
 
+use crate::ui::theme::motion;
 use freya::prelude::*;
+use std::collections::{BTreeMap, BTreeSet};
 use zendia_browser_core::agent::{AGENT_PANEL_ID, AGENTS_PANEL_ID, InstructionAttachment};
 use zendia_browser_core::contributions::SidePanelId;
 use zendia_browser_core::events::ViewRequest;
@@ -29,6 +31,10 @@ pub enum DictationState {
 pub struct DockHostState {
     /// Side panels currently open in this window (in open order; last is most recently focused).
     pub open_panels: State<Vec<SidePanelId>>,
+    /// Side panels currently playing their `180ms` close animation before unmounting (`DF-01`).
+    pub closing_panels: State<BTreeMap<SidePanelId, u64>>,
+    /// Sequence counter for cancelling stale close-unmount timers when a panel re-opens mid-close.
+    pub closing_seq: State<u64>,
     /// Side panel that currently holds keyboard focus (shows the 2px inner accent ring).
     pub focused_panel: State<Option<SidePanelId>>,
     /// Whether the floating Model & Effort card popover is open inside the agent panel.
@@ -45,11 +51,13 @@ pub struct DockHostState {
     pub dictation: State<DictationState>,
     /// Live width override while the user is dragging a panel's edge resize grip.
     pub resize_preview: State<Option<(SidePanelId, f32)>>,
-    /// True while the pointer is hovering over an open slide-mode panel.
-    pub slide_pointer_inside: State<bool>,
-    /// Sequence counter for cancelling stale slide-hide or slide-handle-open timers.
-    pub slide_timer_seq: State<u64>,
-    /// True while a text input or sub-overlay inside the panel requests slide auto-hide to stay paused.
+    /// Set of slide-mode panels whose pointer is currently inside their frame (`DF-13`).
+    pub slide_pointer_inside: State<BTreeSet<SidePanelId>>,
+    /// Per-panel sequence counters for cancelling stale slide-hide or slide-handle-open timers (`DF-13`).
+    pub slide_timer_seq: State<BTreeMap<SidePanelId, u64>>,
+    /// Set of panels currently being edge-resized so Slide auto-hide stays paused (`DF-08`, `DF-13`).
+    pub slide_resizing: State<BTreeSet<SidePanelId>>,
+    /// True while a text input or sub-overlay inside the agent panel requests slide auto-hide to stay paused.
     pub slide_keep_open: State<bool>,
     /// Measured width of the window's page stage (body excluding sidebar), used for Split fallback checks.
     pub stage_width: State<f32>,
@@ -64,7 +72,7 @@ pub struct DockHostState {
 }
 
 impl DockHostState {
-    /// Returns whether `panel_id` is currently open in this window.
+    /// Returns whether `panel_id` is currently open in this window (excludes panels animating closed).
     pub fn is_open(&self, panel_id: &SidePanelId) -> bool {
         self.open_panels.read().iter().any(|id| id == panel_id)
     }
@@ -84,31 +92,84 @@ impl DockHostState {
         self.open_panels.read().iter().any(|id| id.0 == WEBCHAT_PANEL_ID)
     }
 
+    /// Returns every mounted panel in render order as `(panel_id, is_closing)`.
+    pub fn visible_panels(&self) -> Vec<(SidePanelId, bool)> {
+        let open = self.open_panels.read();
+        let closing = self.closing_panels.read();
+        let mut out: Vec<(SidePanelId, bool)> = open.iter().cloned().map(|id| (id, false)).collect();
+        for id in closing.keys() {
+            if !open.contains(id) {
+                out.push((id.clone(), true));
+            }
+        }
+        out
+    }
+
     /// Returns whether `panel_id` currently holds keyboard focus.
     pub fn is_focused(&self, panel_id: &SidePanelId) -> bool {
         self.focused_panel.read().as_ref() == Some(panel_id)
     }
 
-    /// Opens `panel_id` (moving it to the top of open panels) and gives it focus.
-    pub fn open_panel(&mut self, panel_id: SidePanelId) {
+    /// Opens `panel_id` (moving it to the top of open panels) and optionally gives it focus (`XPN-05`).
+    ///
+    /// When `focus` is `false` (for example, opening a Slide panel via edge hover), any existing focus on another
+    /// panel is preserved rather than cleared.
+    pub fn open_panel_with_focus(&mut self, panel_id: SidePanelId, focus: bool) {
+        if self.closing_panels.peek().contains_key(&panel_id) {
+            let mut closing = self.closing_panels.peek().clone();
+            closing.remove(&panel_id);
+            self.closing_panels.set(closing);
+        }
         let mut open = self.open_panels.peek().clone();
         open.retain(|id| id != &panel_id);
         open.push(panel_id.clone());
         self.open_panels.set(open);
-        self.focused_panel.set_if_modified(Some(panel_id));
+        if focus {
+            self.focused_panel.set_if_modified(Some(panel_id));
+        }
     }
 
-    /// Closes `panel_id` (and clears sub-overlays when closing the agent or web chat panel).
-    pub fn close_panel(&mut self, panel_id: &SidePanelId) {
+    /// Opens `panel_id` (moving it to the top of open panels) and gives it focus.
+    pub fn open_panel(&mut self, panel_id: SidePanelId) {
+        self.open_panel_with_focus(panel_id, true);
+    }
+
+    /// Closes `panel_id` (keeping it mounted for its `180ms` exit animation) and returns `true` if it held focus.
+    pub fn close_panel(&mut self, panel_id: &SidePanelId) -> bool {
         let mut open = self.open_panels.peek().clone();
         let before = open.len();
         open.retain(|id| id != panel_id);
-        if open.len() != before {
+        let was_open = open.len() != before;
+        if was_open {
             self.open_panels.set(open);
+            // Keep mounted briefly for the 180ms ease-in exit animation (DF-01), except in static gallery snapshots.
+            if self.pinned_ring_phase.peek().is_none() {
+                let seq = self.closing_seq.peek().wrapping_add(1);
+                self.closing_seq.set(seq);
+                let mut closing = self.closing_panels.peek().clone();
+                closing.insert(panel_id.clone(), seq);
+                self.closing_panels.set(closing);
+                let mut closing_state = self.closing_panels;
+                let pid = panel_id.clone();
+                spawn(async move {
+                    timer(motion::DOCK_CLOSE).await;
+                    if closing_state.peek().get(&pid) == Some(&seq) {
+                        let mut next = closing_state.peek().clone();
+                        next.remove(&pid);
+                        closing_state.set(next);
+                    }
+                });
+            }
         }
-        if self.focused_panel.peek().as_ref() == Some(panel_id) {
+
+        let was_focused = self.focused_panel.peek().as_ref() == Some(panel_id);
+        if was_focused {
             self.focused_panel.set(None);
         }
+
+        self.set_slide_pointer_inside(panel_id, false);
+        self.set_slide_resizing(panel_id, false);
+
         if panel_id.0 == AGENT_PANEL_ID {
             self.model_card_open.set_if_modified(false);
             self.model_card_list_view.set_if_modified(false);
@@ -118,6 +179,7 @@ impl DockHostState {
             self.webchat_accounts_open.set_if_modified(false);
             self.webchat_add_site_open.set_if_modified(false);
         }
+        was_focused
     }
 
     /// Toggles `panel_id` open or closed, returning `true` if it is now open. Other open panels stay open beside it.
@@ -134,6 +196,63 @@ impl DockHostState {
     /// Focuses `panel_id` (or clears focus when `None`).
     pub fn set_focus(&mut self, panel_id: Option<SidePanelId>) {
         self.focused_panel.set_if_modified(panel_id);
+    }
+
+    /// Records whether the pointer is inside slide-mode `panel_id`.
+    pub fn set_slide_pointer_inside(&mut self, panel_id: &SidePanelId, inside: bool) {
+        let already = self.slide_pointer_inside.peek().contains(panel_id);
+        if already != inside {
+            let mut next = self.slide_pointer_inside.peek().clone();
+            if inside {
+                next.insert(panel_id.clone());
+            } else {
+                next.remove(panel_id);
+            }
+            self.slide_pointer_inside.set(next);
+        }
+    }
+
+    /// Returns whether the pointer is currently inside slide-mode `panel_id`.
+    pub fn is_slide_pointer_inside(&self, panel_id: &SidePanelId) -> bool {
+        self.slide_pointer_inside.peek().contains(panel_id)
+    }
+
+    /// Increments and returns the per-panel slide timer sequence number for `panel_id`.
+    pub fn bump_slide_timer_seq(&mut self, panel_id: &SidePanelId) -> u64 {
+        let mut map = self.slide_timer_seq.peek().clone();
+        let next = map.get(panel_id).copied().unwrap_or(0).wrapping_add(1);
+        map.insert(panel_id.clone(), next);
+        self.slide_timer_seq.set(map);
+        next
+    }
+
+    /// Returns the current per-panel slide timer sequence number for `panel_id`.
+    pub fn slide_timer_seq_for(&self, panel_id: &SidePanelId) -> u64 {
+        self.slide_timer_seq.peek().get(panel_id).copied().unwrap_or(0)
+    }
+
+    /// Records whether `panel_id` is actively being resized.
+    pub fn set_slide_resizing(&mut self, panel_id: &SidePanelId, active: bool) {
+        let already = self.slide_resizing.peek().contains(panel_id);
+        if already != active {
+            let mut next = self.slide_resizing.peek().clone();
+            if active {
+                next.insert(panel_id.clone());
+            } else {
+                next.remove(panel_id);
+            }
+            self.slide_resizing.set(next);
+        }
+    }
+
+    /// Returns whether `panel_id` is currently being resized.
+    pub fn is_slide_resizing(&self, panel_id: &SidePanelId) -> bool {
+        self.slide_resizing.peek().contains(panel_id)
+    }
+
+    /// Returns whether any side panel is currently being dragged/resized.
+    pub fn is_any_panel_resizing(&self) -> bool {
+        !self.slide_resizing.peek().is_empty()
     }
 
     /// Returns `true` when any side panel surface is actively capturing text input (composer, model search,
@@ -161,19 +280,23 @@ impl DockHostState {
     }
 
     /// Applies a view request that opens or closes side panels or the agent panel's model card and instructions page.
-    pub fn apply_request(&mut self, request: &ViewRequest) {
+    ///
+    /// Returns `true` when a previously focused panel was closed so the caller can return keyboard focus to the
+    /// active page surface (`XPN-01`).
+    pub fn apply_request(&mut self, request: &ViewRequest) -> bool {
         match request {
             ViewRequest::PanelOpen { panel_id, focus } => {
-                self.open_panel(panel_id.clone());
-                if !*focus {
-                    self.focused_panel.set_if_modified(None);
-                }
+                self.open_panel_with_focus(panel_id.clone(), *focus);
+                false
             }
-            ViewRequest::PanelClose { panel_id } => {
-                self.close_panel(panel_id);
-            }
+            ViewRequest::PanelClose { panel_id } => self.close_panel(panel_id),
             ViewRequest::PanelToggle { panel_id } => {
-                self.toggle_panel(panel_id.clone());
+                if self.open_panels.peek().contains(panel_id) {
+                    self.close_panel(panel_id)
+                } else {
+                    self.open_panel(panel_id.clone());
+                    false
+                }
             }
             ViewRequest::AgentModelCard => {
                 let agent_id = SidePanelId::new(AGENT_PANEL_ID);
@@ -185,6 +308,7 @@ impl DockHostState {
                 if next {
                     self.model_card_list_view.set_if_modified(false);
                 }
+                false
             }
             ViewRequest::AgentInstructions => {
                 let agent_id = SidePanelId::new(AGENT_PANEL_ID);
@@ -193,8 +317,9 @@ impl DockHostState {
                 }
                 self.instructions_open.set_if_modified(true);
                 self.model_card_open.set_if_modified(false);
+                false
             }
-            _ => {}
+            _ => false,
         }
     }
 }
@@ -203,6 +328,8 @@ impl DockHostState {
 pub fn use_provide_dock_state() -> DockHostState {
     let state = DockHostState {
         open_panels: use_state(Vec::new),
+        closing_panels: use_state(BTreeMap::new),
+        closing_seq: use_state(|| 0u64),
         focused_panel: use_state(|| None),
         model_card_open: use_state(|| false),
         model_card_list_view: use_state(|| false),
@@ -211,8 +338,9 @@ pub fn use_provide_dock_state() -> DockHostState {
         webchat_add_site_open: use_state(|| false),
         dictation: use_state(|| DictationState::Idle),
         resize_preview: use_state(|| None),
-        slide_pointer_inside: use_state(|| false),
-        slide_timer_seq: use_state(|| 0u64),
+        slide_pointer_inside: use_state(BTreeSet::new),
+        slide_timer_seq: use_state(BTreeMap::new),
+        slide_resizing: use_state(BTreeSet::new),
         slide_keep_open: use_state(|| false),
         stage_width: use_state(|| 1120.0f32),
         model_chip_anchor: use_state(|| None),

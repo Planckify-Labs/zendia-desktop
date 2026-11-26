@@ -11,7 +11,7 @@ use crate::commands::{Command, CommandError, CommandResult};
 use crate::events::{Event, ViewRequest};
 use crate::input_state::{
     DEFAULT_ANNOUNCEMENT_TIMEOUT_MS, SAMPLE_INPUT_STEP_COUNT, StatuslineAnnouncement, StatuslineShow,
-    sample_input_state,
+    sample_input_state, which_key_for_prefix,
 };
 
 impl StubBackend {
@@ -105,6 +105,23 @@ impl StubBackend {
                 self.request_view(ViewRequest::WhichKeyAll { mode });
                 Ok(())
             }
+            Command::WhichKeyBack => {
+                let (mode, mut pending) = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    (state.model.input_mode, state.model.pending_keys.clone())
+                };
+                pending.pop();
+                if pending.is_empty() {
+                    self.set_pending_count(None);
+                    self.set_pending_keys(Vec::new());
+                    self.set_which_key(None);
+                } else {
+                    let next_wk = which_key_for_prefix(mode, &pending).map(|view| view.to_which_key_state());
+                    self.set_pending_keys(pending);
+                    self.set_which_key(next_wk);
+                }
+                Ok(())
+            }
             Command::WhichKeyHide => {
                 self.set_pending_count(None);
                 self.set_pending_keys(Vec::new());
@@ -168,6 +185,33 @@ mod tests {
             view.apply_event(&event);
         }
         assert!(view.statusline_announcement.is_none());
+        assert_eq!(view, core.model());
+    }
+
+    #[test]
+    fn which_key_back_pops_subgroup_then_hides() {
+        let core = StubBackend::new();
+        let mut view = core.model();
+        let sub = core.subscribe();
+
+        let pending = vec!["<Space>".to_string(), "a".to_string()];
+        let wk = which_key_for_prefix(InputMode::Normal, &pending).map(|v| v.to_which_key_state());
+        core.set_pending_keys(pending);
+        core.set_which_key(wk);
+
+        core.invoke(Command::WhichKeyBack).unwrap();
+        while let Ok(event) = sub.try_recv() {
+            view.apply_event(&event);
+        }
+        assert_eq!(view.pending_keys, vec!["<Space>".to_string()]);
+        assert_eq!(view.which_key.as_ref().map(|w| w.title.as_str()), Some("SPC"));
+
+        core.invoke(Command::WhichKeyBack).unwrap();
+        while let Ok(event) = sub.try_recv() {
+            view.apply_event(&event);
+        }
+        assert!(view.pending_keys.is_empty());
+        assert!(view.which_key.is_none());
         assert_eq!(view, core.model());
     }
 }

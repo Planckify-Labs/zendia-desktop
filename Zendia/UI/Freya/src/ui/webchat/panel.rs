@@ -12,7 +12,7 @@
 
 use crate::ui::agent::{agent_input_colors, agent_input_layout};
 use crate::ui::core_view::use_core;
-use crate::ui::kit::Icon;
+use crate::ui::kit::{Icon, IndeterminateBar};
 use crate::ui::page::{PageSurface, PageSurfaceContext};
 use crate::ui::panels::{DockLayoutControls, ResolvedDockPanel, try_use_dock_state};
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_theme};
@@ -505,13 +505,7 @@ impl Component for WebChatPanel {
             .width(Size::fill())
             .height(Size::px(2.0))
             .background(border_col)
-            .maybe_child(is_loading.then(|| {
-                rect()
-                    .width(Size::percent(42.0))
-                    .height(Size::px(2.0))
-                    .position(Position::new_absolute().left(88.0).top(0.0))
-                    .background(site_accent)
-            }));
+            .maybe_child(is_loading.then(|| IndeterminateBar::new(2.0, site_accent)));
 
         // --- Pending Ask prompt notice (stub mode before Automation World) ---
         let pending_banner = pending_prompt.as_ref().and_then(|(sid, prompt)| {
@@ -565,6 +559,7 @@ impl Component for WebChatPanel {
         let dictation_pill = dictating.then(|| {
             let core_stop_dict = core.clone();
             rect()
+                .layer(Layer::Relative(12))
                 .position(Position::new_absolute().bottom(14.0).left(0.0))
                 .width(Size::percent(100.0))
                 .direction(Direction::Horizontal)
@@ -615,36 +610,49 @@ impl Component for WebChatPanel {
                 )
         });
 
-        // --- Site body: real live Hub PageSurface (in zendia) or centered waiting emblem ---
-        let waiting_emblem = {
-            let site_id_str = active_site.as_ref().map(|s| s.id.0.as_str()).unwrap_or("chatgpt");
-            let emblem_col = match theme.scheme {
-                ResolvedScheme::Dark => Color::from_argb(180, 210, 216, 232),
-                ResolvedScheme::Light => Color::from_argb(175, 92, 100, 118),
-            };
-            rect()
-                .width(Size::fill())
-                .height(Size::fill())
-                .center()
-                .child(chat_site_logo(site_id_str, 40.0, emblem_col))
+        // --- Site body: real live Hub PageSurface (in zendia) or centered pulsing waiting emblem ---
+        let waiting_visible = is_loading || active_view_id.is_none();
+        let site_id_owned = active_site
+            .as_ref()
+            .map(|s| s.id.0.clone())
+            .unwrap_or_else(|| "chatgpt".to_string());
+        let emblem_col = match theme.scheme {
+            ResolvedScheme::Dark => Color::from_argb(180, 210, 216, 232),
+            ResolvedScheme::Light => Color::from_argb(175, 92, 100, 118),
+        };
+        let waiting_emblem = WaitingEmblem {
+            site_id: site_id_owned,
+            color: emblem_col,
+            visible: waiting_visible,
+            pulsing: is_loading,
         };
 
         let site_stage = rect()
             .width(Size::fill())
             .height(Size::flex(1.0))
+            .content(Content::Flex)
             .overflow(Overflow::Clip)
             .maybe_child(pending_banner)
             .child(if let Some(view_id) = active_view_id {
                 rect()
                     .width(Size::fill())
                     .height(Size::flex(1.0))
-                    .child(waiting_emblem)
+                    .overflow(Overflow::Clip)
                     .child(
                         rect()
                             .position(Position::new_absolute().top(0.0).left(0.0))
                             .width(Size::percent(100.0))
                             .height(Size::percent(100.0))
                             .child(PageSurface::for_view(view_id).key(format!("webchat-view:{view_id}"))),
+                    )
+                    .child(
+                        rect()
+                            .layer(Layer::Relative(10))
+                            .position(Position::new_absolute().top(0.0).left(0.0))
+                            .width(Size::percent(100.0))
+                            .height(Size::percent(100.0))
+                            .interactive(Interactive::No)
+                            .child(waiting_emblem),
                     )
                     .into_element()
             } else {
@@ -789,5 +797,67 @@ impl Component for WebChatPanel {
 
     fn render_key(&self) -> DiffKey {
         self.key.clone().or(self.default_key())
+    }
+}
+
+/// Centered waiting emblem that pulses (`1.4 s` ease-in-out) while loading and fades out (`220 ms`) once hidden,
+/// stopping redraws completely when no longer visible.
+#[derive(Clone, PartialEq)]
+struct WaitingEmblem {
+    site_id: String,
+    color: Color,
+    visible: bool,
+    pulsing: bool,
+}
+
+impl Component for WaitingEmblem {
+    fn render(&self) -> impl IntoElement {
+        use crate::ui::theme::motion;
+        use freya::animation::*;
+
+        let fade = use_animation_with_dependencies(&self.visible, |conf, shown| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *shown { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::WAITING_FADE_OUT)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+
+        let pulse_active = self.visible && self.pulsing;
+        let pulse = use_animation_with_dependencies(&pulse_active, |conf, active| {
+            if *active {
+                conf.on_creation(OnCreation::Run);
+                conf.on_change(OnChange::Rerun);
+                conf.on_finish(OnFinish::reverse());
+            } else {
+                conf.on_creation(OnCreation::Finish);
+            }
+            AnimNum::new(0.45, 1.0)
+                .duration(motion::WAITING_PULSE)
+                .ease(Ease::InOut)
+                .function(Function::Sine)
+        });
+
+        let fade_alpha = fade.get().value().clamp(0.0, 1.0);
+        if !self.visible && fade_alpha <= 0.01 {
+            return rect().into_element();
+        }
+        let pulse_alpha = if pulse_active {
+            pulse.get().value().clamp(0.45, 1.0)
+        } else {
+            1.0
+        };
+
+        rect()
+            .position(Position::new_absolute().top(0.0).left(0.0))
+            .width(Size::percent(100.0))
+            .height(Size::percent(100.0))
+            .interactive(Interactive::No)
+            .center()
+            .opacity(fade_alpha * pulse_alpha)
+            .child(chat_site_logo(&self.site_id, 40.0, self.color))
+            .into_element()
     }
 }

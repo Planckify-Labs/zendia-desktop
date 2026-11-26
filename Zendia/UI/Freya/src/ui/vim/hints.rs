@@ -33,17 +33,43 @@ pub fn hint_badge_for_row(
             .layer(Layer::Relative(8))
             .position(Position::new_absolute().right(4.0).top(top))
             .interactive(false)
-            .child(hint_pill(prefix, suffix, HINT_BADGE_HEIGHT, 11.0, 4.0, theme))
+            .child(hint_pill(prefix, suffix, HINT_BADGE_HEIGHT, 11.0, 4.0, 4.5, theme))
             .into_element(),
     )
 }
 
-/// Renders an inline hint badge (used on window-mode pane chips).
-pub fn inline_hint_badge(prefix: &str, suffix: &str, theme: &ResolvedTheme) -> Element {
-    hint_pill(prefix, suffix, 20.0, 12.0, 5.0, theme)
+/// Returns a hint badge pinned to the top-right corner (`top: 2px, right: 2px`) for compact tiles and footer buttons
+/// so it clears centered favicons (`VIM-HT-03`).
+pub fn hint_badge_for_corner(model: &BrowserModel, target: &FocusTarget, theme: &ResolvedTheme) -> Option<Element> {
+    if !model.vim_mode_enabled {
+        return None;
+    }
+    let hints = model.focus.hints.as_ref()?;
+    let (prefix, suffix) = hints.label_parts(target)?;
+    Some(
+        rect()
+            .layer(Layer::Relative(8))
+            .position(Position::new_absolute().right(2.0).top(2.0))
+            .interactive(false)
+            .child(hint_pill(prefix, suffix, HINT_BADGE_HEIGHT, 11.0, 4.0, 4.0, theme))
+            .into_element(),
+    )
 }
 
-fn hint_pill(prefix: &str, suffix: &str, height: f32, font_size: f32, radius: f32, theme: &ResolvedTheme) -> Element {
+/// Renders an inline hint badge (used on window-mode pane chips, `13px`, `min-width: 20px`, `padding: 0 4px`, `VIM-HT-04`).
+pub fn inline_hint_badge(prefix: &str, suffix: &str, theme: &ResolvedTheme) -> Element {
+    hint_pill(prefix, suffix, 20.0, 13.0, 5.0, 4.0, theme)
+}
+
+fn hint_pill(
+    prefix: &str,
+    suffix: &str,
+    height: f32,
+    font_size: f32,
+    radius: f32,
+    pad_x: f32,
+    theme: &ResolvedTheme,
+) -> Element {
     let bg = theme.color(ThemeRole::Hint);
     let fg = theme.color(ThemeRole::HintText);
     let matched_fg = theme.rgba(ThemeRole::HintText).with_alpha(0.50).to_color();
@@ -51,7 +77,7 @@ fn hint_pill(prefix: &str, suffix: &str, height: f32, font_size: f32, radius: f3
     let mut pill = rect()
         .min_width(Size::px(height))
         .height(Size::px(height))
-        .padding(Gaps::new(0.0, 4.5, 0.0, 4.5))
+        .padding(Gaps::new(0.0, pad_x, 0.0, pad_x))
         .corner_radius(CornerRadius::new_all(radius))
         .background(bg)
         .direction(Direction::Horizontal)

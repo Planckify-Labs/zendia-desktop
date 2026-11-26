@@ -7,9 +7,10 @@
 //! Plugins (replacing Zen Mods), WebExtensions, and Background Service health settings groups.
 
 use crate::ui::core_view::use_core;
-use crate::ui::kit::{Icon, KitSwitch, Pill};
+use crate::ui::kit::{Icon, KitSwitch, Pill, use_interactive_feedback};
 use crate::ui::settings::controls::{
-    ServiceStatusBanner, SettingsButton, SettingsPalette, SettingsToggleRow, section_heading, settings_card,
+    ServiceStatusBanner, SettingsButton, SettingsCheckboxRow, SettingsPalette, SettingsToggleRow, section_heading,
+    settings_card,
 };
 use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
@@ -126,7 +127,7 @@ impl Component for PluginsGroup {
                             ),
                     )
                     .child(
-                        SettingsToggleRow::new(
+                        SettingsCheckboxRow::new(
                             "Automatically check installed plugins for updates on startup",
                             auto_update,
                             move |next: bool| {
@@ -190,6 +191,7 @@ impl Component for PluginCard {
         let theme = use_theme();
         let palette = SettingsPalette::for_scheme(theme.scheme);
         let mut details_open = use_state(|| false);
+        let mut confirm_remove = use_state(|| false);
 
         let effective_status = if !self.master_enabled || !self.plugin.enabled {
             PluginStatus::Disabled
@@ -252,12 +254,24 @@ impl Component for PluginCard {
                             .color(theme.color(ThemeRole::TextMuted)),
                     )
                     .child(
-                        label()
-                            .text(item.value.clone())
-                            .font_size(12.0)
-                            .font_weight(FontWeight::MEDIUM)
-                            .font_family("monospace")
-                            .color(theme.color(ThemeRole::Text)),
+                        rect()
+                            .padding(Gaps::new(2.0, 8.0, 2.0, 8.0))
+                            .corner_radius(CornerRadius::new_all(6.0))
+                            .background(palette.menulist_bg)
+                            .border(
+                                Border::new()
+                                    .width(1.0)
+                                    .alignment(BorderAlignment::Inner)
+                                    .fill(palette.card_border),
+                            )
+                            .child(
+                                label()
+                                    .text(item.value.clone())
+                                    .font_size(11.5)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_family("monospace")
+                                    .color(theme.color(ThemeRole::Text)),
+                            ),
                     )
                     .into_element()
             })
@@ -410,12 +424,16 @@ impl Component for PluginCard {
                     .content(Content::wrap())
                     .spacing(8.0)
                     .maybe_child(self.plugin.panel_id.is_some().then(|| {
+                        let panel_disabled = !self.master_enabled
+                            || !self.plugin.enabled
+                            || !matches!(self.host_status, ServiceStatus::Running);
                         SettingsButton::new("Open Panel", move |_| {
                             core_panel.invoke_or_log(Command::PluginOpenPanel {
                                 plugin_id: pid_panel.clone(),
                             });
                         })
                         .icon("sidebar-right")
+                        .disabled(panel_disabled)
                         .key("open-plugin-panel")
                     }))
                     .child(
@@ -433,16 +451,37 @@ impl Component for PluginCard {
                         .icon("sliders")
                         .key("toggle-plugin-details"),
                     )
-                    .child(
+                    .maybe_child((!*confirm_remove.read()).then(|| {
                         SettingsButton::new("Remove", move |_| {
-                            core_remove.invoke_or_log(Command::PluginRemove {
-                                plugin_id: pid_remove.clone(),
-                            });
+                            confirm_remove.set(true);
                         })
                         .icon("trash")
                         .danger(true)
-                        .key("remove-plugin"),
-                    ),
+                        .key("remove-plugin")
+                    }))
+                    .maybe_child((*confirm_remove.read()).then(|| {
+                        rect()
+                            .direction(Direction::Horizontal)
+                            .cross_align(Alignment::center())
+                            .spacing(6.0)
+                            .child(
+                                SettingsButton::new("Confirm remove", move |_| {
+                                    confirm_remove.set(false);
+                                    core_remove.invoke_or_log(Command::PluginRemove {
+                                        plugin_id: pid_remove.clone(),
+                                    });
+                                })
+                                .icon("trash")
+                                .danger(true)
+                                .key("confirm-remove-plugin"),
+                            )
+                            .child(
+                                SettingsButton::new("Cancel", move |_| {
+                                    confirm_remove.set(false);
+                                })
+                                .key("cancel-remove-plugin"),
+                            )
+                    })),
             )
     }
 
@@ -680,6 +719,7 @@ impl Component for ExtensionCard {
                             });
                         })
                         .icon("bolt")
+                        .disabled(!self.extension.enabled || paused)
                         .key("ext-trigger-action"),
                     ),
             )
@@ -708,7 +748,7 @@ impl Component for ServiceRow {
         let core = use_core();
         let theme = use_theme();
         let palette = SettingsPalette::for_scheme(theme.scheme);
-        let mut hovered = use_state(|| false);
+        let feedback = use_interactive_feedback(true);
 
         let is_running = matches!(self.status, ServiceStatus::Running);
         let tone = match self.status {
@@ -731,18 +771,14 @@ impl Component for ServiceRow {
             .width(Size::fill())
             .padding(Gaps::new(8.0, 10.0, 8.0, 10.0))
             .corner_radius(CornerRadius::new_all(8.0))
-            .background(if *hovered.read() {
-                palette.row_hover_bg
-            } else {
-                Color::TRANSPARENT
-            })
+            .background(feedback.background(Color::TRANSPARENT, palette.row_hover_bg, palette.row_hover_bg))
             .direction(Direction::Horizontal)
             .content(Content::Flex)
             .main_align(Alignment::SpaceBetween)
             .cross_align(Alignment::center())
             .spacing(12.0)
-            .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
             .child(
                 rect()
                     .width(Size::flex(1.0))

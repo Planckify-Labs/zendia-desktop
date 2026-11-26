@@ -97,11 +97,17 @@ impl VimOverlayLayer {
 
 impl Component for VimOverlayLayer {
     fn render(&self) -> impl IntoElement {
+        let vim_state = try_use_vim_statusline_state();
         rect()
             .position(Position::new_absolute().top(0.0).left(0.0))
             .width(Size::percent(100.0))
             .height(Size::percent(100.0))
             .interactive(Interactive::No)
+            .on_sized(move |e: Event<SizedEventData>| {
+                if let Some(state) = vim_state {
+                    state.set_stage_size(e.area.width(), e.area.height());
+                }
+            })
             .child(VimStatusline {
                 force_shrunk: self.force_shrunk,
                 force_ducked: self.force_ducked,

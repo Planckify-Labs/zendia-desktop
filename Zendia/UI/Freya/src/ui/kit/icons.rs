@@ -76,6 +76,7 @@ pub const ICON_TABLE: &[(&str, &[u8])] = &[
     zen_icon!("home", "home.svg"),
     zen_icon!("info", "info.svg"),
     zen_icon!("library", "library.svg"),
+    zen_icon!("library-sprite", "library-sprite.svg"),
     zen_icon!("library-downloads", "library-downloads.svg"),
     zen_icon!("library-history", "library-history.svg"),
     zen_icon!("library-media", "library-media.svg"),
@@ -217,6 +218,10 @@ const ICON_ALIASES: &[(&str, &str)] = &[
     ("audio-blocked", "tab-audio-blocked-small"),
     ("put-back", "arrow-corner-down-right"),
     ("captcha", "security"),
+    ("chevron-right", "arrow-right"),
+    ("chevron-down", "arrow-down"),
+    ("chevron-up", "arrow-up"),
+    ("more-horizontal", "menu"),
 ];
 
 /// Resolves an icon name or alias to its canonical entry key in [`ICON_TABLE`].

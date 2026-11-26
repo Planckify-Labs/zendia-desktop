@@ -8,17 +8,15 @@
 //! component and backed by `BrowserCore`'s result providers and command registry.
 
 use crate::ui::chrome::address_bar::state::{
-    AddressBarMode, compute_floating_bar_geometry, step_highlight, try_use_address_bar_state, use_address_bar_state,
+    AddressBarMode, compute_floating_bar_geometry, step_highlight, use_address_bar_state,
 };
 use crate::ui::chrome::sidebar::state::favicon_badge_colors;
 use crate::ui::core_view::{CoreView, use_core};
-use crate::ui::kit::{Icon, PickerItem, PickerList};
+use crate::ui::kit::{Icon, PickerItem, PickerList, PopupPresence, TextField, page_step_selectable};
 use crate::ui::page::PageSurfaceContext;
-use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ResolvedScheme, ResolvedTheme, Rgba, ThemeRole, motion, use_theme};
 use freya::animation::*;
 use freya::prelude::*;
-use std::time::Duration;
 use zendia_browser_core::address_bar::{
     AddressBarResult, AddressBarResultKind, ResolvedPaletteItem, query_address_bar, query_palette,
 };
@@ -51,8 +49,17 @@ pub fn zendia_mascot_mini_svg(theme: &ResolvedTheme) -> Bytes {
     Bytes::from(svg.into_bytes())
 }
 
-fn address_bar_result_to_picker_item(result: &AddressBarResult, theme: &ResolvedTheme) -> PickerItem {
-    let mut item = PickerItem::new(result.id.clone(), result.title.clone()).accent_highlight(result.heuristic);
+fn address_bar_result_to_picker_item(
+    result: &AddressBarResult,
+    theme: &ResolvedTheme,
+    query_is_empty: bool,
+) -> PickerItem {
+    let is_heuristic = !query_is_empty
+        && matches!(
+            result.kind,
+            AddressBarResultKind::Search { .. } | AddressBarResultKind::NavigateUrl { .. }
+        );
+    let mut item = PickerItem::new(result.id.clone(), result.title.clone()).accent_highlight(is_heuristic);
     if let Some(sub) = &result.subtitle {
         item = item.subtitle(sub.clone());
     }
@@ -69,6 +76,9 @@ fn address_bar_result_to_picker_item(result: &AddressBarResult, theme: &Resolved
     if let Some(badge) = &result.badge_text {
         item = item.action_chip(badge.clone());
     }
+    if let Some((r, g, b)) = result.badge_accent {
+        item = item.action_chip_color(Color::from_rgb(r, g, b));
+    }
     if let Some(shortcut) = &result.shortcut_hint {
         item = item.key_hint(shortcut.clone());
     }
@@ -79,6 +89,12 @@ fn palette_item_to_picker_item(entry: &ResolvedPaletteItem) -> PickerItem {
     let mut item = PickerItem::new(entry.id.clone(), entry.title.clone()).accent_highlight(false);
     if let Some(icon) = &entry.icon {
         item = item.icon(icon.clone());
+    }
+    if let Some(badge) = &entry.badge_text {
+        item = item.action_chip(badge.clone());
+    }
+    if let Some((r, g, b)) = entry.badge_accent {
+        item = item.action_chip_color(Color::from_rgb(r, g, b));
     }
     if let Some(shortcut) = &entry.shortcut_hint {
         item = item.key_hint(shortcut.clone());
@@ -104,6 +120,19 @@ fn execute_address_bar_result(core: &CoreView, result: &AddressBarResult, new_ta
         }
         AddressBarResultKind::SwitchToTab { tab_id, .. } => {
             core.invoke_or_log(Command::AddressBarSwitchToTab { tab_id: *tab_id });
+        }
+        AddressBarResultKind::Folder {
+            folder_id, space_id, ..
+        } => {
+            core.invoke_or_log(Command::SpaceSwitch { space_id: *space_id });
+            let is_collapsed = core
+                .model()
+                .peek()
+                .folder(*folder_id)
+                .is_some_and(|folder| folder.collapsed);
+            if is_collapsed {
+                core.invoke_or_log(Command::FolderToggleCollapsed { folder_id: *folder_id });
+            }
         }
         AddressBarResultKind::Action {
             command, command_args, ..
@@ -141,45 +170,26 @@ impl Component for FloatingAddressBarOverlay {
         let mode = *state.mode.read();
         let open_seq = *state.open_seq.read();
 
-        let entrance = use_animation_with_dependencies(&(is_open, open_seq), move |conf, (open, _)| {
-            conf.on_creation(OnCreation::Finish);
-            conf.on_change(OnChange::Rerun);
-            if *open {
-                AnimNum::new(0.0, 1.0)
-                    .duration(motion::FLOAT_IN)
-                    .ease(Ease::Out)
-                    .function(motion::spring_fn())
-            } else {
-                AnimNum::new(1.0, 0.0)
-                    .duration(motion::FLOAT_OUT)
-                    .ease(Ease::In)
-                    .function(motion::ease_in_fn())
-            }
-        });
-
-        let progress = entrance.get().value().clamp(0.0, 1.1);
-        let opacity = progress.clamp(0.0, 1.0);
-        if !is_open && opacity <= 0.01 {
-            return rect().into_element();
-        }
-
         let root_size = *Platform::get().current_window().root_size.read();
         let window_w = root_size.width.max(480.0);
         let window_h = root_size.height.max(360.0);
         let (bar_width, base_top) = compute_floating_bar_geometry(window_w, window_h);
         let left = ((window_w - bar_width) * 0.5).max(16.0);
-        let y_offset = motion::FLOAT_IN_Y * (1.0 - progress);
-        let top = (base_top + y_offset).max(24.0);
 
-        let backdrop_color = match theme.scheme {
-            ResolvedScheme::Dark => Color::from_argb((110.0 * opacity) as u8, 0, 0, 0),
-            ResolvedScheme::Light => Color::from_argb((52.0 * opacity) as u8, 12, 16, 28),
-        };
-
+        let _ = theme;
         let on_close = {
             let page_ctx = page_ctx.clone();
             move || {
                 state.close();
+                if let Some(ctx) = &page_ctx {
+                    ctx.request_focus_active_surface();
+                }
+            }
+        };
+        let on_submit_close = {
+            let page_ctx = page_ctx.clone();
+            move || {
+                state.close_after_submit();
                 if let Some(ctx) = &page_ctx {
                     ctx.request_focus_active_surface();
                 }
@@ -191,37 +201,27 @@ impl Component for FloatingAddressBarOverlay {
 
         let _ = core;
 
-        rect()
-            .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
-            .position(Position::new_global().left(0.0).top(0.0))
-            .width(Size::window_percent(100.0))
-            .height(Size::window_percent(100.0))
-            .background(backdrop_color)
-            .on_global_key_down(move |e: Event<KeyboardEventData>| {
-                if is_open && e.key == Key::Named(NamedKey::Escape) {
-                    e.stop_propagation();
-                    on_close_esc();
-                }
-            })
-            .on_mouse_down(move |_| {
-                on_close_backdrop();
-            })
+        let select_all_on_open = is_open
+            && matches!(mode, AddressBarMode::Normal { new_tab: false })
+            && !state.query.peek().trim().is_empty();
+
+        PopupPresence::anchored(is_open, (left, base_top.max(24.0)))
+            .open_seq(open_seq)
+            .on_escape(move |_| on_close_esc())
+            .on_backdrop_mouse_down(move |_| on_close_backdrop())
             .child(
-                rect()
-                    .position(Position::new_global().left(left).top(top))
-                    .opacity(opacity)
-                    .child(
-                        FloatingAddressBarCard::new(state.query, state.highlighted, mode)
-                            .width(bar_width)
-                            .input_a11y_id(state.input_a11y_id)
-                            .auto_focus(is_open)
-                            .on_enter_actions(move |_| state.enter_actions_mode())
-                            .on_exit_actions(move |_| state.exit_actions_mode())
-                            .on_close(move |_| on_close_card())
-                            .key(open_seq),
-                    ),
+                FloatingAddressBarCard::new(state.query, state.highlighted, mode)
+                    .width(bar_width)
+                    .input_a11y_id(state.input_a11y_id)
+                    .auto_focus(is_open)
+                    .select_all_on_open(select_all_on_open)
+                    .select_all_seq(open_seq)
+                    .on_enter_actions(move |_| state.enter_actions_mode())
+                    .on_exit_actions(move |_| state.exit_actions_mode())
+                    .on_submit_close(move |_| on_submit_close())
+                    .on_close(move |_| on_close_card())
+                    .key(open_seq),
             )
-            .into_element()
     }
 }
 
@@ -235,8 +235,11 @@ pub struct FloatingAddressBarCard {
     width: f32,
     input_a11y_id: Option<AccessibilityId>,
     auto_focus: bool,
+    select_all_on_open: bool,
+    select_all_seq: u64,
     on_enter_actions: Option<EventHandler<()>>,
     on_exit_actions: Option<EventHandler<()>>,
+    on_submit_close: Option<EventHandler<()>>,
     on_close: Option<EventHandler<()>>,
     key: DiffKey,
 }
@@ -256,8 +259,11 @@ impl FloatingAddressBarCard {
             width: 750.0,
             input_a11y_id: None,
             auto_focus: false,
+            select_all_on_open: false,
+            select_all_seq: 0,
             on_enter_actions: None,
             on_exit_actions: None,
+            on_submit_close: None,
             on_close: None,
             key: DiffKey::None,
         }
@@ -278,6 +284,16 @@ impl FloatingAddressBarCard {
         self
     }
 
+    pub fn select_all_on_open(mut self, select_all: bool) -> Self {
+        self.select_all_on_open = select_all;
+        self
+    }
+
+    pub fn select_all_seq(mut self, seq: u64) -> Self {
+        self.select_all_seq = seq;
+        self
+    }
+
     pub fn on_enter_actions(mut self, handler: impl Into<EventHandler<()>>) -> Self {
         self.on_enter_actions = Some(handler.into());
         self
@@ -285,6 +301,11 @@ impl FloatingAddressBarCard {
 
     pub fn on_exit_actions(mut self, handler: impl Into<EventHandler<()>>) -> Self {
         self.on_exit_actions = Some(handler.into());
+        self
+    }
+
+    pub fn on_submit_close(mut self, handler: impl Into<EventHandler<()>>) -> Self {
+        self.on_submit_close = Some(handler.into());
         self
     }
 
@@ -301,24 +322,30 @@ impl Component for FloatingAddressBarCard {
         let key_table = use_hook(KeyTable::standard);
         let fallback_a11y_id = use_hook(AccessibilityId::new_unique);
         let input_a11y_id = self.input_a11y_id.unwrap_or(fallback_a11y_id);
-        let bar_state = try_use_address_bar_state();
-        if let Some(state) = bar_state {
-            state.settle_prefill();
-        }
 
         let is_actions = matches!(self.mode, AddressBarMode::Actions);
         let new_tab = matches!(self.mode, AddressBarMode::Normal { new_tab: true });
 
-        // Subtle pulse animation when switching into Actions mode (matching Zen's 250ms searchmode pulse).
-        let mode_pulse = use_animation_with_dependencies(&is_actions, move |conf, _| {
+        // Search-mode scale bounce [1.0, 0.98, 1.0] over 250ms and 1s expanding accent glow (matching Zen).
+        let mode_bounce = use_animation_with_dependencies(&is_actions, move |conf, _| {
             conf.on_creation(OnCreation::Finish);
             conf.on_change(OnChange::Rerun);
-            AnimNum::new(1.0, 0.0)
-                .duration(Duration::from_millis(250))
+            AnimNum::new(0.0, 1.0)
+                .duration(motion::URLBAR_MODE_BOUNCE)
+                .function(Function::Linear)
+        });
+        let mode_glow = use_animation_with_dependencies(&is_actions, move |conf, _| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            AnimNum::new(0.0, 1.0)
+                .duration(motion::URLBAR_MODE_GLOW)
                 .ease(Ease::Out)
                 .function(motion::ease_out_fn())
         });
-        let pulse_strength = mode_pulse.get().value().clamp(0.0, 1.0);
+        let bounce_t = mode_bounce.get().value().clamp(0.0, 1.0);
+        let bounce_scale = 1.0 - 0.02 * (4.0 * bounce_t * (1.0 - bounce_t));
+        let glow_t = mode_glow.get().value().clamp(0.0, 1.0);
+        let pulse_strength = (1.0 - bounce_t).clamp(0.0, 1.0);
 
         let query_text = self.query.read().clone();
         let mut last_query = use_state(|| query_text.clone());
@@ -365,12 +392,13 @@ impl Component for FloatingAddressBarCard {
 
         let current_highlighted = highlighted.read().filter(|&idx| idx < result_count);
 
+        let query_is_empty = query_text.trim().is_empty();
         let picker_items: Vec<PickerItem> = if is_actions {
             palette_results.iter().map(palette_item_to_picker_item).collect()
         } else {
             address_results
                 .iter()
-                .map(|r| address_bar_result_to_picker_item(r, &theme))
+                .map(|r| address_bar_result_to_picker_item(r, &theme, query_is_empty))
                 .collect()
         };
 
@@ -378,7 +406,7 @@ impl Component for FloatingAddressBarCard {
             let core = core.clone();
             let address_results = address_results.clone();
             let palette_results = palette_results.clone();
-            let on_close = self.on_close.clone();
+            let on_close = self.on_submit_close.clone().or_else(|| self.on_close.clone());
             move |idx: usize| {
                 if is_actions {
                     if let Some(item) = palette_results.get(idx) {
@@ -396,7 +424,7 @@ impl Component for FloatingAddressBarCard {
         let run_submit_or_highlighted = {
             let core = core.clone();
             let run_index = run_index.clone();
-            let on_close = self.on_close.clone();
+            let on_close = self.on_submit_close.clone().or_else(|| self.on_close.clone());
             let query = self.query;
             move || {
                 let chosen = (*highlighted.peek()).filter(|&idx| idx < result_count);
@@ -424,19 +452,6 @@ impl Component for FloatingAddressBarCard {
 
         let on_pre_key_down = move |e: Event<KeyboardEventData>| {
             let ctrl_or_alt = e.modifiers.contains(Modifiers::CONTROL) || e.modifiers.contains(Modifiers::ALT);
-            if let Some(state) = bar_state {
-                match &e.key {
-                    Key::Named(NamedKey::Backspace | NamedKey::Delete) if state.clear_prefill() => {
-                        e.stop_propagation();
-                        e.prevent_default();
-                        return false;
-                    }
-                    Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Home | NamedKey::End) => {
-                        state.keep_prefill();
-                    }
-                    _ => {}
-                }
-            }
             match &e.key {
                 Key::Named(NamedKey::Escape) => {
                     e.stop_propagation();
@@ -457,6 +472,20 @@ impl Component for FloatingAddressBarCard {
                     e.stop_propagation();
                     e.prevent_default();
                     let next = step_highlight(*highlighted.peek(), result_count, -1);
+                    highlighted.set(next);
+                    false
+                }
+                Key::Named(NamedKey::PageDown) => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    let next = page_step_selectable(result_count, *highlighted.peek(), 5, true, |_| true);
+                    highlighted.set(next);
+                    false
+                }
+                Key::Named(NamedKey::PageUp) => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    let next = page_step_selectable(result_count, *highlighted.peek(), 5, false, |_| true);
                     highlighted.set(next);
                     false
                 }
@@ -516,9 +545,11 @@ impl Component for FloatingAddressBarCard {
             }
         };
 
+        // Matches Zen's `#urlbar[breakout-extend] .urlbar-background`: opaque surface with `backdrop-filter: none`
+        // by default (`zen-omnibox.css:268-281`), avoiding multi-hundred-millisecond full-screen CPU blur passes.
         let card_bg = match theme.scheme {
-            ResolvedScheme::Dark => Rgba::from_rgb_alpha(36, 36, 39, 0.99).to_color(),
-            ResolvedScheme::Light => Rgba::from_rgb_alpha(235, 235, 238, 0.99).to_color(),
+            ResolvedScheme::Dark => Color::from_rgb(34, 34, 36),
+            ResolvedScheme::Light => Color::from_rgb(236, 236, 239),
         };
         let base_border = match theme.scheme {
             ResolvedScheme::Dark => Rgba::from_rgb_alpha(115, 115, 122, 0.45),
@@ -546,17 +577,25 @@ impl Component for FloatingAddressBarCard {
         let shadow = match theme.scheme {
             ResolvedScheme::Dark => Shadow::new()
                 .x(0.0)
-                .y(24.0)
-                .blur(90.0)
-                .spread(-12.0)
+                .y(18.0)
+                .blur(48.0)
+                .spread(-6.0)
                 .color(Color::from_argb(190, 0, 0, 0)),
             ResolvedScheme::Light => Shadow::new()
                 .x(0.0)
-                .y(22.0)
-                .blur(76.0)
-                .spread(-10.0)
-                .color(Color::from_argb(78, 0, 0, 0)),
+                .y(18.0)
+                .blur(44.0)
+                .spread(-6.0)
+                .color(Color::from_argb(95, 0, 0, 0)),
         };
+        let glow_shadow = (is_actions && glow_t > 0.001 && glow_t < 0.999).then(|| {
+            let accent = theme.rgba(ThemeRole::Accent);
+            Shadow::new()
+                .x(0.0)
+                .y(0.0)
+                .blur(12.0 + 48.0 * glow_t)
+                .color(accent.with_alpha((1.0 - glow_t) * 0.45).to_color())
+        });
 
         let mascot_bytes = zendia_mascot_mini_svg(&theme);
         let mascot_key = if theme.scheme.is_dark() {
@@ -566,8 +605,8 @@ impl Component for FloatingAddressBarCard {
         };
 
         let actions_chip_bg = match theme.scheme {
-            ResolvedScheme::Dark => Rgba::from_rgb_alpha(88, 108, 162, 0.92).to_color(),
-            ResolvedScheme::Light => Rgba::from_rgb_alpha(78, 108, 198, 0.94).to_color(),
+            ResolvedScheme::Dark => Rgba::from_rgb_alpha(78, 82, 114, 0.96).to_color(),
+            ResolvedScheme::Light => Rgba::from_rgb_alpha(82, 108, 178, 0.96).to_color(),
         };
 
         let actions_chip = is_actions.then(|| {
@@ -575,8 +614,8 @@ impl Component for FloatingAddressBarCard {
             rect()
                 .a11y_role(AccessibilityRole::Button)
                 .a11y_alt("Actions mode (press Backspace on empty input to exit)")
-                .height(Size::px(26.0))
-                .padding(Gaps::new(0.0, 10.0, 0.0, 10.0))
+                .height(Size::px(24.0))
+                .padding(Gaps::new(0.0, 9.0, 0.0, 9.0))
                 .corner_radius(CornerRadius::new_all(999.0))
                 .background(actions_chip_bg)
                 .main_align(Alignment::center())
@@ -591,7 +630,7 @@ impl Component for FloatingAddressBarCard {
                 .child(
                     label()
                         .text("Actions")
-                        .font_size(13.0)
+                        .font_size(12.5)
                         .font_weight(FontWeight::SEMI_BOLD)
                         .color(Color::WHITE),
                 )
@@ -603,7 +642,7 @@ impl Component for FloatingAddressBarCard {
 
         let input_row = rect()
             .width(Size::fill())
-            .height(Size::px(54.0))
+            .height(Size::px(62.0))
             .padding(Gaps::new(0.0, 16.0, 0.0, 16.0))
             .spacing(10.0)
             .direction(Direction::Horizontal)
@@ -618,22 +657,17 @@ impl Component for FloatingAddressBarCard {
             .child(Icon::new("search-glass").size(15.0).role(ThemeRole::TextMuted))
             .maybe_child(actions_chip)
             .child(
-                rect().width(Size::flex(1.0)).font_size(15.0).child(
-                    Input::new(self.query)
+                rect().width(Size::flex(1.0)).font_size(17.0).child(
+                    TextField::new(self.query)
                         .a11y_id(input_a11y_id)
                         .auto_focus(self.auto_focus)
-                        .flat()
-                        .compact()
+                        .select_all_on_open(self.select_all_on_open)
+                        .select_all_seq(self.select_all_seq)
                         .placeholder("Search...")
                         .width(Size::fill())
-                        .background(Color::TRANSPARENT)
-                        .focus_background(Color::TRANSPARENT)
-                        .border_fill(Color::TRANSPARENT)
-                        .focus_border_fill(Color::TRANSPARENT)
                         .color(text_color)
                         .placeholder_color(placeholder_color)
                         .padding(Gaps::new(0.0, 2.0, 0.0, 2.0))
-                        .corner_radius(CornerRadius::new_all(0.0))
                         .on_pre_key_down(on_pre_key_down)
                         .on_submit(move |_: String| {
                             run_on_submit();
@@ -653,6 +687,7 @@ impl Component for FloatingAddressBarCard {
             .a11y_role(AccessibilityRole::Dialog)
             .a11y_alt(a11y_title)
             .width(Size::px(self.width))
+            .scale(bounce_scale)
             .corner_radius(CornerRadius::new_all(15.0))
             .overflow(Overflow::Clip)
             .background(card_bg)
@@ -665,15 +700,11 @@ impl Component for FloatingAddressBarCard {
             .shadow(shadow)
             .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
             .child(input_row);
+        if let Some(glow) = glow_shadow {
+            card = card.shadow(glow);
+        }
 
         if show_results {
-            // Exact multiples of PickerRow height (44px + 2px spacing + 14px padding) prevent half-clipped rows:
-            // 5 rows = 244px (empty suggestions & Actions mode), 6 rows = 290px (typed search/mixed results).
-            let list_max_height = if is_actions || query_text.trim().is_empty() {
-                244.0
-            } else {
-                290.0
-            };
             card = card
                 .child(
                     rect()
@@ -684,11 +715,9 @@ impl Component for FloatingAddressBarCard {
                 .child(
                     PickerList::new(picker_items)
                         .highlighted(current_highlighted)
-                        .max_height(list_max_height)
+                        .highlight_query(query_text.clone())
+                        .max_height(244.0)
                         .empty_message("No matching actions")
-                        .on_hover(move |idx: usize| {
-                            highlighted.set_if_modified(Some(idx));
-                        })
                         .on_select(move |idx: usize| {
                             run_on_select(idx);
                         }),

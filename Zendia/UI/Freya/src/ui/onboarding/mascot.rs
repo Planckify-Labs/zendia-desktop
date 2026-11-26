@@ -417,6 +417,16 @@ impl OnboardingMascot {
     }
 }
 
+/// Advances an xorshift64 PRNG and returns a randomized blink interval in `2800..=5600 ms` (matching `Mascot2D.jsx`).
+fn next_blink_delay_ms(seed: &mut u64) -> u64 {
+    let mut x = if *seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { *seed };
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *seed = x;
+    2800 + (x % 2801)
+}
+
 impl Component for OnboardingMascot {
     fn render(&self) -> impl IntoElement {
         let mut last_mode = use_state(|| self.pose);
@@ -425,6 +435,8 @@ impl Component for OnboardingMascot {
         let mut blink_seq = use_state(|| 0u64);
         let mut hovered_cell = use_state(|| None::<usize>);
         let mut gaze = use_state(|| (0.0_f32, 0.0_f32));
+        let mut target_gaze = use_state(|| (0.0_f32, 0.0_f32));
+        let mut gaze_loop_running = use_state(|| false);
         let mut box_area = use_state(Area::default);
 
         if *last_mode.peek() != self.pose {
@@ -475,8 +487,10 @@ impl Component for OnboardingMascot {
                 return;
             }
             spawn(async move {
+                let mut seed = 0x517c_c1b7_2722_0a95_u64;
                 loop {
-                    timer(Duration::from_millis(3600)).await;
+                    let wait_ms = next_blink_delay_ms(&mut seed);
+                    timer(Duration::from_millis(wait_ms)).await;
                     let next = *blink_seq.peek() + 1;
                     blink_seq.set(next);
                 }
@@ -552,26 +566,60 @@ impl Component for OnboardingMascot {
         let on_hover_pose = self.on_hover_pose.clone();
         let on_select_pose = self.on_select_pose.clone();
 
+        // Window-wide gaze tracking (`dist / 320`) with exponential spring damping (`0.14` per frame), stopping as soon
+        // as the eyes settle so there are zero idle redraws.
+        let on_global_pointer_move = move |e: Event<PointerEventData>| {
+            if !track_pointer {
+                return;
+            }
+            let area = *box_area.peek();
+            if area.width() <= 0.0 || area.height() <= 0.0 {
+                return;
+            }
+            let loc = e.global_location();
+            let cx = area.min_x() + area.width() * 0.5;
+            let cy = area.min_y() + area.height() * 0.5;
+            let dx = loc.x as f32 - cx;
+            let dy = loc.y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+            let mag = (dist / 320.0).min(1.0);
+            let next_target = ((dx / dist) * mag * 14.0, (dy / dist) * mag * 10.0);
+            target_gaze.set_if_modified(next_target);
+
+            if !*gaze_loop_running.peek() {
+                gaze_loop_running.set(true);
+                spawn(async move {
+                    loop {
+                        timer(Duration::from_millis(16)).await;
+                        let (gx, gy) = *gaze.peek();
+                        let (tx, ty) = *target_gaze.peek();
+                        let nx = gx + (tx - gx) * 0.14;
+                        let ny = gy + (ty - gy) * 0.14;
+                        if (tx - nx).abs() < 0.06 && (ty - ny).abs() < 0.06 {
+                            gaze.set_if_modified((tx, ty));
+                            gaze_loop_running.set(false);
+                            break;
+                        }
+                        gaze.set((nx, ny));
+                    }
+                });
+            }
+        };
+
         let on_mouse_move = move |e: Event<MouseEventData>| {
+            if !interactive {
+                return;
+            }
             let area = *box_area.peek();
             let loc = e.global_location;
             let lx = loc.x as f32 - area.min_x();
             let ly = loc.y as f32 - area.min_y();
-            if track_pointer && area.width() > 0.0 && area.height() > 0.0 {
-                let dx = lx - area.width() * 0.5;
-                let dy = ly - area.height() * 0.5;
-                let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-                let mag = (dist / 220.0).min(1.0);
-                gaze.set_if_modified(((dx / dist) * mag * 14.0, (dy / dist) * mag * 10.0));
-            }
-            if interactive {
-                let hit = hit_test_mascot_cell(lx, ly, area.width(), area.height(), pose);
-                let hit_idx = hit.map(pose_index);
-                if *hovered_cell.peek() != hit_idx {
-                    hovered_cell.set(hit_idx);
-                    if let (Some(mode), Some(cb)) = (hit, &on_hover_pose) {
-                        cb.call(mode);
-                    }
+            let hit = hit_test_mascot_cell(lx, ly, area.width(), area.height(), pose);
+            let hit_idx = hit.map(pose_index);
+            if *hovered_cell.peek() != hit_idx {
+                hovered_cell.set(hit_idx);
+                if let (Some(mode), Some(cb)) = (hit, &on_hover_pose) {
+                    cb.call(mode);
                 }
             }
         };
@@ -593,7 +641,6 @@ impl Component for OnboardingMascot {
 
         let on_pointer_leave = move |_: Event<PointerEventData>| {
             hovered_cell.set_if_modified(None);
-            gaze.set_if_modified((0.0, 0.0));
         };
 
         let mut el = rect()
@@ -601,6 +648,7 @@ impl Component for OnboardingMascot {
             .height(Size::px(self.size))
             .background(Fill::Callback(callback))
             .on_sized(move |e: Event<SizedEventData>| box_area.set_if_modified(e.area))
+            .on_global_pointer_move(on_global_pointer_move)
             .on_mouse_move(on_mouse_move)
             .on_mouse_up(on_mouse_up)
             .on_pointer_leave(on_pointer_leave);

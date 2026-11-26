@@ -7,6 +7,7 @@
 //! List row component with keyboard cursor highlight, selection marker, key hint, icon, and muted detail.
 
 use crate::ui::kit::icons::Icon;
+use crate::ui::kit::interactive::use_interactive_feedback;
 use crate::ui::kit::key_label::KeyLabel;
 use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
@@ -87,19 +88,25 @@ impl ListRow {
 impl Component for ListRow {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
-        let mut hovered = use_state(|| false);
+        let interactive = !self.disabled && self.on_press.is_some();
+        let feedback = use_interactive_feedback(!self.disabled);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
 
-        let background = if self.cursor {
+        let rest_bg = if self.cursor {
             theme.color(ThemeRole::Selection)
         } else if self.selected {
             theme.rgba(ThemeRole::ModeVisual).with_alpha(0.22).to_color()
-        } else if hovered() && !self.disabled {
-            theme.color(ThemeRole::Hover)
         } else {
             Color::TRANSPARENT
         };
+        let hover_bg = if self.cursor || self.selected {
+            rest_bg
+        } else {
+            theme.color(ThemeRole::Hover)
+        };
+        let pressed_bg = theme.rgba(ThemeRole::Text).with_alpha(0.14).to_color();
+        let background = feedback.background(rest_bg, hover_bg, pressed_bg);
 
         let border = if focus() == Focus::Keyboard {
             Border::new()
@@ -125,7 +132,6 @@ impl Component for ListRow {
         } else {
             ThemeRole::Text
         };
-        let interactive = !self.disabled && self.on_press.is_some();
         let on_press = self.on_press.clone();
 
         rect()
@@ -147,9 +153,12 @@ impl Component for ListRow {
             .corner_radius(CornerRadius::new_all(theme.radii.lg))
             .background(background)
             .border(border)
+            .scale(if interactive { feedback.scale() } else { 1.0 })
             .opacity(if self.disabled { 0.55 } else { 1.0 })
-            .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
+            .on_pointer_down(feedback.on_pointer_down())
+            .on_global_pointer_up(feedback.on_pointer_up())
             .maybe(interactive, |el| {
                 el.cursor(CursorIcon::Pointer).on_press(move |e| {
                     a11y_id.request_focus();

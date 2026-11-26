@@ -36,11 +36,7 @@ pub fn apply_toolbar_cursor_border(base: Border, model: &BrowserModel, item_id: 
     }
 }
 
-/// Applies a soft TOOLBAR yellow highlight fill behind a focused toolbar button.
-pub fn apply_toolbar_cursor_bg(base: Color, model: &BrowserModel, item_id: &str, theme: &ResolvedTheme) -> Color {
-    if is_toolbar_cursor(model, item_id) {
-        theme.rgba(ThemeRole::ModeToolbar).with_alpha(0.18).to_color()
-    } else {
-        base
-    }
+/// Returns `base` unchanged: fork toolbar focus draws only the crisp `2px` yellow outline with no extra fill (`VIM-TB-04`).
+pub fn apply_toolbar_cursor_bg(base: Color, _model: &BrowserModel, _item_id: &str, _theme: &ResolvedTheme) -> Color {
+    base
 }

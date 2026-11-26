@@ -25,13 +25,22 @@ use zendia_browser_core::model::{Folder, FolderId, Space, SpaceId, Tab, TabId, T
 use zendia_browser_core::space_routing::{SELECTABLE_SPACE_ICONS, build_library_space_menu};
 use zendia_keymap::KeyTable;
 
-/// Width of this section's body next to the rail.
+/// Fallback width of this section's body next to the rail when viewport width is unknown.
 pub const WIDTH: f32 = 620.0;
 
 const CARD_WIDTH: f32 = 242.0;
 const CARD_GAP: f32 = 24.0;
 const CARD_RADIUS: f32 = 14.0;
 const DRAG_THRESHOLD_PX: f32 = 6.0;
+
+/// Computes the Spaces body width from the number of spaces, clamped to 95% of `viewport_width` minus the rail
+/// (matching `ZenLibrarySpacesSection.mjs:286-302`).
+pub fn dynamic_width(space_count: usize, viewport_width: f32) -> f32 {
+    let count = space_count.max(1) as f32;
+    let cards_and_add = count * CARD_WIDTH + count * CARD_GAP + 32.0 + 48.0;
+    let max_body = (viewport_width * 0.95 - super::super::RAIL_WIDTH).max(308.0);
+    cards_and_add.clamp(308.0, max_body)
+}
 
 /// Active tab drag-and-drop across or within space cards in the library.
 #[derive(Clone, Debug, PartialEq)]
@@ -207,9 +216,10 @@ impl Component for SpacesSection {
             card_areas: fallback_card_areas,
         });
 
-        let scroll_controller = use_scroll_controller(ScrollConfig::default);
+        let mut scroll_controller = use_scroll_controller(ScrollConfig::default);
         let mut last_scroll_req = use_state(|| 0u64);
         let mut container_area = use_state(|| (0.0f32, 0.0f32, WIDTH, 640.0f32));
+        let mut last_scrolled_cursor = use_state(|| None::<String>);
 
         let req = *spaces_state.scroll_to_end_request.read();
         if req != *last_scroll_req.peek() {
@@ -251,6 +261,45 @@ impl Component for SpacesSection {
             Some(Command::SpaceCreate { name: None, icon: None }),
         ));
         let cursor_key = use_library_nav(LibrarySection::Spaces, LibraryNavLayout::Columns, nav_rows);
+
+        if *last_scrolled_cursor.peek() != cursor_key {
+            last_scrolled_cursor.set(cursor_key.clone());
+            if let Some(target_key) = cursor_key.as_deref() {
+                let col_idx = if target_key == "space:add" {
+                    Some(spaces.len())
+                } else if let Some(sid_str) = target_key.strip_prefix("space:") {
+                    sid_str
+                        .parse::<u64>()
+                        .ok()
+                        .and_then(|id| spaces.iter().position(|s| s.id.0 == id))
+                } else if let Some(tid_str) = target_key.strip_prefix("tab:") {
+                    tid_str.parse::<u64>().ok().and_then(|tid| {
+                        spaces.iter().position(|s| {
+                            tabs_for_space_card(&tabs, &pinned_tabs, &folders, s.id)
+                                .iter()
+                                .any(|t| t.id.0 == tid)
+                        })
+                    })
+                } else {
+                    None
+                };
+                if let Some(col) = col_idx {
+                    let (_, _, vw, _) = *container_area.peek();
+                    let content_w = spaces.len() as f32 * (CARD_WIDTH + CARD_GAP) + 32.0 + 48.0;
+                    let (item_left, item_w) = if col >= spaces.len() {
+                        (24.0 + spaces.len() as f32 * (CARD_WIDTH + CARD_GAP), 32.0)
+                    } else {
+                        (24.0 + col as f32 * (CARD_WIDTH + CARD_GAP), CARD_WIDTH)
+                    };
+                    let (current_x, _): (i32, i32) = scroll_controller.into();
+                    if let Some(target_x) = crate::ui::kit::list_nav::compute_scroll_into_view_y(
+                        current_x, item_left, item_w, vw, content_w,
+                    ) {
+                        scroll_controller.scroll_to_x(target_x);
+                    }
+                }
+            }
+        }
 
         let active_tab_drag = spaces_state.tab_drag.read().clone();
         let active_space_drag = spaces_state.space_drag.read().clone();
@@ -555,18 +604,6 @@ impl Component for SpaceCard {
                 key: DiffKey::from(&space_id.0),
             })
             .child(
-                // Thin horizontal divider directly below the card header.
-                rect()
-                    .width(Size::fill())
-                    .padding(Gaps::new(4.0, 14.0, 6.0, 14.0))
-                    .child(
-                        rect()
-                            .width(Size::fill())
-                            .height(Size::px(1.0))
-                            .background(palette.divider),
-                    ),
-            )
-            .child(
                 rect()
                     .width(Size::fill())
                     .height(Size::flex(1.0))
@@ -854,8 +891,12 @@ impl Component for SpaceCardHeader {
 
         rect()
             .width(Size::fill())
-            .padding(Gaps::new(14.0, 10.0, 2.0, 10.0))
-            .child(LibraryCursorRing::new(self.focused, inner).corner_radius(8.0))
+            .padding(Gaps::new(14.0, 10.0, 6.0, 10.0))
+            .child(
+                LibraryCursorRing::new(self.focused, inner)
+                    .corner_radius(8.0)
+                    .fill(false),
+            )
     }
 
     fn render_key(&self) -> DiffKey {

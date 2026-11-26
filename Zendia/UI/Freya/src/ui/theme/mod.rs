@@ -19,6 +19,8 @@ pub mod motion;
 pub const CHROME_OVERLAY_LEVEL: u8 = 2;
 /// Menus, popovers, dialogs, the address bar and drag previews sit above floating chrome.
 pub const POPUP_OVERLAY_LEVEL: u8 = 3;
+/// Hover tooltips sit above every popup, menu, picker, and dialog so they are never painted behind their host card.
+pub const TOOLTIP_OVERLAY_LEVEL: u8 = POPUP_OVERLAY_LEVEL + 1;
 
 pub use data::{
     ColorPair, FontSizes, GlassSpec, Palette, Radii, ResolvedScheme, ResolvedTheme, Rgba, SemanticColors, ShadowSpec,

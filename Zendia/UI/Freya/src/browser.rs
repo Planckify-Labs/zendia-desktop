@@ -17,6 +17,7 @@ use crate::ui::chrome::menus::{
 };
 use crate::ui::chrome::sidebar::use_provide_sidebar_state;
 use crate::ui::core_view::use_provide_core_with_observer;
+use crate::ui::kit::{is_text_editing_key, use_provide_text_focus};
 use crate::ui::library::media_preview::{MediaPreviewOverlay, use_provide_media_preview_state};
 use crate::ui::library::sections::space_routing::use_provide_space_routing_view_state;
 use crate::ui::library::sections::spaces::use_provide_spaces_view_state;
@@ -139,6 +140,7 @@ fn handle_message(
                 let mut surfaces = surfaces.write();
                 let surface = surfaces.entry(present.view_id).or_default();
                 surface.frame = Some(frame);
+                surface.frame_seq = surface.frame_seq.wrapping_add(1);
                 surface.frame_size = (present.size.width, present.size.height);
                 surface.frame_device_pixel_ratio = present.device_pixel_ratio;
             }
@@ -315,6 +317,9 @@ pub fn app() -> impl IntoElement {
         let onboarding_profile = zendia_browser_core::onboarding::onboarding_profile_path()
             .and_then(|path| zendia_browser_core::onboarding::load_profile_record_from(&path));
         stub.apply_onboarding_profile(onboarding_profile);
+        let shell_profile = zendia_browser_core::shell_layout::shell_layout_profile_path()
+            .and_then(|path| zendia_browser_core::shell_layout::load_shell_layout_from(&path));
+        stub.apply_shell_layout_profile(shell_profile);
         (stub, adapter)
     });
 
@@ -324,10 +329,12 @@ pub fn app() -> impl IntoElement {
 
     let page_ctx = use_provide_page_surfaces();
     let keymap = use_provide_keymap();
+    let text_focus = use_provide_text_focus();
     let menu_state = use_provide_menu_state();
     let sidebar_state = use_provide_sidebar_state();
     let address_bar_state = use_provide_address_bar_state();
     let download_arc = use_provide_download_arc();
+    let mut last_click_pos = use_state(|| None::<(f32, f32)>);
     let vim_statusline_state = use_provide_vim_statusline_state();
     let vim_picker_state = use_provide_vim_picker_state();
     let region_picker_state = use_provide_region_picker_state();
@@ -367,9 +374,10 @@ pub fn app() -> impl IntoElement {
                 let _ = freya::clipboard::Clipboard::set(text.clone());
             }
             CoreEvent::DownloadStarted { .. } => {
-                // The icon leaves from the middle of the window and lands on the library button.
+                // Launch the icon from the user's last click position (falling back to window center if unknown).
                 let size = *Platform::get().current_window().root_size.peek();
-                download_arc.launch((size.width / 2.0, size.height / 2.0), (24.0, size.height - 24.0));
+                let start = (*last_click_pos.peek()).unwrap_or((size.width / 2.0, size.height / 2.0));
+                download_arc.launch(start, (24.0, size.height - 24.0));
             }
             CoreEvent::RegionCaptured { .. } => {
                 region_picker_state.stop();
@@ -387,8 +395,25 @@ pub fn app() -> impl IntoElement {
                     let _ = zendia_browser_core::onboarding::save_profile_record_to(&path, &state.to_profile_record());
                 }
             }
+            CoreEvent::LayoutSettingsChanged { .. } | CoreEvent::PanelPrefsChanged { .. } => {
+                if let Some(path) = zendia_browser_core::shell_layout::shell_layout_profile_path() {
+                    let model = stub_core.model();
+                    let record = zendia_browser_core::shell_layout::ShellLayoutRecord {
+                        layout: model.layout,
+                        panel_prefs: model.side_panel_prefs,
+                    };
+                    let _ = zendia_browser_core::shell_layout::save_shell_layout_to(&path, &record);
+                }
+            }
             CoreEvent::ViewRequested { request, .. } => match request {
-                ViewRequest::ExtensionsMenuToggle => menu_state.toggle_extensions_menu(),
+                ViewRequest::ExtensionsMenuToggle => {
+                    // Extensions live inside the Site Panel (matching Zen/Zendia), so invoking extensions.menu.toggle
+                    // from the command palette opens the Site Panel rather than an unanchored puzzle-button popover.
+                    address_bar_state.close();
+                    menu_state.close_all();
+                    share_state.close();
+                    address_bar_state.toggle_site_panel(None);
+                }
                 ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
                     library_state.handle_view_request(request);
                     let _ = stub_core.invoke(zendia_browser_core::commands::Command::LibraryFocusSet {
@@ -416,6 +441,7 @@ pub fn app() -> impl IntoElement {
                 }
                 ViewRequest::LocationFocus => {
                     menu_state.close_all();
+                    share_state.close();
                     let current_url = stub_core
                         .model()
                         .active_tab()
@@ -425,22 +451,29 @@ pub fn app() -> impl IntoElement {
                 }
                 ViewRequest::AddressBarOpen { new_tab, initial_query } => {
                     menu_state.close_all();
+                    share_state.close();
                     address_bar_state.open_floating(*new_tab, initial_query.clone());
                 }
                 ViewRequest::PaletteOpen { initial_query } => {
                     menu_state.close_all();
+                    share_state.close();
                     address_bar_state.open_actions(initial_query.clone());
                 }
                 ViewRequest::SitePanelToggle => {
                     menu_state.close_all();
+                    share_state.close();
                     address_bar_state.toggle_site_panel(None);
                 }
                 ViewRequest::AppMenuToggle => {
                     address_bar_state.close();
                     address_bar_state.close_site_panel();
+                    share_state.close();
                     menu_state.toggle_app_menu(None);
                 }
                 ViewRequest::AboutDialog => {
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    share_state.close();
                     menu_state.open_about();
                 }
                 ViewRequest::TabRename { tab_id } => {
@@ -449,11 +482,13 @@ pub fn app() -> impl IntoElement {
                     }
                 }
                 ViewRequest::CompactSidebarReveal => {
-                    let mut pinned = sidebar_state.compact_pinned;
-                    let next = !*pinned.peek();
-                    pinned.set(next);
-                    let mut revealed = sidebar_state.compact_revealed;
-                    revealed.set(next);
+                    if stub_core.model().layout.compact_hides_sidebar() {
+                        let mut pinned = sidebar_state.compact_pinned;
+                        let next = !*pinned.peek();
+                        pinned.set(next);
+                        let mut revealed = sidebar_state.compact_revealed;
+                        revealed.set(next);
+                    }
                 }
                 ViewRequest::FolderRename { folder_id } => {
                     if let Some(folder) = stub_core.model().folder(*folder_id) {
@@ -492,7 +527,9 @@ pub fn app() -> impl IntoElement {
                 | ViewRequest::PanelToggle { .. }
                 | ViewRequest::AgentModelCard
                 | ViewRequest::AgentInstructions => {
-                    dock_state.apply_request(request);
+                    if dock_state.apply_request(request) {
+                        page_ctx.request_focus_active_surface();
+                    }
                 }
                 ViewRequest::WebChatReload { site_id } => {
                     webchat_views.reload_site(site_id);
@@ -639,6 +676,9 @@ pub fn app() -> impl IntoElement {
             {
                 return;
             }
+            if text_focus.is_any_focused() && is_text_editing_key(&e) {
+                return;
+            }
             if (dock_state.captures_text_input() || space_editing_state.captures_text_input())
                 && !e
                     .modifiers
@@ -659,6 +699,13 @@ pub fn app() -> impl IntoElement {
                 && !library_spaces_state.is_renaming()
                 && !dock_state.captures_text_input()
                 && crate::ui::vim::handle_focus_key_down(&e, &core)
+            {
+                return;
+            }
+            // XCM-03: Block compact-mode keyboard toggles while Library is open (`ZenCompactMode.mjs:167-169`).
+            if library_state.is_open()
+                && e.code == Code::KeyS
+                && e.modifiers.intersects(Modifiers::CONTROL | Modifiers::META)
             {
                 return;
             }
@@ -704,6 +751,10 @@ pub fn app() -> impl IntoElement {
     rect()
         .width(Size::fill())
         .height(Size::fill())
+        .on_global_pointer_down(move |e: Event<PointerEventData>| {
+            let loc = e.global_location();
+            last_click_pos.set(Some((loc.x as f32, loc.y as f32)));
+        })
         .on_global_key_down(on_global_key_down)
         .on_global_key_up(on_global_key_up)
         .child(WindowShell::new(location, location_a11y_id, page_stage))

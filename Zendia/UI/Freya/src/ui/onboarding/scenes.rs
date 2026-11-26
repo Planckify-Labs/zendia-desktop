@@ -7,11 +7,12 @@
 //! The Living Emblem Start scene, the framed chapter `StageShell`, and all six chapter 2D scenes (`VimScene`,
 //! `AgentScene`, `ShieldScene`, `MoveInScene`, `AppsScene`, `GoScene`) matching the fork's `scenes/*.jsx`.
 
+use crate::ui::kit::{use_interactive_feedback, use_last_some};
 use crate::ui::onboarding::audio;
 use crate::ui::onboarding::browser_scene::{
-    BrowserSceneParams, EssentialTileSpec, WhichKeyPage, draw_circle_fill, draw_dashed_quad, draw_rrect_fill,
-    draw_rrect_stroke, draw_text_centered, draw_text_left, make_font, paint_browser_2d, paint_emblem_rings,
-    paint_stage_backdrop, quad_point,
+    BrowserSceneParams, EssentialTileSpec, WhichKeyPage, draw_circle_fill, draw_dashed_quad, draw_dashed_rrect_stroke,
+    draw_rrect_fill, draw_rrect_stroke, draw_text_centered, draw_text_left, make_font, paint_browser_2d,
+    paint_emblem_rings, paint_stage_backdrop, quad_point,
 };
 use crate::ui::onboarding::logos::{brand_logo_element, paint_brand_svg_on_canvas, playback_icon};
 use crate::ui::onboarding::mascot::OnboardingMascot;
@@ -19,7 +20,8 @@ use crate::ui::onboarding::theme::{
     MODE_ORDER, OnboardingPalette, TrackEase, clamp01, cos_f32, ease_in_out, ease_out, eval_track, lerp, mix_rgba,
     mode_name, onboarding_spring, sin_f32, sk_alpha, sk_color, span,
 };
-use crate::ui::theme::{Rgba, use_theme};
+use crate::ui::theme::{Rgba, motion, use_theme};
+use freya::animation::*;
 use freya::engine::prelude as sk;
 use freya::prelude::*;
 use std::f32::consts::PI;
@@ -104,7 +106,28 @@ impl Component for StartEmblemScene {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let pal = OnboardingPalette::for_scheme(theme.scheme);
-        let active_accent = pal.mode_accent(self.pose);
+        let target_accent = pal.mode_accent(self.pose);
+        let mut prev_accent = use_state(|| target_accent);
+        let mut cur_accent = use_state(|| target_accent);
+        let mut color_seq = use_state(|| 0u64);
+        if *cur_accent.peek() != target_accent {
+            prev_accent.set(*cur_accent.peek());
+            cur_accent.set(target_accent);
+            let next = color_seq.peek().wrapping_add(1);
+            color_seq.set(next);
+        }
+        let still = self.still;
+        let halo_anim = use_animation_with_dependencies(&*color_seq.read(), move |conf, _| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(if still { OnChange::Finish } else { OnChange::Rerun });
+            AnimNum::new(0.0, 1.0)
+                .duration(motion::ONB_HALO_TRANSITION)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let active_accent = prev_accent
+            .read()
+            .mix(*cur_accent.read(), halo_anim.get().value().clamp(0.0, 1.0));
 
         let rings_cb = RenderCallback::new(move |ctx| {
             if let RenderTarget::Background { canvas, .. } = &mut ctx.target {
@@ -139,10 +162,10 @@ impl Component for StartEmblemScene {
             .cross_align(Alignment::center())
             .spacing(26.0)
             .child(
-                // Creature + concentric dashed halo rings
+                // Creature + concentric dashed halo rings (`330px` emblem matching `zendia-welcome.css:272`)
                 rect()
-                    .width(Size::px(372.0))
-                    .height(Size::px(372.0))
+                    .width(Size::px(392.0))
+                    .height(Size::px(392.0))
                     .center()
                     .child(
                         rect()
@@ -152,7 +175,7 @@ impl Component for StartEmblemScene {
                             .background(Fill::Callback(rings_cb)),
                     )
                     .child(
-                        OnboardingMascot::new(self.pose, 310.0)
+                        OnboardingMascot::new(self.pose, 330.0)
                             .still(self.still)
                             .bloom(!self.still)
                             .blink(!self.still)
@@ -216,27 +239,43 @@ impl Component for ModePillButton {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let pal = OnboardingPalette::for_scheme(theme.scheme);
-        let mut hovered = use_state(|| false);
-        let is_hovered = *hovered.read();
+        let fb = use_interactive_feedback(true);
+        let a11y_id = use_a11y();
+        let focus = use_focus(a11y_id);
+        let is_hovered = fb.is_hovered();
         let swatch = pal.mode_accent(self.mode);
+        let hover_t = fb.hover_progress();
+        let press_t = fb.press_progress();
         let bg = if self.active {
             mix_rgba(pal.surface, swatch, 0.16)
         } else {
-            pal.surface
+            pal.surface.mix(mix_rgba(pal.surface, swatch, 0.08), hover_t)
         };
-        let border = if self.active || is_hovered {
+        let border = if self.active {
             swatch
         } else {
-            pal.border_subtle
+            pal.border_subtle.mix(swatch, hover_t)
         };
-        let fg = if self.active || is_hovered { pal.text } else { pal.muted };
+        let fg = if self.active {
+            pal.text
+        } else {
+            pal.muted.mix(pal.text, hover_t)
+        };
 
         let mode = self.mode;
         let active = self.active;
         let on_enter_pick = self.on_pick.clone();
         let on_click_pick = self.on_pick.clone();
+        let mut fb_enter = fb.on_pointer_enter();
 
-        rect()
+        let lift_y = -1.5 * hover_t + 1.0 * press_t;
+        let scale = 1.0 - 0.03 * press_t;
+
+        let inner = rect()
+            .a11y_id(a11y_id)
+            .a11y_focusable(true)
+            .a11y_role(AccessibilityRole::Button)
+            .a11y_alt(format!("{} mode", mode_name(mode)))
             .direction(Direction::Horizontal)
             .cross_align(Alignment::center())
             .main_align(Alignment::center())
@@ -251,15 +290,19 @@ impl Component for ModePillButton {
                     .alignment(BorderAlignment::Inner)
                     .fill(border.to_color()),
             )
+            .offset_y(lift_y)
+            .scale(scale)
             .cursor(CursorIcon::Pointer)
-            .on_pointer_enter(move |_| {
-                hovered.set(true);
+            .on_pointer_enter(move |e| {
+                fb_enter(e);
                 if !active {
                     audio::play_mode(mode);
                     on_enter_pick.call(mode);
                 }
             })
-            .on_pointer_leave(move |_| hovered.set(false))
+            .on_pointer_leave(fb.on_pointer_leave())
+            .on_pointer_down(fb.on_pointer_down())
+            .on_global_pointer_up(fb.on_pointer_up())
             .on_press(move |_| {
                 audio::play_mode(mode);
                 on_click_pick.call(mode);
@@ -277,8 +320,22 @@ impl Component for ModePillButton {
                     .font_size(11.0)
                     .font_weight(FontWeight::BOLD)
                     .font_family("monospace")
-                    .color(fg.to_color()),
-            )
+                    .color(if is_hovered { pal.text.to_color() } else { fg.to_color() }),
+            );
+
+        let focused = focus() == Focus::Keyboard;
+        rect()
+            .padding(Gaps::new_all(3.0))
+            .corner_radius(CornerRadius::new_all(999.0))
+            .border(if focused {
+                Border::new()
+                    .width(2.5)
+                    .alignment(BorderAlignment::Inner)
+                    .fill(swatch.to_color())
+            } else {
+                Border::new()
+            })
+            .child(inner)
     }
 
     fn render_key(&self) -> DiffKey {
@@ -296,6 +353,7 @@ pub struct StageShell {
     pub still: bool,
     pub looping: bool,
     pub paused: bool,
+    pub compact: bool,
     pub on_toggle_pause: Option<EventHandler<()>>,
     pub caption: Option<Element>,
     pub content: Element,
@@ -312,8 +370,32 @@ impl Component for StageShell {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let pal = OnboardingPalette::for_scheme(theme.scheme);
-        let mut pause_hovered = use_state(|| false);
-        let accent = self.accent;
+        let pause_fb = use_interactive_feedback(true);
+        let pause_a11y_id = use_a11y();
+        let pause_focus = use_focus(pause_a11y_id);
+
+        let target_accent = self.accent;
+        let mut prev_accent = use_state(|| target_accent);
+        let mut cur_accent = use_state(|| target_accent);
+        let mut accent_seq = use_state(|| 0u64);
+        if *cur_accent.peek() != target_accent {
+            prev_accent.set(*cur_accent.peek());
+            cur_accent.set(target_accent);
+            let next = accent_seq.peek().wrapping_add(1);
+            accent_seq.set(next);
+        }
+        let still = self.still;
+        let backdrop_anim = use_animation_with_dependencies(&*accent_seq.read(), move |conf, _| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(if still { OnChange::Finish } else { OnChange::Rerun });
+            AnimNum::new(0.0, 1.0)
+                .duration(motion::ONB_STAGE_TRANSITION)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let accent = prev_accent
+            .read()
+            .mix(*cur_accent.read(), backdrop_anim.get().value().clamp(0.0, 1.0));
 
         let backdrop_cb = RenderCallback::new(move |ctx| {
             if let RenderTarget::Background { canvas, .. } = &mut ctx.target {
@@ -321,9 +403,11 @@ impl Component for StageShell {
             }
         });
 
-        let show_pause = self.looping && !self.still && self.on_toggle_pause.is_some();
+        // Show Pause/Play toggle on all looping chapters regardless of `still` (matches fork's Stage2D.jsx:32).
+        let show_pause = self.looping && self.on_toggle_pause.is_some();
         let paused = self.paused;
-        let is_hover = *pause_hovered.read();
+        let hover_t = pause_fb.hover_progress();
+        let press_t = pause_fb.press_progress();
         let on_toggle = self.on_toggle_pause.clone();
 
         let shadow = if pal.dark {
@@ -334,6 +418,8 @@ impl Component for StageShell {
                 .blur(32.0)
                 .color(Color::from_argb(20, 0x1a, 0x1b, 0x26))
         };
+
+        let pad = if self.compact { 14.0 } else { 20.0 };
 
         rect()
             .width(Size::fill())
@@ -361,7 +447,7 @@ impl Component for StageShell {
                 rect()
                     .width(Size::fill())
                     .height(Size::fill())
-                    .padding(Gaps::new_all(20.0))
+                    .padding(Gaps::new_all(pad))
                     .content(Content::Flex)
                     .child(
                         rect()
@@ -381,31 +467,53 @@ impl Component for StageShell {
             )
             .maybe_child(show_pause.then(|| {
                 let btn_bg = pal.surface.with_alpha(0.86).to_color();
-                let btn_border = if is_hover { accent } else { pal.border_subtle };
-                let btn_fg = if is_hover { pal.text } else { pal.muted };
+                let btn_border = pal.border_subtle.mix(accent, hover_t);
+                let btn_fg = pal.muted.mix(pal.text, hover_t);
+                let btn_scale = 1.0 + 0.05 * hover_t - 0.08 * press_t;
+                let focused = pause_focus() == Focus::Keyboard;
                 rect()
-                    .position(Position::new_absolute().top(14.0).right(14.0))
+                    .position(Position::new_absolute().top(11.0).right(11.0))
                     .layer(Layer::Relative(6))
-                    .width(Size::px(34.0))
-                    .height(Size::px(34.0))
-                    .corner_radius(CornerRadius::new_all(10.0))
-                    .background(btn_bg)
-                    .border(
+                    .padding(Gaps::new_all(3.0))
+                    .corner_radius(CornerRadius::new_all(13.0))
+                    .border(if focused {
                         Border::new()
-                            .width(1.5)
+                            .width(2.5)
                             .alignment(BorderAlignment::Inner)
-                            .fill(btn_border.to_color()),
-                    )
-                    .center()
-                    .cursor(CursorIcon::Pointer)
-                    .on_pointer_enter(move |_| pause_hovered.set(true))
-                    .on_pointer_leave(move |_| pause_hovered.set(false))
-                    .on_press(move |_| {
-                        if let Some(cb) = &on_toggle {
-                            cb.call(());
-                        }
+                            .fill(accent.to_color())
+                    } else {
+                        Border::new()
                     })
-                    .child(playback_icon(paused, 13.0, btn_fg.to_color()))
+                    .child(
+                        rect()
+                            .a11y_id(pause_a11y_id)
+                            .a11y_focusable(true)
+                            .a11y_role(AccessibilityRole::Button)
+                            .a11y_alt(if paused { "Play preview" } else { "Pause preview" })
+                            .width(Size::px(34.0))
+                            .height(Size::px(34.0))
+                            .corner_radius(CornerRadius::new_all(10.0))
+                            .background(btn_bg)
+                            .border(
+                                Border::new()
+                                    .width(1.5)
+                                    .alignment(BorderAlignment::Inner)
+                                    .fill(btn_border.to_color()),
+                            )
+                            .scale(btn_scale)
+                            .center()
+                            .cursor(CursorIcon::Pointer)
+                            .on_pointer_enter(pause_fb.on_pointer_enter())
+                            .on_pointer_leave(pause_fb.on_pointer_leave())
+                            .on_pointer_down(pause_fb.on_pointer_down())
+                            .on_global_pointer_up(pause_fb.on_pointer_up())
+                            .on_press(move |_| {
+                                if let Some(cb) = &on_toggle {
+                                    cb.call(());
+                                }
+                            })
+                            .child(playback_icon(paused, 13.0, btn_fg.to_color())),
+                    )
             }))
     }
 
@@ -636,6 +744,17 @@ impl Component for VimScene {
         }
 
         let enabled = self.enabled;
+        let still = self.still;
+        let vim_blend_anim = use_animation_with_dependencies(&enabled, move |conf, is_on| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(if still { OnChange::Finish } else { OnChange::Rerun });
+            let (from, to) = if *is_on { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::ONB_SCENE_TOGGLE)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let vim_blend = vim_blend_anim.get().value().clamp(0.0, 1.0);
         let mode = if enabled { vim_mode_at(t) } else { InputMode::Normal };
         let mode_pastel = OnboardingPalette::mode_pastel(mode);
         let (page_variant, next_page_variant, page_mix) = if enabled { vim_page_at(t) } else { (0, 0, 0.0) };
@@ -649,7 +768,7 @@ impl Component for VimScene {
             x: 30.0,
             y: 14.0,
             scale: 1.0,
-            vim: if enabled { 1.0 } else { 0.0 },
+            vim: vim_blend,
             mode,
             tab_index: if enabled { vim_tab(t) } else { 0.0 },
             scroll_y,
@@ -686,12 +805,12 @@ impl Component for VimScene {
             };
             paint_browser_2d(canvas, &pal, &browser_params, |_| {});
 
-            // Tactile keycap bar beneath the browser
+            // Tactile keycap bar beneath the browser (smoothly glides and fades over 320 ms on toggle)
             let gap = 8.0;
             let row_w: f32 = KEYCAPS.iter().map(|k| k.width).sum::<f32>() + gap * (KEYCAPS.len() as f32 - 1.0);
             let mut cx = (660.0 - row_w) * 0.5;
-            let bar_y = if enabled { 410.0 } else { 422.0 };
-            let bar_alpha = if enabled { 1.0 } else { 0.34 };
+            let bar_y = lerp(422.0, 410.0, vim_blend);
+            let bar_alpha = lerp(0.34, 1.0, vim_blend);
             let cap_font = make_font(12.5, true, true);
 
             for cap in KEYCAPS {
@@ -781,48 +900,25 @@ impl Component for VimScene {
 
         let accent = pal.mode_accent(InputMode::Normal);
         let caption = rect()
+            .width(Size::fill())
             .direction(Direction::Horizontal)
             .content(Content::wrap())
             .main_align(Alignment::center())
             .spacing(7.0)
-            .children(VIM_KEY_BEATS.iter().enumerate().map(|(index, &(keys, desc))| {
-                let is_active = enabled && beat_now == Some(index);
-                let chip_bg = if is_active {
-                    mix_rgba(pal.surface, accent, 0.16)
-                } else {
-                    pal.surface
-                };
-                let chip_border = if is_active { accent } else { pal.border_subtle };
-                rect()
-                    .key(index)
-                    .direction(Direction::Horizontal)
-                    .cross_align(Alignment::center())
-                    .padding(Gaps::new(6.0, 11.0, 6.0, 11.0))
-                    .spacing(8.0)
-                    .corner_radius(CornerRadius::new_all(10.0))
-                    .background(chip_bg.to_color())
-                    .border(
-                        Border::new()
-                            .width(1.5)
-                            .alignment(BorderAlignment::Inner)
-                            .fill(chip_border.to_color()),
-                    )
-                    .child(
-                        label()
-                            .text(keys)
-                            .font_size(12.0)
-                            .font_weight(FontWeight::BOLD)
-                            .font_family("monospace")
-                            .color(pal.text.to_color()),
-                    )
-                    .maybe_child(is_active.then(|| {
-                        label()
-                            .text(desc)
-                            .font_size(12.5)
-                            .font_weight(FontWeight::SEMI_BOLD)
-                            .color(pal.text.to_color())
-                    }))
-            }));
+            .children(
+                VIM_KEY_BEATS
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &(keys, desc))| VimCaptionChip {
+                        pal,
+                        accent,
+                        keys,
+                        desc,
+                        active: enabled && beat_now == Some(index),
+                        still,
+                        key: DiffKey::from(&index),
+                    }),
+            );
 
         rect()
             .width(Size::fill())
@@ -848,9 +944,81 @@ impl Component for VimScene {
     }
 }
 
-/* =========================================================================
-Chapter 02 — Agent (AgentScene)
-========================================================================= */
+#[derive(Clone, PartialEq)]
+struct VimCaptionChip {
+    pal: OnboardingPalette,
+    accent: Rgba,
+    keys: &'static str,
+    desc: &'static str,
+    active: bool,
+    still: bool,
+    key: DiffKey,
+}
+
+impl KeyExt for VimCaptionChip {
+    fn key_mut(&mut self) -> &mut DiffKey {
+        &mut self.key
+    }
+}
+
+impl Component for VimCaptionChip {
+    fn render(&self) -> impl IntoElement {
+        let active = self.active;
+        let still = self.still;
+        let active_anim = use_animation_with_dependencies(&active, move |conf, is_on| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(if still { OnChange::Finish } else { OnChange::Rerun });
+            let (from, to) = if *is_on { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::ONB_VIM_CHIP_LIFT)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let p = active_anim.get().value().clamp(0.0, 1.0);
+        let pal = self.pal;
+        let accent = self.accent;
+        let bg = pal.surface.mix(mix_rgba(pal.surface, accent, 0.16), p);
+        let border = pal.border_subtle.mix(accent, p);
+        let text = pal.muted.mix(pal.text, p);
+        let lift_y = -2.0 * onboarding_spring(p);
+
+        rect()
+            .direction(Direction::Horizontal)
+            .cross_align(Alignment::center())
+            .padding(Gaps::new(5.0, 9.0, 5.0, 9.0))
+            .spacing(6.0)
+            .corner_radius(CornerRadius::new_all(10.0))
+            .background(bg.to_color())
+            .border(
+                Border::new()
+                    .width(1.5)
+                    .alignment(BorderAlignment::Inner)
+                    .fill(border.to_color()),
+            )
+            .offset_y(lift_y)
+            .child(
+                label()
+                    .text(self.keys)
+                    .font_size(11.0)
+                    .font_weight(FontWeight::BOLD)
+                    .font_family("monospace")
+                    .max_lines(1)
+                    .color(accent.to_color()),
+            )
+            .child(
+                label()
+                    .text(self.desc)
+                    .font_size(12.0)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .max_lines(1)
+                    .color(text.to_color()),
+            )
+    }
+
+    fn render_key(&self) -> DiffKey {
+        self.key.clone().or(self.default_key())
+    }
+}
 
 const AGENT_LOOP: f32 = 8.4;
 const AGENT_POSE: f32 = 2.1;
@@ -1123,6 +1291,17 @@ impl Component for ShieldScene {
         }
 
         let enabled = self.enabled;
+        let still = self.still;
+        let shield_blend_anim = use_animation_with_dependencies(&enabled, move |conf, is_on| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(if still { OnChange::Finish } else { OnChange::Rerun });
+            let (from, to) = if *is_on { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::ONB_SCENE_TOGGLE)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let shield_blend = shield_blend_anim.get().value().clamp(0.0, 1.0);
         let reset_clear = span(t, SHIELD_LOOP - 0.65, 0.35);
         let params = BrowserSceneParams {
             x: 22.0,
@@ -1158,8 +1337,8 @@ impl Component for ShieldScene {
                 }
             }
 
-            // Curved organic barrier arc when ad blocking is on
-            if enabled {
+            // Curved organic barrier arc when ad blocking is on (fades smoothly with shield_blend)
+            if shield_blend > 0.01 {
                 let yellow = OnboardingPalette::mode_pastel(InputMode::Toolbar);
                 let teal = OnboardingPalette::mode_pastel(InputMode::Library);
                 draw_dashed_quad(
@@ -1169,7 +1348,7 @@ impl Component for ShieldScene {
                     (472.0, 372.0),
                     3.0,
                     Some(&[8.0, 8.0]),
-                    sk_alpha(yellow, if nearest_impact < 0.25 { 0.95 } else { 0.45 }),
+                    sk_alpha(yellow, (if nearest_impact < 0.25 { 0.95 } else { 0.45 }) * shield_blend),
                 );
                 draw_dashed_quad(
                     canvas,
@@ -1178,7 +1357,7 @@ impl Component for ShieldScene {
                     (460.0, 358.0),
                     1.5,
                     None,
-                    sk_alpha(teal, 0.32),
+                    sk_alpha(teal, 0.32 * shield_blend),
                 );
             }
 
@@ -1257,16 +1436,17 @@ impl Component for ShieldScene {
                 }
             }
 
-            // Rounded-visor Zendia shield badge
-            if enabled {
-                let pulse = if nearest_impact < 0.28 {
+            // Rounded-visor Zendia shield badge (fades & scales smoothly on toggle)
+            if shield_blend > 0.01 {
+                let pulse = if enabled && nearest_impact < 0.28 {
                     1.0 + sin_f32((1.0 - nearest_impact / 0.28) * PI) * 0.08
                 } else {
                     1.0
                 };
+                let badge_scale = pulse * lerp(0.84, 1.0, shield_blend);
                 let s = canvas.save();
                 canvas.translate((494.0, 212.0));
-                canvas.scale((pulse, pulse));
+                canvas.scale((badge_scale, badge_scale));
 
                 // Outer ink border
                 let mut outer_pb = sk::PathBuilder::new();
@@ -1282,7 +1462,7 @@ impl Component for ShieldScene {
                 let mut ink_fill = sk::Paint::default();
                 ink_fill.set_anti_alias(true);
                 ink_fill.set_style(sk::PaintStyle::Fill);
-                ink_fill.set_color(sk_color(pal.ink));
+                ink_fill.set_color(sk_alpha(pal.ink, shield_blend));
                 canvas.draw_path(&outer_path, &ink_fill);
 
                 let mut ink_stroke = sk::Paint::default();
@@ -1290,7 +1470,7 @@ impl Component for ShieldScene {
                 ink_stroke.set_style(sk::PaintStyle::Stroke);
                 ink_stroke.set_stroke_width(9.0);
                 ink_stroke.set_stroke_join(sk::PaintJoin::Round);
-                ink_stroke.set_color(sk_color(pal.ink));
+                ink_stroke.set_color(sk_alpha(pal.ink, shield_blend));
                 canvas.draw_path(&outer_path, &ink_stroke);
 
                 // Yellow body
@@ -1307,7 +1487,10 @@ impl Component for ShieldScene {
                 let mut body_fill = sk::Paint::default();
                 body_fill.set_anti_alias(true);
                 body_fill.set_style(sk::PaintStyle::Fill);
-                body_fill.set_color(sk_color(OnboardingPalette::mode_pastel(InputMode::Toolbar)));
+                body_fill.set_color(sk_alpha(
+                    OnboardingPalette::mode_pastel(InputMode::Toolbar),
+                    shield_blend,
+                ));
                 canvas.draw_path(&body_path, &body_fill);
 
                 // Checkmark
@@ -1323,7 +1506,7 @@ impl Component for ShieldScene {
                 check_paint.set_stroke_width(7.0);
                 check_paint.set_stroke_cap(sk::PaintCap::Round);
                 check_paint.set_stroke_join(sk::PaintJoin::Round);
-                check_paint.set_color(sk_color(pal.ink));
+                check_paint.set_color(sk_alpha(pal.ink, shield_blend));
                 canvas.draw_path(&check_path, &check_paint);
 
                 canvas.restore_to_count(s);
@@ -1379,8 +1562,34 @@ impl Component for MoveInScene {
 
         let focus = self.focus;
         let source = self.source.clone();
-        let engine_name = self.engine_name.clone();
+        let last_source = use_last_some(&source);
+        let importing_now = source.is_some();
+        let still = self.still;
+        let import_blend_anim = use_animation_with_dependencies(&importing_now, move |conf, active| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(if still { OnChange::Finish } else { OnChange::Rerun });
+            let (from, to) = if *active { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::ONB_MOVEIN_TRANSITION)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let import_blend = import_blend_anim.get().value().clamp(0.0, 1.0);
+        let display_source = source.or(last_source);
+
         let default_browser = self.default_browser;
+        let default_blend_anim = use_animation_with_dependencies(&default_browser, move |conf, active| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(if still { OnChange::Finish } else { OnChange::Rerun });
+            let (from, to) = if *active { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::ONB_MOVEIN_TRANSITION)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let default_blend = default_blend_anim.get().value().clamp(0.0, 1.0);
+
+        let engine_name = self.engine_name.clone();
         let vim = self.vim;
 
         let cb = RenderCallback::new(move |ctx| {
@@ -1391,9 +1600,13 @@ impl Component for MoveInScene {
                 return;
             };
             match focus {
-                MoveInFocus::Import => paint_import_subscene(canvas, &pal, source.as_ref(), vim, t, loop_dur),
+                MoveInFocus::Import => {
+                    paint_import_subscene(canvas, &pal, display_source.as_ref(), import_blend, vim, t, loop_dur)
+                }
                 MoveInFocus::Search => paint_search_subscene(canvas, &pal, &engine_name, vim, t, loop_dur),
-                MoveInFocus::DefaultBrowser => paint_default_subscene(canvas, &pal, default_browser, vim, t, loop_dur),
+                MoveInFocus::DefaultBrowser => {
+                    paint_default_subscene(canvas, &pal, default_browser, default_blend, vim, t, loop_dur)
+                }
             }
             canvas.restore_to_count(save);
         });
@@ -1413,42 +1626,58 @@ fn paint_import_subscene(
     canvas: &sk::Canvas,
     pal: &OnboardingPalette,
     source: Option<&ImportSource>,
+    import_blend: f32,
     vim: bool,
     t: f32,
     loop_dur: f32,
 ) {
-    let importing = source.is_some();
+    let blend = import_blend.clamp(0.0, 1.0);
 
-    if let Some(src) = source {
-        // Previous browser card on the left
+    if blend > 0.01
+        && let Some(src) = source
+    {
+        // Previous browser card on the left smoothly slides/scales/fades in and out
         let s = canvas.save();
-        canvas.translate((26.0, 124.0));
-        draw_rrect_fill(canvas, 0.0, 0.0, 166.0, 176.0, 20.0, sk_color(pal.surface));
-        draw_rrect_fill(canvas, 0.0, 0.0, 166.0, 32.0, 20.0, sk_color(pal.raised));
-        draw_rrect_stroke(canvas, 0.0, 0.0, 166.0, 176.0, 20.0, 1.6, sk_color(pal.border));
+        let card_x = lerp(8.0, 26.0, blend);
+        let card_scale = lerp(0.92, 1.0, blend);
+        canvas.translate((card_x + 83.0 * (1.0 - card_scale), 124.0 + 88.0 * (1.0 - card_scale)));
+        canvas.scale((card_scale, card_scale));
+        draw_rrect_fill(canvas, 0.0, 0.0, 166.0, 176.0, 20.0, sk_alpha(pal.surface, blend));
+        draw_rrect_fill(canvas, 0.0, 0.0, 166.0, 32.0, 20.0, sk_alpha(pal.raised, blend));
+        draw_rrect_stroke(canvas, 0.0, 0.0, 166.0, 176.0, 20.0, 1.6, sk_alpha(pal.border, blend));
         for cx in [18.0_f32, 30.0, 42.0] {
-            draw_circle_fill(canvas, cx, 16.0, 3.5, sk_alpha(pal.muted, 0.55));
+            draw_circle_fill(canvas, cx, 16.0, 3.5, sk_alpha(pal.muted, 0.55 * blend));
         }
-        draw_rrect_fill(canvas, 52.0, 54.0, 62.0, 62.0, 18.0, sk::Color::WHITE);
-        draw_rrect_stroke(canvas, 52.0, 54.0, 62.0, 62.0, 18.0, 1.2, sk_color(pal.border));
-        paint_brand_svg_on_canvas(canvas, &src.icon, 65.0, 67.0, 36.0);
+        draw_rrect_fill(
+            canvas,
+            52.0,
+            54.0,
+            62.0,
+            62.0,
+            18.0,
+            sk_alpha(Rgba::rgb(255, 255, 255), blend),
+        );
+        draw_rrect_stroke(canvas, 52.0, 54.0, 62.0, 62.0, 18.0, 1.2, sk_alpha(pal.border, blend));
+        if blend > 0.2 {
+            paint_brand_svg_on_canvas(canvas, &src.icon, 65.0, 67.0, 36.0);
+        }
         let name_font = make_font(13.0, true, false);
-        draw_text_centered(canvas, &src.name, 83.0, 144.0, &name_font, sk_color(pal.text));
+        draw_text_centered(canvas, &src.name, 83.0, 144.0, &name_font, sk_alpha(pal.text, blend));
         canvas.restore_to_count(s);
     }
 
-    // Zendia browser receiving data
+    // Zendia browser smoothly shifts right and scales down when importing
     let params = BrowserSceneParams {
-        x: if importing { 242.0 } else { 76.0 },
-        y: if importing { 72.0 } else { 52.0 },
-        scale: if importing { 0.65 } else { 0.85 },
+        x: lerp(76.0, 242.0, blend),
+        y: lerp(52.0, 72.0, blend),
+        scale: lerp(0.85, 0.65, blend),
         vim: if vim { 1.0 } else { 0.0 },
         mode: InputMode::Library,
         ..BrowserSceneParams::default()
     };
     paint_browser_2d(canvas, pal, &params, |_| {});
 
-    if importing {
+    if blend > 0.02 {
         let teal = OnboardingPalette::mode_pastel(InputMode::Library);
         draw_dashed_quad(
             canvas,
@@ -1457,7 +1686,7 @@ fn paint_import_subscene(
             (314.0, 196.0),
             2.2,
             Some(&[6.0, 7.0]),
-            sk_alpha(teal, 0.55),
+            sk_alpha(teal, 0.55 * blend),
         );
 
         let tokens = [
@@ -1472,19 +1701,19 @@ fn paint_import_subscene(
             }
             let u = ease_in_out(p / 0.78);
             let (tx, ty) = quad_point((174.0, 196.0), (246.0, 86.0), (314.0, 196.0), u);
-            let sc = (p / 0.1).min(1.0) * ((0.78 - p) / 0.1).min(1.0);
+            let sc = (p / 0.1).min(1.0) * ((0.78 - p) / 0.1).min(1.0) * blend;
             let ts = canvas.save();
             canvas.translate((tx, ty));
             canvas.scale((sc, sc));
-            draw_rrect_fill(canvas, -20.0, -20.0, 40.0, 40.0, 13.0, sk_color(col));
-            draw_rrect_stroke(canvas, -20.0, -20.0, 40.0, 40.0, 13.0, 2.2, sk_color(pal.ink));
+            draw_rrect_fill(canvas, -20.0, -20.0, 40.0, 40.0, 13.0, sk_alpha(col, blend));
+            draw_rrect_stroke(canvas, -20.0, -20.0, 40.0, 40.0, 13.0, 2.2, sk_alpha(pal.ink, blend));
 
             let mut stroke = sk::Paint::default();
             stroke.set_anti_alias(true);
             stroke.set_style(sk::PaintStyle::Stroke);
             stroke.set_stroke_width(2.4);
             stroke.set_stroke_cap(sk::PaintCap::Round);
-            stroke.set_color(sk_color(pal.ink));
+            stroke.set_color(sk_alpha(pal.ink, blend));
 
             match kind {
                 0 => {
@@ -1508,7 +1737,7 @@ fn paint_import_subscene(
                     pb.close();
                     let mut fill = sk::Paint::default();
                     fill.set_anti_alias(true);
-                    fill.set_color(sk_color(pal.ink));
+                    fill.set_color(sk_alpha(pal.ink, blend));
                     canvas.draw_path(&pb.detach(), &fill);
                 }
                 1 => {
@@ -1610,10 +1839,12 @@ fn paint_default_subscene(
     canvas: &sk::Canvas,
     pal: &OnboardingPalette,
     enabled: bool,
+    default_blend: f32,
     vim: bool,
     t: f32,
     loop_dur: f32,
 ) {
+    let blend = default_blend.clamp(0.0, 1.0);
     let click = 1.0_f32;
     let flight = 0.95_f32;
     let fly = ease_in_out(span(t, click, flight));
@@ -1646,14 +1877,13 @@ fn paint_default_subscene(
         canvas.restore_to_count(s);
     }
 
-    // Other browser card
+    // Other browser card smoothly swaps prominence with Zendia browser over 380 ms
     {
         let s = canvas.save();
-        let (ox, oy, osc, oa) = if enabled {
-            (304.0, 38.0, 0.72, 0.45)
-        } else {
-            (246.0, 120.0, 1.0, 1.0)
-        };
+        let ox = lerp(246.0, 304.0, blend);
+        let oy = lerp(120.0, 38.0, blend);
+        let osc = lerp(1.0, 0.72, blend);
+        let oa = lerp(1.0, 0.45, blend);
         canvas.translate((ox, oy));
         canvas.scale((osc, osc));
         draw_rrect_fill(canvas, 0.0, 0.0, 256.0, 170.0, 18.0, sk_alpha(pal.raised, oa));
@@ -1665,9 +1895,9 @@ fn paint_default_subscene(
 
     // Zendia browser (prominent when Default = YES)
     let params = BrowserSceneParams {
-        x: if enabled { 226.0 } else { 318.0 },
-        y: if enabled { 96.0 } else { 246.0 },
-        scale: if enabled { 0.67 } else { 0.44 },
+        x: lerp(318.0, 226.0, blend),
+        y: lerp(246.0, 96.0, blend),
+        scale: lerp(0.44, 0.67, blend),
         vim: if vim { 1.0 } else { 0.0 },
         mode: InputMode::Library,
         tab_index: if opened > 0.5 { 2.0 } else { 0.0 },
@@ -1680,8 +1910,8 @@ fn paint_default_subscene(
 
     // Flying link capsule
     if t > click && !landed {
-        let goal_x = if enabled { 378.0 } else { 374.0 };
-        let goal_y = if enabled { 228.0 } else { 114.0 };
+        let goal_x = lerp(374.0, 378.0, blend);
+        let goal_y = lerp(114.0, 228.0, blend);
         let lx = lerp(114.0, goal_x, fly);
         let ly = lerp(236.0, goal_y, fly) - sin_f32(fly * PI) * 74.0;
         let sc = ease_out((t - click) / 0.14);
@@ -1737,6 +1967,7 @@ impl Component for AppsScene {
         ];
 
         // Build rows of 3 tiles (or 3 dashed empty slots when empty)
+        let still = self.still;
         let tile_rows: Vec<Element> = if self.apps.is_empty() {
             vec![
                 rect()
@@ -1746,17 +1977,25 @@ impl Component for AppsScene {
                     .content(Content::Flex)
                     .spacing(8.0)
                     .children((0..3).map(|slot| {
+                        let dash_col = pal.border;
+                        let dash_cb = RenderCallback::new(move |ctx| {
+                            if let RenderTarget::Background { canvas, .. } = &mut ctx.target {
+                                draw_dashed_rrect_stroke(
+                                    canvas,
+                                    sk::Rect::from_xywh(0.0, 0.0, ctx.size.width, ctx.size.height),
+                                    13.0,
+                                    1.5,
+                                    &[5.0, 4.0],
+                                    sk_alpha(dash_col, 0.65),
+                                );
+                            }
+                        });
                         rect()
                             .key(slot)
                             .width(Size::flex(1.0))
                             .height(Size::px(48.0))
                             .corner_radius(CornerRadius::new_all(13.0))
-                            .border(
-                                Border::new()
-                                    .width(1.5)
-                                    .alignment(BorderAlignment::Inner)
-                                    .fill(pal.border.with_alpha(0.55).to_color()),
-                            )
+                            .background(Fill::Callback(dash_cb))
                     }))
                     .into_element(),
             ]
@@ -1773,23 +2012,12 @@ impl Component for AppsScene {
                         .spacing(8.0)
                         .children((0..3).map(|col| {
                             if let Some(app) = chunk.get(col) {
-                                let tile_col = Rgba::rgb(app.color_rgb.0, app.color_rgb.1, app.color_rgb.2);
-                                let tile_bg = mix_rgba(Rgba::rgb(255, 255, 255), tile_col, 0.18);
-                                rect()
-                                    .key(app.id)
-                                    .width(Size::flex(1.0))
-                                    .height(Size::px(48.0))
-                                    .corner_radius(CornerRadius::new_all(13.0))
-                                    .background(tile_bg.to_color())
-                                    .border(
-                                        Border::new()
-                                            .width(1.5)
-                                            .alignment(BorderAlignment::Inner)
-                                            .fill(tile_col.with_alpha(0.65).to_color()),
-                                    )
-                                    .center()
-                                    .child(brand_logo_element(app.icon, 22.0))
-                                    .into_element()
+                                PinnedAppPreviewTile {
+                                    app,
+                                    still,
+                                    key: DiffKey::from(&(app.id)),
+                                }
+                                .into_element()
                             } else {
                                 rect()
                                     .key(format!("pad-{row_idx}-{col}"))
@@ -1840,12 +2068,6 @@ impl Component for AppsScene {
                             .padding(Gaps::new_all(14.0))
                             .spacing(12.0)
                             .background(pal.raised.to_color())
-                            .border(
-                                Border::new()
-                                    .width(1.0)
-                                    .alignment(BorderAlignment::Inner)
-                                    .fill(pal.border_subtle.to_color()),
-                            )
                             .child(
                                 // Window traffic dots
                                 rect()
@@ -1905,7 +2127,9 @@ impl Component for AppsScene {
                                         .spacing(9.0)
                                         .corner_radius(CornerRadius::new_all(10.0));
                                     if active {
-                                        row = row.background(pal.surface.to_color());
+                                        row = row.background(pal.surface.to_color()).shadow(
+                                            Shadow::new().y(1.0).blur(2.0).color(Color::from_argb(16, 0, 0, 0)),
+                                        );
                                     }
                                     row.child(
                                         rect()
@@ -1929,6 +2153,13 @@ impl Component for AppsScene {
                                     )
                                 }),
                             )),
+                    )
+                    .child(
+                        // Crisp 1px right divider between sidebar and page peek (matches fork `border-inline-end`)
+                        rect()
+                            .width(Size::px(1.0))
+                            .height(Size::fill())
+                            .background(pal.border_subtle.to_color()),
                     )
                     .child(
                         // Right page peek
@@ -2009,6 +2240,63 @@ fn win_dot(color: Rgba) -> Element {
         .corner_radius(CornerRadius::new_all(4.0))
         .background(color.with_alpha(0.78).to_color())
         .into_element()
+}
+
+#[derive(Clone, PartialEq)]
+struct PinnedAppPreviewTile {
+    app: &'static EssentialAppPreset,
+    still: bool,
+    key: DiffKey,
+}
+
+impl KeyExt for PinnedAppPreviewTile {
+    fn key_mut(&mut self) -> &mut DiffKey {
+        &mut self.key
+    }
+}
+
+impl Component for PinnedAppPreviewTile {
+    fn render(&self) -> impl IntoElement {
+        let still = self.still;
+        let pop_anim = use_animation(move |conf| {
+            conf.on_creation(if still { OnCreation::Finish } else { OnCreation::Run });
+            AnimNum::new(0.0, 1.0)
+                .duration(motion::ONB_TILE_POP)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let p = if still {
+            1.0
+        } else {
+            pop_anim.get().value().clamp(0.0, 1.0)
+        };
+        let scale = lerp(0.6, 1.0, onboarding_spring(p));
+        let opacity = clamp01(p * 1.6);
+
+        let tile_col = Rgba::rgb(self.app.color_rgb.0, self.app.color_rgb.1, self.app.color_rgb.2);
+        let tile_bg = mix_rgba(Rgba::rgb(255, 255, 255), tile_col, 0.18);
+
+        rect()
+            .width(Size::flex(1.0))
+            .height(Size::px(48.0))
+            .corner_radius(CornerRadius::new_all(13.0))
+            .background(tile_bg.to_color())
+            .border(
+                Border::new()
+                    .width(1.5)
+                    .alignment(BorderAlignment::Inner)
+                    .fill(tile_col.with_alpha(0.65).to_color()),
+            )
+            .shadow(Shadow::new().y(2.0).blur(6.0).color(Color::from_argb(20, 0, 0, 0)))
+            .scale(scale)
+            .opacity(opacity)
+            .center()
+            .child(brand_logo_element(self.app.icon, 22.0))
+    }
+
+    fn render_key(&self) -> DiffKey {
+        self.key.clone().or(self.default_key())
+    }
 }
 
 /* =========================================================================
@@ -2123,12 +2411,12 @@ impl Component for GoScene {
                     )
                     .child(
                         rect()
-                            .position(Position::new_absolute().left(0.0).bottom(-8.0))
+                            .position(Position::new_absolute().left(-8.0).bottom(-14.0))
                             .layer(Layer::Relative(4))
-                            .width(Size::px(116.0))
-                            .height(Size::px(116.0))
+                            .width(Size::px(126.0))
+                            .height(Size::px(126.0))
                             .child(
-                                OnboardingMascot::new(InputMode::Visual, 116.0)
+                                OnboardingMascot::new(InputMode::Visual, 126.0)
                                     .still(self.still)
                                     .bloom(!self.still)
                                     .blink(!self.still)

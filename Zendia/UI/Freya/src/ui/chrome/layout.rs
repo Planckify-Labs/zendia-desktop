@@ -15,22 +15,26 @@ use zendia_browser_core::space_appearance::{SpaceAppearance, compute_gradient};
 
 /// Inset separation around the rounded page card (`zen.theme.content-element-separation`).
 pub const ELEMENT_SEPARATION: f32 = 8.0;
-/// Full-width top toolbar height in multiple-toolbar and collapsed-sidebar layouts (`--zen-toolbar-height`).
-pub const TOP_TOOLBAR_HEIGHT: f32 = 40.0;
-/// Top action row height inside the single-toolbar sidebar.
-pub const SIDEBAR_TOP_ROW_HEIGHT: f32 = 34.0;
+/// Full-width top toolbar height in multiple-toolbar and collapsed-sidebar layouts (`--zen-toolbar-height: 38px`).
+pub const TOP_TOOLBAR_HEIGHT: f32 = 38.0;
+/// Collapsible compact top bar height in single-toolbar compact mode (`vertical-tabs-topbar.inc.css:7`).
+pub const COMPACT_TOP_BAR_HEIGHT: f32 = 34.0;
+/// Top action row height inside the single-toolbar sidebar (`vertical-tabs.css:1122`).
+pub const SIDEBAR_TOP_ROW_HEIGHT: f32 = 36.0;
 /// Horizontal and bottom padding inside the expanded sidebar (`--zen-toolbox-padding`).
 pub const SIDEBAR_PADDING_EXPANDED: f32 = 6.0;
 /// Padding inside the collapsed icon-only sidebar.
 pub const SIDEBAR_PADDING_COLLAPSED: f32 = 6.0;
-/// Address bar height inside the single-toolbar sidebar.
-pub const URL_BAR_HEIGHT_SINGLE: f32 = 34.0;
-/// Address bar height inside the top toolbar (multiple and collapsed layouts).
-pub const URL_BAR_HEIGHT_TOP: f32 = 30.0;
+/// Address bar height inside the single-toolbar sidebar (`ZenVerticalTabsManager.mjs:362`).
+pub const URL_BAR_HEIGHT_SINGLE: f32 = 38.0;
+/// Address bar height inside the top toolbar (`ZenVerticalTabsManager.mjs:359`).
+pub const URL_BAR_HEIGHT_TOP: f32 = 32.0;
 /// Corner radius of the inset page card.
 pub const PAGE_CARD_RADIUS: f32 = 8.0;
 /// Height of a vertical tab row in the sidebar.
-pub const TAB_ROW_HEIGHT: f32 = 34.0;
+pub const TAB_ROW_HEIGHT: f32 = 36.0;
+/// Space between two rows of the tab list, so rows sit 40 px apart as the fork's tabs do.
+pub const TAB_ROW_GAP: f32 = 4.0;
 /// Corner radius of a vertical tab row pill.
 pub const TAB_ROW_RADIUS: f32 = 8.0;
 /// Interactive drag-handle width between the sidebar and the page card.
@@ -57,7 +61,7 @@ impl ToolbarSlots {
     pub fn resolve(items: &[ToolbarItem], layout: &LayoutSettings) -> Self {
         let mut slots = Self::default();
         for item in items.iter().filter(|item| item.visible) {
-            let Some(area) = layout.resolve_toolbar_area(item.placement_rules) else {
+            let Some(area) = layout.toolbar_area_of(item) else {
                 continue;
             };
             let bucket = match area {
@@ -114,14 +118,15 @@ pub fn page_card_margins(layout: &LayoutSettings) -> (f32, f32, f32, f32) {
     }
 }
 
-/// Whether window controls (min / max / close) are drawn at the trailing end of the top toolbar.
+/// Whether window controls (min / max / close) are drawn at the trailing end of the top toolbar or compact top bar.
 pub fn show_window_controls_in_top_bar(layout: &LayoutSettings) -> bool {
-    layout.has_top_toolbar()
+    layout.has_top_toolbar() || layout.has_compact_top_bar()
 }
 
-/// Whether window controls are drawn at the trailing end of the sidebar top row (single-toolbar with right sidebar).
+/// Whether window controls are drawn at the trailing end of the sidebar top row (single-toolbar with right sidebar,
+/// outside compact mode — in compact mode they sit in the compact top bar).
 pub fn show_window_controls_in_sidebar_top(layout: &LayoutSettings) -> bool {
-    !layout.has_top_toolbar() && layout.sidebar_side == SidebarSide::Right
+    !layout.has_top_toolbar() && !layout.has_compact_top_bar() && layout.sidebar_side == SidebarSide::Right
 }
 
 /// Computes the clamped sidebar width during a horizontal resize drag.
@@ -131,6 +136,26 @@ pub fn compute_resized_sidebar_width(start_width: f32, start_x: f32, current_x: 
         SidebarSide::Right => start_x - current_x,
     };
     LayoutSettings::clamp_sidebar_width(start_width + delta)
+}
+
+/// Computes the raw (unclamped) candidate sidebar width during a horizontal resize drag.
+pub fn compute_raw_resized_sidebar_width(start_width: f32, start_x: f32, current_x: f32, side: SidebarSide) -> f32 {
+    let delta = match side {
+        SidebarSide::Left => current_x - start_x,
+        SidebarSide::Right => start_x - current_x,
+    };
+    start_width + delta
+}
+
+/// Computes the clamped sidebar width respecting layout-specific minimums (e.g. `Single + Right` caption buttons).
+pub fn compute_resized_sidebar_width_for_layout(
+    layout: &LayoutSettings,
+    start_width: f32,
+    start_x: f32,
+    current_x: f32,
+) -> f32 {
+    let raw = compute_raw_resized_sidebar_width(start_width, start_x, current_x, layout.sidebar_side);
+    zendia_browser_core::shell_layout::clamp_sidebar_width_for_layout(layout, raw)
 }
 
 /// Resolved linear-gradient endpoints for a space's window backdrop, interpolated during space cross-fades.
@@ -158,6 +183,40 @@ impl BackdropEndpoints {
             .stop((Color::from(self.start), 0.0))
             .stop((Color::from(self.end), 100.0))
     }
+
+    /// Builds a multi-stop linear gradient preserving an optional middle stop (`WIN-06`).
+    pub fn to_gradient_with_mid(self, mid: Option<Rgba>) -> LinearGradient {
+        if let Some(m) = mid {
+            LinearGradient::new()
+                .angle(self.angle_deg)
+                .stop((Color::from(self.start), 0.0))
+                .stop((Color::from(m), 50.0))
+                .stop((Color::from(self.end), 100.0))
+        } else {
+            self.to_gradient()
+        }
+    }
+}
+
+/// Optional middle stop and 3rd-color vertical overlay for multi-dot space gradients (`WIN-06`).
+pub fn window_backdrop_extra_stops(
+    appearance: Option<&SpaceAppearance>,
+    scheme: ResolvedScheme,
+) -> (Option<Rgba>, Option<Rgba>) {
+    let Some(app) = appearance.filter(|a| !a.dots.is_empty()) else {
+        return (None, None);
+    };
+    let resolved = compute_gradient(app, scheme == ResolvedScheme::Dark);
+    let mid = if resolved.stops.len() >= 3 {
+        let m = resolved.stops[resolved.stops.len() / 2];
+        Some(Rgba::rgb(m.0, m.1, m.2))
+    } else {
+        None
+    };
+    let overlay = resolved
+        .overlay_rgb
+        .map(|(r, g, b)| Rgba::from_rgb_alpha(r, g, b, 0.55));
+    (mid, overlay)
 }
 
 /// Computes the resolved gradient endpoints for `space` in `scheme`, matching Zen's per-space backdrop tint.
@@ -276,7 +335,7 @@ impl ChromePalette {
 mod tests {
     use super::*;
     use zendia_browser_core::BrowserCore;
-    use zendia_browser_core::model::{SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, ToolbarLayout};
+    use zendia_browser_core::model::{CompactHide, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, ToolbarLayout};
     use zendia_browser_core::stub::StubBackend;
 
     #[test]
@@ -308,24 +367,35 @@ mod tests {
         assert_eq!(ids(&single_slots.sidebar_url_bar), vec!["builtin.url_bar"]);
         assert_eq!(
             ids(&single_slots.sidebar_bottom),
-            vec![
-                "builtin.library",
-                "zendia.agents",
-                "zendia.chat",
-                "builtin.extensions",
-                "builtin.new_tab"
-            ]
+            vec!["builtin.library", "zendia.agents", "zendia.chat", "builtin.new_tab"]
         );
         assert_eq!(
             ids(&single_slots.sidebar_bottom_for_side(SidebarSide::Right)),
-            vec![
-                "builtin.new_tab",
-                "builtin.extensions",
-                "zendia.chat",
-                "zendia.agents",
-                "builtin.library"
-            ]
+            vec!["builtin.new_tab", "zendia.chat", "zendia.agents", "builtin.library"]
         );
+
+        let single_compact = LayoutSettings {
+            toolbar_layout: ToolbarLayout::Single,
+            sidebar_expanded: true,
+            compact_mode: true,
+            ..LayoutSettings::default()
+        };
+        let single_compact_slots = ToolbarSlots::resolve(&items, &single_compact);
+        assert!(single_compact_slots.top_bar_start.is_empty());
+        assert!(single_compact_slots.top_bar_center.is_empty());
+        assert_eq!(
+            ids(&single_compact_slots.top_bar_end),
+            vec!["zendia.agents", "zendia.chat"]
+        );
+        assert_eq!(
+            ids(&single_compact_slots.sidebar_bottom),
+            vec!["builtin.library", "builtin.new_tab"]
+        );
+        assert!(show_window_controls_in_top_bar(&single_compact));
+        assert!(!show_window_controls_in_sidebar_top(&LayoutSettings {
+            sidebar_side: SidebarSide::Right,
+            ..single_compact
+        }));
 
         let multiple = LayoutSettings {
             toolbar_layout: ToolbarLayout::Multiple,
@@ -335,25 +405,14 @@ mod tests {
         let multi_slots = ToolbarSlots::resolve(&items, &multiple);
         assert_eq!(
             ids(&multi_slots.top_bar_start),
-            vec![
-                "builtin.sidebar_toggle",
-                "builtin.back",
-                "builtin.forward",
-                "builtin.reload"
-            ]
+            vec!["builtin.back", "builtin.forward", "builtin.reload"]
         );
+        assert_eq!(ids(&multi_slots.sidebar_top_start), vec!["builtin.sidebar_toggle"]);
         assert_eq!(ids(&multi_slots.top_bar_center), vec!["builtin.url_bar"]);
         assert_eq!(
             ids(&multi_slots.top_bar_end),
-            vec![
-                "zendia.agents",
-                "zendia.chat",
-                "zendia.webchat",
-                "builtin.extensions",
-                "builtin.app_menu"
-            ]
+            vec!["zendia.agents", "zendia.chat", "zendia.webchat", "builtin.app_menu"]
         );
-        assert!(multi_slots.sidebar_top_start.is_empty());
         assert!(multi_slots.sidebar_url_bar.is_empty());
         assert_eq!(
             ids(&multi_slots.sidebar_bottom),
@@ -366,7 +425,46 @@ mod tests {
             ..LayoutSettings::default()
         };
         let collapsed_slots = ToolbarSlots::resolve(&items, &collapsed);
-        assert_eq!(collapsed_slots.top_bar_start, multi_slots.top_bar_start);
+        assert_eq!(
+            ids(&collapsed_slots.top_bar_start),
+            vec![
+                "builtin.sidebar_toggle",
+                "builtin.back",
+                "builtin.forward",
+                "builtin.reload"
+            ]
+        );
+        assert!(collapsed_slots.sidebar_top_start.is_empty());
+
+        // Compact mode takes the sidebar away, so its button leads the top bar, also with the sidebar on the right.
+        let compact_right = LayoutSettings {
+            compact_mode: true,
+            compact_hide: CompactHide::Both,
+            sidebar_side: SidebarSide::Right,
+            ..multiple.clone()
+        };
+        let compact_slots = ToolbarSlots::resolve(&items, &compact_right);
+        assert_eq!(ids(&compact_slots.top_bar_start)[0], "builtin.sidebar_toggle");
+        assert!(compact_slots.sidebar_top_start.is_empty());
+        assert!(!compact_right.top_toolbar_beside_sidebar());
+
+        // A right-hand sidebar that stays while only the toolbar hides keeps its button.
+        let toolbar_only = LayoutSettings {
+            compact_hide: CompactHide::Toolbar,
+            ..compact_right
+        };
+        let toolbar_only_slots = ToolbarSlots::resolve(&items, &toolbar_only);
+        assert_eq!(
+            ids(&toolbar_only_slots.sidebar_top_start),
+            vec!["builtin.sidebar_toggle"]
+        );
+        assert!(toolbar_only.top_toolbar_beside_sidebar());
+
+        let toggle = items.iter().find(|item| item.id.as_str() == "builtin.sidebar_toggle");
+        assert_eq!(
+            toggle.map(|item| item.command.as_str()),
+            Some("layout.toggle_compact_mode")
+        );
         assert_eq!(collapsed_slots.top_bar_center, multi_slots.top_bar_center);
         assert_eq!(collapsed_slots.top_bar_end, multi_slots.top_bar_end);
         assert_eq!(collapsed_slots.sidebar_bottom, multi_slots.sidebar_bottom);

@@ -7,7 +7,7 @@
 //! Zendia-specific settings groups: Vim Mode, Agents, and Web Chat.
 
 use crate::ui::core_view::use_core;
-use crate::ui::kit::{KeyLabel, Pill};
+use crate::ui::kit::{KeyLabel, Pill, TextField, focus_ring_border, use_interactive_feedback};
 use crate::ui::settings::controls::{
     ServiceStatusBanner, SettingsButton, SettingsChoiceRow, SettingsPalette, SettingsToggleRow, section_heading,
     settings_card, subsection_heading,
@@ -331,33 +331,51 @@ impl Component for AgentSelectCard {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let palette = SettingsPalette::for_scheme(theme.scheme);
-        let mut hovered = use_state(|| false);
+        let feedback = use_interactive_feedback(true);
+        let a11y_id = use_a11y();
+        let focus = use_focus(a11y_id);
         let on_select = self.on_select.clone();
         let (r, g, b) = self.agent.accent_rgb;
         let accent = Rgba::rgb(r, g, b).to_color();
 
+        let rest_bg = if self.selected {
+            palette.selected_pill_bg
+        } else {
+            Color::TRANSPARENT
+        };
+        let bg = feedback.background(rest_bg, palette.row_hover_bg, palette.selected_pill_bg);
+        let border = focus_ring_border(
+            focus() == Focus::Keyboard,
+            &theme,
+            Border::new()
+                .width(if self.selected { 1.5 } else { 1.0 })
+                .alignment(BorderAlignment::Inner)
+                .fill(if self.selected { accent } else { palette.card_border }),
+        );
+
         rect()
+            .a11y_id(a11y_id)
+            .a11y_focusable(true)
+            .a11y_role(AccessibilityRole::Button)
+            .a11y_alt(format!("Select {} agent", self.agent.name))
             .width(Size::px(280.0))
             .padding(Gaps::new(12.0, 14.0, 12.0, 14.0))
             .spacing(6.0)
             .corner_radius(CornerRadius::new_all(10.0))
-            .background(if self.selected {
-                palette.selected_pill_bg
-            } else if *hovered.read() {
-                palette.row_hover_bg
-            } else {
-                Color::TRANSPARENT
-            })
-            .border(
-                Border::new()
-                    .width(if self.selected { 1.5 } else { 1.0 })
-                    .alignment(BorderAlignment::Inner)
-                    .fill(if self.selected { accent } else { palette.card_border }),
-            )
+            .background(bg)
+            .border(border)
+            .scale(feedback.scale())
             .cursor(CursorIcon::Pointer)
-            .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
+            .on_pointer_down(feedback.on_pointer_down())
+            .on_global_pointer_up(feedback.on_pointer_up())
             .on_press(move |_| on_select.call(()))
+            .on_key_down(move |e: Event<KeyboardEventData>| {
+                if e.key == Key::Named(NamedKey::Enter) || matches!(&e.key, Key::Character(c) if c == " ") {
+                    e.stop_propagation();
+                }
+            })
             .child(
                 rect()
                     .width(Size::fill())
@@ -525,7 +543,7 @@ impl Component for WebChatSettingsGroup {
                                 rect()
                                     .width(Size::px(150.0))
                                     .height(Size::px(32.0))
-                                    .padding(Gaps::new(0.0, 10.0, 0.0, 10.0))
+                                    .padding(Gaps::new(0.0, 8.0, 0.0, 8.0))
                                     .corner_radius(CornerRadius::new_all(7.0))
                                     .background(palette.input_bg)
                                     .border(
@@ -536,15 +554,12 @@ impl Component for WebChatSettingsGroup {
                                     )
                                     .main_align(Alignment::center())
                                     .child(
-                                        Input::new(custom_name)
-                                            .flat()
-                                            .compact()
+                                        TextField::new(custom_name)
                                             .placeholder("Name (optional)")
                                             .width(Size::fill())
+                                            .padding(Gaps::new(0.0, 2.0, 0.0, 2.0))
                                             .background(Color::TRANSPARENT)
                                             .focus_background(Color::TRANSPARENT)
-                                            .border_fill(Color::TRANSPARENT)
-                                            .focus_border_fill(Color::TRANSPARENT)
                                             .color(theme.color(ThemeRole::Text))
                                             .placeholder_color(theme.color(ThemeRole::TextMuted)),
                                     ),
@@ -553,7 +568,7 @@ impl Component for WebChatSettingsGroup {
                                 rect()
                                     .width(Size::flex(1.0))
                                     .height(Size::px(32.0))
-                                    .padding(Gaps::new(0.0, 10.0, 0.0, 10.0))
+                                    .padding(Gaps::new(0.0, 8.0, 0.0, 8.0))
                                     .corner_radius(CornerRadius::new_all(7.0))
                                     .background(palette.input_bg)
                                     .border(
@@ -564,17 +579,30 @@ impl Component for WebChatSettingsGroup {
                                     )
                                     .main_align(Alignment::center())
                                     .child(
-                                        Input::new(custom_url)
-                                            .flat()
-                                            .compact()
+                                        TextField::new(custom_url)
                                             .placeholder("https://chat.example.org")
                                             .width(Size::fill())
+                                            .padding(Gaps::new(0.0, 2.0, 0.0, 2.0))
                                             .background(Color::TRANSPARENT)
                                             .focus_background(Color::TRANSPARENT)
-                                            .border_fill(Color::TRANSPARENT)
-                                            .focus_border_fill(Color::TRANSPARENT)
                                             .color(theme.color(ThemeRole::Text))
-                                            .placeholder_color(theme.color(ThemeRole::TextMuted)),
+                                            .placeholder_color(theme.color(ThemeRole::TextMuted))
+                                            .on_submit({
+                                                let core_submit = core_add.clone();
+                                                move |raw_url: String| {
+                                                    let url = raw_url.trim().to_string();
+                                                    let name_raw = custom_name.peek().trim().to_string();
+                                                    if !url.is_empty() {
+                                                        let name = (!name_raw.is_empty()).then_some(name_raw);
+                                                        if core_submit
+                                                            .invoke_or_log(Command::WebChatAddSite { name, url })
+                                                        {
+                                                            custom_name.set(String::new());
+                                                            custom_url.set(String::new());
+                                                        }
+                                                    }
+                                                }
+                                            }),
                                     ),
                             )
                             .child(
@@ -618,7 +646,7 @@ impl Component for WebChatSiteRow {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let palette = SettingsPalette::for_scheme(theme.scheme);
-        let mut hovered = use_state(|| false);
+        let feedback = use_interactive_feedback(true);
         let on_select = self.on_select.clone();
         let on_remove = self.on_remove.clone();
         let dot_col = Rgba::from_hex(&self.site.accent_hex)
@@ -629,18 +657,14 @@ impl Component for WebChatSiteRow {
             .width(Size::fill())
             .padding(Gaps::new(7.0, 10.0, 7.0, 10.0))
             .corner_radius(CornerRadius::new_all(8.0))
-            .background(if *hovered.read() {
-                palette.row_hover_bg
-            } else {
-                Color::TRANSPARENT
-            })
+            .background(feedback.background(Color::TRANSPARENT, palette.row_hover_bg, palette.row_hover_bg))
             .direction(Direction::Horizontal)
             .content(Content::Flex)
             .main_align(Alignment::SpaceBetween)
             .cross_align(Alignment::center())
             .spacing(10.0)
-            .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
             .child(
                 rect()
                     .width(Size::flex(1.0))

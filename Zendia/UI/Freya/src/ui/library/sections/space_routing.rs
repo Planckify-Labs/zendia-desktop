@@ -10,8 +10,10 @@
 use crate::ui::chrome::layout::ChromePalette;
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
+use crate::ui::kit::list_nav::scroll_item_into_view;
 use crate::ui::library::nav::{LibraryCursorRing, LibraryNavLayout, LibraryNavRow, use_library_nav};
 use crate::ui::library::search::LibrarySearchBar;
+use crate::ui::library::try_use_library_state;
 use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedScheme, Rgba, ThemeRole, use_theme};
 use freya::prelude::*;
 use zendia_browser_core::commands::Command;
@@ -21,8 +23,8 @@ use zendia_browser_core::space_routing::{
     RouteMatchType, RouteTarget, SpaceRouteId, SpaceRouteRule, filter_rules, validate_pattern,
 };
 
-/// Width of this section's body next to the rail.
-pub const WIDTH: f32 = 420.0;
+/// Width of this section's body next to the rail (Zen's `418px - 110px`).
+pub const WIDTH: f32 = 308.0;
 
 const PILL_RADIUS: f32 = 12.0;
 
@@ -164,6 +166,11 @@ impl Component for SpaceRoutingSection {
             search_query: fallback_query,
             open_picker: fallback_picker,
         });
+        let library = try_use_library_state();
+        let mut scroll_controller = use_scroll_controller(ScrollConfig::default);
+        let mut viewport_height = use_state(|| 420.0f32);
+        let mut last_scrolled_cursor = use_state(|| None::<String>);
+        let mut handled_escape_seq = use_state(|| 0u64);
 
         let (spaces, settings) = {
             let model = core.model().read();
@@ -173,6 +180,20 @@ impl Component for SpaceRoutingSection {
         let query_text = routing_state.search_query.read().clone();
         let active_draft = routing_state.draft.read().clone();
         let active_picker = *routing_state.open_picker.read();
+
+        if let Some(lib) = library {
+            let mut subview_open = lib.nav.subview_open;
+            subview_open.set_if_modified(active_draft.is_some() || active_picker.is_some());
+            let esc_seq = *lib.nav.subview_escape_seq.read();
+            if esc_seq != *handled_escape_seq.peek() {
+                handled_escape_seq.set(esc_seq);
+                if active_picker.is_some() {
+                    routing_state.close_picker();
+                } else if active_draft.is_some() {
+                    routing_state.close_form();
+                }
+            }
+        }
 
         let filtered_rules: Vec<SpaceRouteRule> = filter_rules(&settings.rules, &spaces, &query_text)
             .into_iter()
@@ -194,6 +215,21 @@ impl Component for SpaceRoutingSection {
                 .collect()
         };
         let cursor_key = use_library_nav(LibrarySection::SpaceRouting, LibraryNavLayout::List, nav_rows);
+
+        if active_draft.is_none() && *last_scrolled_cursor.peek() != cursor_key {
+            last_scrolled_cursor.set(cursor_key.clone());
+            if let Some(target_key) = cursor_key.as_deref()
+                && let Some(idx) = filtered_rules
+                    .iter()
+                    .position(|r| format!("rule:{}", r.id.0) == target_key)
+            {
+                const ROW_H: f32 = 60.0;
+                let item_top = 4.0 + idx as f32 * (ROW_H + 2.0);
+                let content_height = 4.0 + filtered_rules.len() as f32 * (ROW_H + 2.0) + 10.0;
+                let vh = *viewport_height.peek();
+                scroll_item_into_view(&mut scroll_controller, item_top, ROW_H, vh, content_height);
+            }
+        }
 
         let is_filtered = !query_text.trim().is_empty();
         let total_rules = settings.rules.len();
@@ -254,27 +290,26 @@ impl Component for SpaceRoutingSection {
                 .height(Size::fill())
                 .content(Content::Flex)
                 .child(
-                    // Search header with shared LibrarySearchBar + New button.
-                    rect()
-                        .width(Size::fill())
-                        .padding(Gaps::new(6.0, 14.0, 4.0, 6.0))
-                        .spacing(8.0)
-                        .direction(Direction::Horizontal)
-                        .content(Content::Flex)
-                        .cross_align(Alignment::Center)
-                        .child(
-                            rect()
-                                .width(Size::flex(1.0))
-                                .child(LibrarySearchBar::new("Search routes", routing_state.search_query)),
-                        )
-                        .child(NewRouteButton { routing_state }),
+                    LibrarySearchBar::new("Search routes", routing_state.search_query)
+                        .trailing_action(NewRouteButton { routing_state }),
                 )
                 .child(
-                    ScrollView::new()
+                    rect()
                         .width(Size::fill())
                         .height(Size::flex(1.0))
-                        .show_scrollbar(false)
-                        .child(list_content),
+                        .on_sized(move |e: Event<SizedEventData>| {
+                            let h = e.area.height();
+                            if (*viewport_height.peek() - h).abs() > 1.0 {
+                                viewport_height.set(h);
+                            }
+                        })
+                        .child(
+                            ScrollView::new_controlled(scroll_controller)
+                                .width(Size::fill())
+                                .height(Size::fill())
+                                .show_scrollbar(false)
+                                .child(list_content),
+                        ),
                 )
                 .child(
                     // Default external links footer.
@@ -516,7 +551,7 @@ impl Component for SpaceRouteRow {
             .direction(Direction::Horizontal)
             .content(Content::Flex)
             .cross_align(Alignment::Center)
-            .corner_radius(CornerRadius::new_all(14.0))
+            .corner_radius(CornerRadius::new_all(16.0))
             .background(if hovered() {
                 palette.tab_hover_bg
             } else {
@@ -592,7 +627,7 @@ impl Component for SpaceRouteRow {
                     .maybe_child(delete_button),
             );
 
-        LibraryCursorRing::new(self.focused, row).corner_radius(14.0)
+        LibraryCursorRing::new(self.focused, row).corner_radius(16.0)
     }
 
     fn render_key(&self) -> DiffKey {

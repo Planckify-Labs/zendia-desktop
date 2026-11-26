@@ -22,6 +22,8 @@ pub use state::{
 };
 
 use crate::ui::chrome::about::AboutDialogOverlay;
+use crate::ui::chrome::menus::state::compute_popup_origin_above_or_below;
+use crate::ui::kit::PopupPresence;
 use crate::ui::page::PageSurfaceContext;
 use freya::prelude::*;
 use hub_protocol::{Gfx_IntPoint, Web_HTML_SelectItem, WebView_ContextMenuKind, WebView_ContextMenuRequest};
@@ -29,14 +31,15 @@ use zendia_browser_core::BrowserCore;
 use zendia_browser_core::menus::{
     MediaMenuContext, PageContextMenuKind, PageContextMenuRequest, SelectDropdownItem, SelectOption,
     build_folder_context_menu, build_page_context_menu, build_space_context_menu, build_tab_context_menu,
+    builtin_create_new_menu_items,
 };
 use zendia_browser_core::model::{BrowserModel, FolderId, SpaceId, TabId};
 use zendia_keymap::KeyTable;
 
 /// Single overlay host placed once at the window root above all chrome and page surfaces.
 ///
-/// Renders whichever of the application menu, context menu, `<select>` dropdown, or About dialog is currently open in
-/// [`MenuViewState`].
+/// Renders whichever of the application menu, Create New popup, context menu, `<select>` dropdown, or About dialog is
+/// currently open in [`MenuViewState`].
 #[derive(Clone, PartialEq)]
 pub struct MenuLayer;
 
@@ -45,9 +48,50 @@ impl Component for MenuLayer {
         rect()
             .child(AppMenuOverlay)
             .child(ExtensionsMenuOverlay)
+            .child(CreateNewOverlay)
             .child(ContextMenuOverlay)
             .child(SelectDropdownOverlay)
             .child(AboutDialogOverlay)
+    }
+}
+
+/// Anchored Create New popup (`#zenCreateNewPopup`) opened by the sidebar bottom `+` button (`TB-03`).
+#[derive(Clone, PartialEq)]
+struct CreateNewOverlay;
+
+impl Component for CreateNewOverlay {
+    fn render(&self) -> impl IntoElement {
+        let menu_state = use_menu_state();
+        let key_table = use_hook(KeyTable::standard);
+        let is_open = *menu_state.create_new_open.read();
+        let anchor = *menu_state.create_new_anchor.read();
+        let mut open_seq = use_state(|| 0u64);
+        let mut was_open = use_state(|| is_open);
+        if *was_open.peek() != is_open {
+            was_open.set(is_open);
+            if is_open {
+                let next = open_seq.peek().wrapping_add(1);
+                open_seq.set(next);
+            }
+        }
+
+        let items = builtin_create_new_menu_items(Some(&key_table));
+        let root_size = *Platform::get().current_window().root_size.read();
+        let window_size = (root_size.width.max(320.0), root_size.height.max(240.0));
+        let popup_size = (224.0, 126.0);
+        let origin = compute_popup_origin_above_or_below(anchor, popup_size, window_size);
+        let seq = *open_seq.read();
+
+        PopupPresence::anchored(is_open, origin)
+            .open_seq(seq)
+            .on_backdrop_mouse_down(move |_| menu_state.close_create_new())
+            .on_escape(move |_| menu_state.close_create_new())
+            .child(
+                ContextMenuCard::new(items)
+                    .window_size(window_size)
+                    .capture_global_keys(is_open)
+                    .on_close(move |_| menu_state.close_create_new()),
+            )
     }
 }
 
@@ -258,6 +302,41 @@ pub fn open_space_context_menu(
 ) {
     let key_table = KeyTable::standard();
     let items = build_space_context_menu(model, space_id, Some(&key_table));
+    if !items.is_empty() {
+        menu_state.open_context_menu(OpenContextMenu {
+            position,
+            items,
+            tab_id: None,
+            open_submenu: None,
+        });
+    }
+}
+
+/// Opens the sidebar/toolbar empty-space context menu at `position` (Compact Mode options, Tabs on Right, New Tab/Folder/Space).
+pub fn open_sidebar_context_menu(menu_state: &MenuViewState, model: &BrowserModel, position: (f32, f32)) {
+    let key_table = KeyTable::standard();
+    let items = zendia_browser_core::shell_layout::build_sidebar_context_menu(model, Some(&key_table));
+    if !items.is_empty() {
+        menu_state.open_context_menu(OpenContextMenu {
+            position,
+            items,
+            tab_id: None,
+            open_submenu: None,
+        });
+    }
+}
+
+/// Opens the right-click context menu for an extension button (Pin/Unpin from Toolbar, Manage Extension, Remove Extension).
+pub fn open_extension_context_menu(
+    menu_state: &MenuViewState,
+    model: &BrowserModel,
+    extension_id: &str,
+    position: (f32, f32),
+) {
+    let Some(ext) = model.extensions.iter().find(|e| e.id.as_str() == extension_id) else {
+        return;
+    };
+    let items = zendia_browser_core::modules::build_extension_context_menu(ext);
     if !items.is_empty() {
         menu_state.open_context_menu(OpenContextMenu {
             position,

@@ -16,11 +16,11 @@ use crate::ui::agent::model_card::{AgentModelCard, short_model_name};
 use crate::ui::agent::motion::{WorkingRing, WorkingRow};
 use crate::ui::agent::ui_view::{AgentDeclaredPageCard, AgentTableCard};
 use crate::ui::agent::{
-    agent_badge_emblem, agent_input_colors, agent_input_layout, agent_logo_element, chevron_down_icon,
-    chevron_right_icon, chevron_up_icon, paperclip_icon,
+    agent_badge_emblem, agent_input_colors, agent_logo_element, chevron_down_icon, chevron_right_icon, chevron_up_icon,
+    paperclip_icon,
 };
 use crate::ui::core_view::use_core;
-use crate::ui::kit::Icon;
+use crate::ui::kit::{Icon, IconButton, KitTooltip, TextField};
 use crate::ui::panels::{
     DictationState, DockLayoutControls, ResolvedDockPanel, active_agent_accent, try_use_dock_state,
 };
@@ -68,6 +68,7 @@ impl Component for AgentPanel {
         let core = use_core();
         let theme = use_theme();
         let dock_state = try_use_dock_state();
+        let page_ctx = try_consume_context::<crate::ui::page::PageSurfaceContext>();
         let scroll_controller = use_scroll_controller(ScrollConfig::default);
         let composer_a11y_id = use_a11y();
         let fallback_composer = use_state(String::new);
@@ -353,67 +354,47 @@ impl Component for AgentPanel {
                     .spacing(3.0)
                     .maybe_child(captcha_finding.as_ref().map(|_| {
                         let tab_for_cap = active_tab_id;
-                        rect()
-                            .a11y_role(AccessibilityRole::Button)
-                            .a11y_alt("Summarize CAPTCHA on this page")
-                            .width(Size::px(24.0))
-                            .height(Size::px(24.0))
-                            .corner_radius(CornerRadius::new_all(6.0))
-                            .background(theme.rgba(ThemeRole::Warning).with_alpha(0.18).to_color())
-                            .center()
-                            .cursor(CursorIcon::Pointer)
+                        IconButton::new("captcha", "Summarize CAPTCHA on this page")
+                            .tooltip("Summarize CAPTCHA on this page")
+                            .size(24.0)
+                            .icon_size(12.5)
+                            .role(ThemeRole::Warning)
                             .on_press(move |e: Event<PressEventData>| {
                                 e.stop_propagation();
                                 core_captcha.invoke_or_log(Command::AgentSummarizeCaptcha { tab_id: tab_for_cap });
                             })
-                            .child(Icon::new("captcha").size(12.5).role(ThemeRole::Warning))
                     }))
                     .child(
-                        rect()
-                            .a11y_role(AccessibilityRole::Button)
-                            .a11y_alt("All agents")
-                            .width(Size::px(24.0))
-                            .height(Size::px(24.0))
-                            .corner_radius(CornerRadius::new_all(6.0))
-                            .center()
-                            .cursor(CursorIcon::Pointer)
+                        IconButton::new("layers", "All agents")
+                            .tooltip("All agents")
+                            .size(24.0)
+                            .icon_size(12.5)
                             .on_press(move |e: Event<PressEventData>| {
                                 e.stop_propagation();
                                 core_all_agents.invoke_or_log(Command::AgentList);
-                            })
-                            .child(Icon::new("layers").size(12.5).role(ThemeRole::TextMuted)),
+                            }),
                     )
                     .child(
-                        rect()
-                            .a11y_role(AccessibilityRole::Button)
-                            .a11y_alt("New chat")
-                            .width(Size::px(24.0))
-                            .height(Size::px(24.0))
-                            .corner_radius(CornerRadius::new_all(6.0))
-                            .center()
-                            .cursor(CursorIcon::Pointer)
+                        IconButton::new("plus", "New chat")
+                            .tooltip("New chat")
+                            .size(24.0)
+                            .icon_size(12.5)
                             .on_press(move |e: Event<PressEventData>| {
                                 e.stop_propagation();
                                 core_new.invoke_or_log(Command::AgentNew { tab_id: active_tab_id });
-                            })
-                            .child(Icon::new("plus").size(12.5).role(ThemeRole::TextMuted)),
+                            }),
                     )
                     .child(
-                        rect()
-                            .a11y_role(AccessibilityRole::Button)
-                            .a11y_alt("Open web chat")
-                            .width(Size::px(24.0))
-                            .height(Size::px(24.0))
-                            .corner_radius(CornerRadius::new_all(6.0))
-                            .center()
-                            .cursor(CursorIcon::Pointer)
+                        IconButton::new("webchat", "Open web chat")
+                            .tooltip("Open web chat")
+                            .size(24.0)
+                            .icon_size(12.5)
                             .on_press(move |e: Event<PressEventData>| {
                                 e.stop_propagation();
                                 core_webchat.invoke_or_log(Command::PanelToggle {
                                     panel_id: SidePanelId::new(WEBCHAT_PANEL_ID),
                                 });
-                            })
-                            .child(Icon::new("webchat").size(12.5).role(ThemeRole::TextMuted)),
+                            }),
                     )
                     .child(DockLayoutControls {
                         panel_id: self.resolved.panel_id.clone(),
@@ -422,21 +403,17 @@ impl Component for AgentPanel {
                         accent: theme_accent,
                     })
                     .child(
-                        rect()
-                            .a11y_role(AccessibilityRole::Button)
-                            .a11y_alt("Close agent panel")
-                            .width(Size::px(24.0))
-                            .height(Size::px(24.0))
-                            .corner_radius(CornerRadius::new_all(6.0))
-                            .center()
-                            .cursor(CursorIcon::Pointer)
+                        IconButton::new("close", "Close agent panel")
+                            .tooltip("Close")
+                            .shortcut("Esc")
+                            .size(24.0)
+                            .icon_size(12.0)
                             .on_press(move |e: Event<PressEventData>| {
                                 e.stop_propagation();
                                 core_close.invoke_or_log(Command::PanelClose {
                                     panel_id: SidePanelId::new(AGENT_PANEL_ID),
                                 });
-                            })
-                            .child(Icon::new("close").size(12.0).role(ThemeRole::TextMuted)),
+                            }),
                     ),
             );
 
@@ -809,21 +786,33 @@ impl Component for AgentPanel {
             format!("Ask {active_agent_name} to do something on this tab")
         };
 
-        // Note: Freya's `Input::on_pre_key_down` returns `true` to let `Input` process the key,
-        // and `false` to consume/skip it.
+        // `TextField` handles Ctrl+W/U/H natively and stops editing chords from leaking to browser shortcuts.
+        let composer_colors = agent_input_colors(&theme, true);
+        let pref_color = |pref: Option<Preference<Color>>, fallback: Color| match pref {
+            Some(Preference::Specific(c)) => c,
+            _ => fallback,
+        };
         let composer_input = rect().width(Size::fill()).font_size(13.0).child(
-            Input::new(composer_text)
+            TextField::new(composer_text)
                 .a11y_id(composer_a11y_id)
+                .auto_focus(true)
                 .multiline(true)
-                .compact()
                 .placeholder(placeholder_str)
                 .width(Size::fill())
                 .height(Size::px(36.0))
-                .theme_colors(agent_input_colors(&theme, true))
-                .theme_layout(agent_input_layout(Gaps::new(2.0, 0.0, 2.0, 0.0), 4.0))
+                .color(pref_color(composer_colors.color, theme.color(ThemeRole::Text)))
+                .placeholder_color(pref_color(
+                    composer_colors.placeholder_color,
+                    theme.color(ThemeRole::TextMuted),
+                ))
+                .padding(Gaps::new(2.0, 0.0, 2.0, 0.0))
+                .corner_radius(CornerRadius::new_all(4.0))
                 .on_pre_key_down(move |e: Event<KeyboardEventData>| {
                     let shift = e.modifiers.contains(Modifiers::SHIFT);
                     let ctrl = e.modifiers.contains(Modifiers::CONTROL);
+                    let alt = e.modifiers.contains(Modifiers::ALT);
+                    let meta = e.modifiers.contains(Modifiers::META);
+                    let plain = !ctrl && !alt && !meta;
                     let empty = composer_text.peek().trim().is_empty();
 
                     match &e.key {
@@ -833,13 +822,14 @@ impl Component for AgentPanel {
                             send_for_key();
                             false
                         }
-                        Key::Named(NamedKey::Tab) if empty => {
+                        Key::Named(NamedKey::Tab) if plain && !is_working => {
                             e.stop_propagation();
                             e.prevent_default();
-                            core_key.invoke_or_log(Command::AgentCycle { direction: 1 });
+                            let direction = if shift { -1 } else { 1 };
+                            core_key.invoke_or_log(Command::AgentCycle { direction });
                             false
                         }
-                        Key::Character(ch) if empty && !ctrl && pending_confirm.is_some() => {
+                        Key::Character(ch) if empty && plain && pending_confirm.is_some() => {
                             let lower = ch.to_ascii_lowercase();
                             if lower == "y" || lower == "n" {
                                 e.stop_propagation();
@@ -856,7 +846,7 @@ impl Component for AgentPanel {
                                 true
                             }
                         }
-                        Key::Character(ch) if ctrl && ch.eq_ignore_ascii_case("c") && is_working => {
+                        Key::Character(ch) if ctrl && !alt && !meta && ch.eq_ignore_ascii_case("c") && is_working => {
                             e.stop_propagation();
                             e.prevent_default();
                             core_key.invoke_or_log(Command::AgentStop {
@@ -878,15 +868,24 @@ impl Component for AgentPanel {
                                 }
                                 if eff_layout == SidePanelLayout::Split {
                                     ds.set_focus(None);
+                                    if let Some(ctx) = &page_ctx {
+                                        ctx.request_focus_active_surface();
+                                    }
                                     return false;
                                 }
                             }
                             core_key.invoke_or_log(Command::PanelClose {
                                 panel_id: SidePanelId::new(AGENT_PANEL_ID),
                             });
+                            if let Some(ctx) = &page_ctx {
+                                ctx.request_focus_active_surface();
+                            }
                             false
                         }
-                        _ => true,
+                        _ => {
+                            e.stop_propagation();
+                            true
+                        }
                     }
                 }),
         );
@@ -943,29 +942,31 @@ impl Component for AgentPanel {
                             .main_align(Alignment::SpaceBetween)
                             .spacing(6.0)
                             .child(
-                                rect()
-                                    .a11y_role(AccessibilityRole::Button)
-                                    .a11y_alt("Attach file")
-                                    .width(Size::px(28.0))
-                                    .height(Size::px(28.0))
-                                    .corner_radius(CornerRadius::new_all(999.0))
-                                    .center()
-                                    .cursor(CursorIcon::Pointer)
-                                    .on_press(move |e: Event<PressEventData>| {
-                                        e.stop_propagation();
-                                        if let Some(mut ds) = dock_state {
-                                            let mut files = ds.staged_attachments.peek().clone();
-                                            let next_idx = files.len() + 1;
-                                            files.push(InstructionAttachment {
-                                                name: format!("capture-{next_idx}.png"),
-                                                path: format!("/tmp/capture-{next_idx}.png"),
-                                                size_bytes: 184_320,
-                                                kind: AttachmentKind::Image,
-                                            });
-                                            ds.staged_attachments.set(files);
-                                        }
-                                    })
-                                    .child(paperclip_icon(15.0, theme.color(ThemeRole::TextMuted))),
+                                KitTooltip::new("Attach file").child(
+                                    rect()
+                                        .a11y_role(AccessibilityRole::Button)
+                                        .a11y_alt("Attach file")
+                                        .width(Size::px(28.0))
+                                        .height(Size::px(28.0))
+                                        .corner_radius(CornerRadius::new_all(999.0))
+                                        .center()
+                                        .cursor(CursorIcon::Pointer)
+                                        .on_press(move |e: Event<PressEventData>| {
+                                            e.stop_propagation();
+                                            if let Some(mut ds) = dock_state {
+                                                let mut files = ds.staged_attachments.peek().clone();
+                                                let next_idx = files.len() + 1;
+                                                files.push(InstructionAttachment {
+                                                    name: format!("capture-{next_idx}.png"),
+                                                    path: format!("/tmp/capture-{next_idx}.png"),
+                                                    size_bytes: 184_320,
+                                                    kind: AttachmentKind::Image,
+                                                });
+                                                ds.staged_attachments.set(files);
+                                            }
+                                        })
+                                        .child(paperclip_icon(15.0, theme.color(ThemeRole::TextMuted))),
+                                ),
                             )
                             .child(
                                 rect()

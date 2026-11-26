@@ -8,6 +8,7 @@
 
 pub mod about;
 pub mod address_bar;
+pub mod fade_text;
 pub mod layout;
 pub mod menus;
 pub mod sidebar;

@@ -154,6 +154,7 @@ impl StubBackend {
                 let layout = {
                     let mut state = self.lock();
                     state.model.layout.compact_hide = hide;
+                    state.model.layout.normalize_compact_state();
                     state.model.layout.clone()
                 };
                 self.bus.publish(Event::LayoutSettingsChanged { layout });
@@ -198,6 +199,17 @@ impl StubBackend {
 
     /// Shows a toast and publishes it, along with any toasts it pushed out.
     pub fn show_toast(&self, message: String, action: Option<ToastAction>, timeout_ms: Option<u64>) -> ToastId {
+        self.show_toast_with_description(message, None, action, timeout_ms)
+    }
+
+    /// Shows a toast with an optional second-line description and publishes it (reusing an active duplicate).
+    pub fn show_toast_with_description(
+        &self,
+        message: String,
+        description: Option<String>,
+        action: Option<ToastAction>,
+        timeout_ms: Option<u64>,
+    ) -> ToastId {
         let (toast, dropped) = {
             let mut state = self.lock();
             let id = ToastId(
@@ -215,11 +227,12 @@ impl StubBackend {
             let toast = Toast {
                 id,
                 message,
+                description,
                 action,
                 timeout_ms: timeout_ms.unwrap_or(DEFAULT_TOAST_TIMEOUT_MS),
+                bounce_seq: 0,
             };
-            let dropped = toasts::push_toast(&mut state.model.toasts, toast.clone());
-            (toast, dropped)
+            toasts::push_or_reuse_toast(&mut state.model.toasts, toast)
         };
         let id = toast.id;
         for toast_id in dropped {
@@ -259,12 +272,19 @@ impl StubBackend {
         anchor: TabId,
         tab_source: Option<&Arc<dyn TabSource>>,
     ) -> Result<TabId, CommandError> {
-        self.lock().last_opened_tab = None;
-        match tab_source {
-            Some(source) => source.new_tab(url, Some(anchor), false)?,
-            None => self.handle_stub_tab_new(url.map(str::to_string), Some(anchor), false)?,
+        {
+            let mut state = self.lock();
+            state.last_opened_tab = None;
+            state.suppress_bg_tab_toast = true;
         }
-        self.lock()
+        let open_result = match tab_source {
+            Some(source) => source.new_tab(url, Some(anchor), false),
+            None => self.handle_stub_tab_new(url.map(str::to_string), Some(anchor), false),
+        };
+        let mut state = self.lock();
+        state.suppress_bg_tab_toast = false;
+        open_result?;
+        state
             .last_opened_tab
             .take()
             .ok_or_else(|| CommandError::Failed(format!("{command}: the engine opened no tab")))
@@ -773,8 +793,47 @@ mod tests {
             hide: CompactHide::Toolbar,
         })
         .unwrap();
-        let layout = core.model().layout;
-        assert!(layout.compact_mode && layout.compact_hides_toolbar() && !layout.compact_hides_sidebar());
+        // In Single Toolbar layout there is no top toolbar, so compact mode still hides the sidebar.
+        let single_layout = core.model().layout;
+        assert!(
+            single_layout.compact_mode
+                && single_layout.compact_hides_sidebar()
+                && !single_layout.compact_hides_toolbar()
+        );
+
+        // Switching to Multiple Toolbars lets CompactHide::Toolbar hide only the top toolbar.
+        core.invoke(Command::LayoutSetToolbarLayout {
+            layout: crate::model::ToolbarLayout::Multiple,
+        })
+        .unwrap();
+        let multi_layout = core.model().layout;
+        assert!(
+            multi_layout.compact_mode && multi_layout.compact_hides_toolbar() && !multi_layout.compact_hides_sidebar()
+        );
+    }
+
+    #[test]
+    fn background_tab_in_compact_mode_shows_toast() {
+        let core = StubBackend::new();
+        core.invoke(Command::LayoutToggleCompactMode).unwrap();
+        core.invoke(Command::TabNew {
+            url: Some("https://example.org/bg".to_string()),
+            after: None,
+            activate: false,
+        })
+        .unwrap();
+        let toasts = core.model().toasts;
+        assert_eq!(
+            toasts.last().map(|t| t.message.as_str()),
+            Some(crate::toasts::messages::BACKGROUND_TAB_OPENED)
+        );
+        assert_eq!(
+            toasts
+                .last()
+                .and_then(|t| t.action.as_ref())
+                .map(|a| a.command.as_str()),
+            Some("tab.activate")
+        );
     }
 
     #[test]

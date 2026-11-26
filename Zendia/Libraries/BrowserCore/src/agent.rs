@@ -18,16 +18,18 @@ use zendia_module_api::ui::UiNode;
 pub const AGENT_PANEL_ID: &str = "zendia.agent";
 /// Built-in side panel identifier for Zendia's cross-window agents roster panel.
 pub const AGENTS_PANEL_ID: &str = "zendia.agents";
-/// Default width of the agents roster side panel (`340 px`).
+/// Default width of the agents roster side panel (`340 px`, matching `ZendiaAgentsPanel.sys.mjs`).
 pub const AGENTS_PANEL_DEFAULT_WIDTH: f32 = 340.0;
-/// Minimum logical width of the agents roster side panel (`320 px`).
-pub const AGENTS_PANEL_MIN_WIDTH: f32 = 320.0;
+/// Minimum logical width of the agents roster side panel (`280 px`, matching `ZendiaAgentsPanel.sys.mjs`).
+pub const AGENTS_PANEL_MIN_WIDTH: f32 = 280.0;
 /// Default and minimum logical width of the agent side panel (`420 px`).
 pub const PANEL_MIN_WIDTH: f32 = 420.0;
 /// Maximum logical width of a side panel (`820 px`).
 pub const PANEL_MAX_WIDTH: f32 = 820.0;
 /// Default width of the agent side panel (`420 px`).
 pub const PANEL_DEFAULT_WIDTH: f32 = 420.0;
+/// Default width of the web chat side panel (`480 px`, matching `ZendiaWebChatDock.sys.mjs`).
+pub const WEBCHAT_PANEL_DEFAULT_WIDTH: f32 = 480.0;
 /// Minimum usable width a page (or narrowest split pane) must keep beside a split-docked side panel.
 pub const MIN_PAGE_PANE_WIDTH: f32 = 420.0;
 /// Inset around a floating side panel card (`10 px`).
@@ -73,14 +75,28 @@ impl SidePanelPrefs {
         }
     }
 
+    pub fn default_width_for(panel_id: &str) -> f32 {
+        crate::shell_layout::builtin_panel_default_width(panel_id)
+    }
+
+    pub fn default_for(panel_id: &str) -> Self {
+        Self {
+            width: Self::default_width_for(panel_id),
+            side: if panel_id == AGENTS_PANEL_ID {
+                SidePanelSide::Left
+            } else {
+                SidePanelSide::Right
+            },
+            ..Self::default()
+        }
+    }
+
     pub fn clamp_width_for(panel_id: &str, width: f32) -> f32 {
         let min_w = Self::min_width_for(panel_id);
         if width.is_finite() {
             width.max(min_w)
-        } else if panel_id == AGENTS_PANEL_ID {
-            AGENTS_PANEL_DEFAULT_WIDTH
         } else {
-            PANEL_DEFAULT_WIDTH
+            Self::default_width_for(panel_id)
         }
     }
 }
@@ -238,7 +254,14 @@ pub fn resolve_stacked_panels(
                 SidePanelSide::Left => 0,
                 SidePanelSide::Right => 1,
             };
-            let offset = split_extents[slot] + floating_extent[slot];
+            let max_offset = if stage_width.is_finite() && stage_width > 0.0 {
+                // Float and Slide share identical inset geometry (user decision).
+                let inset = 2.0 * PANEL_FLOAT_INSET;
+                (stage_width - layout.width - inset).max(0.0)
+            } else {
+                f32::INFINITY
+            };
+            let offset = (split_extents[slot] + floating_extent[slot]).min(max_offset);
             floating_extent[slot] += layout.width + PANEL_FLOAT_INSET;
             StackedPanelLayout { layout, offset }
         })
@@ -897,14 +920,17 @@ pub fn agents_button_badge(model: &crate::model::BrowserModel) -> Option<crate::
         return None;
     }
     let counts = RosterCounts::from_conversations(&model.conversations);
+    let format_count = |n: usize| {
+        if n > 9 { "9+".to_string() } else { n.to_string() }
+    };
     if counts.needs_you > 0 {
         Some(crate::contributions::ToolbarBadge {
-            text: counts.needs_you.to_string(),
+            text: format_count(counts.needs_you),
             tone: crate::contributions::BadgeTone::Warning,
         })
     } else if counts.working + counts.finished > 0 {
         Some(crate::contributions::ToolbarBadge {
-            text: (counts.working + counts.finished).to_string(),
+            text: format_count(counts.working + counts.finished),
             tone: crate::contributions::BadgeTone::Accent,
         })
     } else {
@@ -1015,6 +1041,106 @@ mod tests {
         let narrow = resolve_panel_layout(prefs, 780.0, 1.0);
         assert_eq!(narrow.effective_layout, SidePanelLayout::Float);
         assert!(narrow.fell_back);
+    }
+
+    #[test]
+    fn float_and_slide_resolve_to_identical_width_max_width_and_offset() {
+        // Single panel across roomy and narrow stages (including webchat and agents widths).
+        for stage in [1600.0_f32, 900.0, 440.0] {
+            for (width, min_w) in [
+                (PANEL_DEFAULT_WIDTH, PANEL_MIN_WIDTH),
+                (WEBCHAT_PANEL_DEFAULT_WIDTH, PANEL_MIN_WIDTH),
+                (AGENTS_PANEL_DEFAULT_WIDTH, AGENTS_PANEL_MIN_WIDTH),
+            ] {
+                for side in [SidePanelSide::Left, SidePanelSide::Right] {
+                    let float_p = (
+                        SidePanelPrefs {
+                            layout: SidePanelLayout::Float,
+                            side,
+                            width,
+                            ..SidePanelPrefs::default()
+                        },
+                        min_w,
+                    );
+                    let slide_p = (
+                        SidePanelPrefs {
+                            layout: SidePanelLayout::Slide,
+                            side,
+                            width,
+                            ..SidePanelPrefs::default()
+                        },
+                        min_w,
+                    );
+                    let f = resolve_stacked_panels(&[float_p], stage, 1.0);
+                    let s = resolve_stacked_panels(&[slide_p], stage, 1.0);
+                    assert_eq!(f[0].layout.width, s[0].layout.width);
+                    assert_eq!(f[0].layout.max_width, s[0].layout.max_width);
+                    assert_eq!(f[0].offset, s[0].offset);
+                }
+            }
+        }
+
+        // Split falling back to Float vs Slide resolves to the exact same geometry.
+        let split_to_float = SidePanelPrefs {
+            layout: SidePanelLayout::Split,
+            side: SidePanelSide::Right,
+            width: 480.0,
+            split_fallback: SidePanelLayout::Float,
+        };
+        let split_to_slide = SidePanelPrefs {
+            split_fallback: SidePanelLayout::Slide,
+            ..split_to_float
+        };
+        let rf = resolve_panel_layout(split_to_float, 780.0, 1.0);
+        let rs = resolve_panel_layout(split_to_slide, 780.0, 1.0);
+        assert!(rf.fell_back && rs.fell_back);
+        assert_eq!(rf.effective_layout, SidePanelLayout::Float);
+        assert_eq!(rs.effective_layout, SidePanelLayout::Slide);
+        assert_eq!(rf.width, rs.width);
+        assert_eq!(rf.max_width, rs.max_width);
+
+        // Multiple stacked panels on the same side (both roomy and narrow where max_offset clamps).
+        for stage in [1600.0_f32, 900.0] {
+            let float_stack = resolve_stacked_panels(
+                &[
+                    panel(SidePanelSide::Right, SidePanelLayout::Float, 480.0),
+                    panel(SidePanelSide::Right, SidePanelLayout::Float, 420.0),
+                    (
+                        SidePanelPrefs {
+                            side: SidePanelSide::Left,
+                            layout: SidePanelLayout::Float,
+                            width: AGENTS_PANEL_DEFAULT_WIDTH,
+                            ..SidePanelPrefs::default()
+                        },
+                        AGENTS_PANEL_MIN_WIDTH,
+                    ),
+                ],
+                stage,
+                1.0,
+            );
+            let slide_stack = resolve_stacked_panels(
+                &[
+                    panel(SidePanelSide::Right, SidePanelLayout::Slide, 480.0),
+                    panel(SidePanelSide::Right, SidePanelLayout::Slide, 420.0),
+                    (
+                        SidePanelPrefs {
+                            side: SidePanelSide::Left,
+                            layout: SidePanelLayout::Slide,
+                            width: AGENTS_PANEL_DEFAULT_WIDTH,
+                            ..SidePanelPrefs::default()
+                        },
+                        AGENTS_PANEL_MIN_WIDTH,
+                    ),
+                ],
+                stage,
+                1.0,
+            );
+            for (f, s) in float_stack.iter().zip(&slide_stack) {
+                assert_eq!(f.layout.width, s.layout.width);
+                assert_eq!(f.layout.max_width, s.layout.max_width);
+                assert_eq!(f.offset, s.offset);
+            }
+        }
     }
 
     #[test]

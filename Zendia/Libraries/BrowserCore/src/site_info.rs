@@ -243,8 +243,21 @@ pub struct SiteExtension {
     pub icon: String,
     pub enabled: bool,
     pub has_site_access: bool,
+    pub badge_text: Option<String>,
     pub command: String,
     pub source: ContributionSource,
+}
+
+impl SiteExtension {
+    /// Returns the underlying [`ExtensionId`](crate::modules::ExtensionId) when backed by an extension contribution.
+    pub fn extension_id(&self) -> Option<crate::modules::ExtensionId> {
+        match &self.source {
+            ContributionSource::Extension { extension_id } => {
+                Some(crate::modules::ExtensionId::new(extension_id.clone()))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Security, permissions, tracking protection, and site data state for a single site origin.
@@ -257,6 +270,7 @@ pub struct SiteInfo {
     pub permissions: Vec<SitePermission>,
     pub data: SiteDataSummary,
     pub bookmarked: bool,
+    pub reader_mode_available: bool,
 }
 
 impl SiteInfo {
@@ -273,6 +287,7 @@ impl SiteInfo {
             permissions: Vec::new(),
             data: SiteDataSummary::default(),
             bookmarked: false,
+            reader_mode_available: false,
         }
     }
 

@@ -5,18 +5,23 @@
  */
 
 //! Sidebar space creation form (`zen-workspace-creation`): title, subtitle, dashed icon picker button + name input,
-//! profile selector, Theme... button (opening the gradient generator), and Create Space / Cancel footer buttons.
+//! floating profile selector (`CRF-01`, `CRF-02`), Theme... button (opening the gradient generator), Create Space /
+//! Cancel footer buttons (`CRF-03`, `CRF-05`), and the searchable Emoji + 86-SVG Icon Picker (`ICO-01`, `ICO-02`).
 
 use crate::ui::chrome::layout::ChromePalette;
 use crate::ui::core_view::use_core;
-use crate::ui::kit::Icon;
+use crate::ui::kit::{Icon, KitTooltip, StaggeredRow, TextField};
+use crate::ui::spaces::icon_catalog::{filter_emojis, filter_svg_icons};
 use crate::ui::spaces::state::SpaceEditingState;
 use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedScheme, Rgba, ThemeRole, use_theme};
 use freya::engine::prelude::{Canvas, Paint, PaintStyle, PathEffect, RRect, Rect as SkRect, SkColor};
 use freya::prelude::*;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::space_appearance::SPACE_PROFILES;
-use zendia_browser_core::space_routing::SELECTABLE_SPACE_ICONS;
+
+fn is_emoji_glyph(icon: &str) -> bool {
+    !icon.is_empty() && !icon.is_ascii()
+}
 
 /// Full-height creation form mounted inside the sidebar in place of the tab list.
 #[derive(Clone, PartialEq)]
@@ -35,6 +40,7 @@ impl Component for SpaceCreationForm {
         let mut cancel_btn_hovered = use_state(|| false);
         let mut profile_btn_hovered = use_state(|| false);
         let mut icon_btn_area = use_state(|| (194.0f32, 224.0f32));
+        let mut profile_btn_area = use_state(|| (24.0f32, 290.0f32, 168.0f32));
         let mut theme_btn_area = use_state(|| (194.0f32, 300.0f32));
 
         let editing = self.state;
@@ -45,6 +51,14 @@ impl Component for SpaceCreationForm {
         let icon_picker_open = *editing.icon_picker_open.read();
         let profile_menu_open = *editing.profile_menu_open.read();
         let draft_dots = editing.draft_appearance.read().dots.clone();
+
+        // CRF-02: Show Profile row only when non-default containers/routing are configured (or a non-Default profile is chosen).
+        let show_profile_row = {
+            let model = core.model().read();
+            current_profile != "Default"
+                || model.space_appearances.values().any(|a| a.profile != "Default")
+                || !model.space_routing.rules.is_empty()
+        };
 
         let (field_bg, field_hover_bg, pill_bg, primary_disabled_bg, primary_disabled_fg, dashed_sk) =
             match theme.scheme {
@@ -112,6 +126,25 @@ impl Component for SpaceCreationForm {
             }
         });
 
+        let icon_glyph: Option<Element> = if is_emoji_glyph(&current_icon) {
+            Some(
+                label()
+                    .text(current_icon.clone())
+                    .font_size(14.0)
+                    .color(palette.text)
+                    .into_element(),
+            )
+        } else if !current_icon.is_empty() {
+            Some(
+                Icon::new(current_icon.clone())
+                    .size(14.0)
+                    .role(ThemeRole::Text)
+                    .into_element(),
+            )
+        } else {
+            None
+        };
+
         let icon_button = rect()
             .a11y_focusable(true)
             .a11y_role(AccessibilityRole::Button)
@@ -137,9 +170,7 @@ impl Component for SpaceCreationForm {
                 let mut prof = editing.profile_menu_open;
                 prof.set_if_modified(false);
             })
-            .maybe_child(
-                (!current_icon.is_empty()).then(|| Icon::new(current_icon.clone()).size(14.0).role(ThemeRole::Text)),
-            );
+            .maybe_child(icon_glyph);
 
         let name_row = rect()
             .width(Size::fill())
@@ -178,79 +209,124 @@ impl Component for SpaceCreationForm {
                     ),
             );
 
-        let profile_row = rect()
-            .width(Size::fill())
-            .height(Size::px(38.0))
-            .padding(Gaps::new(4.0, 4.0, 4.0, 10.0))
-            .direction(Direction::Horizontal)
-            .main_align(Alignment::SpaceBetween)
-            .cross_align(Alignment::center())
-            .corner_radius(CornerRadius::new_all(8.0))
-            .background(field_bg)
-            .child(
-                label()
-                    .text("Profile")
-                    .font_size(12.5)
-                    .font_weight(FontWeight::MEDIUM)
-                    .color(palette.text),
-            )
-            .child(
-                rect()
-                    .a11y_focusable(true)
-                    .a11y_role(AccessibilityRole::Button)
-                    .a11y_alt(format!("Select profile: {current_profile}"))
-                    .height(Size::px(28.0))
-                    .padding(Gaps::new(0.0, 10.0, 0.0, 10.0))
-                    .corner_radius(CornerRadius::new_all(6.0))
-                    .background(if profile_btn_hovered() { field_hover_bg } else { pill_bg })
-                    .center()
-                    .cursor(CursorIcon::Pointer)
-                    .on_pointer_enter(move |_| profile_btn_hovered.set_if_modified(true))
-                    .on_pointer_leave(move |_| profile_btn_hovered.set_if_modified(false))
-                    .on_press(move |e: Event<PressEventData>| {
-                        e.stop_propagation();
-                        let mut open = editing.profile_menu_open;
-                        let next = !*open.peek();
-                        open.set(next);
-                        let mut icon_p = editing.icon_picker_open;
-                        icon_p.set_if_modified(false);
-                    })
-                    .child(
-                        label()
-                            .text(current_profile.clone())
-                            .font_size(12.0)
-                            .font_weight(FontWeight::MEDIUM)
-                            .color(palette.text)
-                            .max_lines(1),
+        let profile_row = show_profile_row.then(|| {
+            rect()
+                .width(Size::fill())
+                .height(Size::px(38.0))
+                .padding(Gaps::new(4.0, 4.0, 4.0, 10.0))
+                .direction(Direction::Horizontal)
+                .main_align(Alignment::SpaceBetween)
+                .cross_align(Alignment::center())
+                .corner_radius(CornerRadius::new_all(8.0))
+                .background(field_bg)
+                .on_sized(move |e: Event<SizedEventData>| {
+                    let next = (e.area.min_x(), e.area.max_y() + 4.0, e.area.width().max(140.0));
+                    if *profile_btn_area.peek() != next {
+                        profile_btn_area.set(next);
+                    }
+                })
+                .child(
+                    // CRF-02: Help cursor + tooltip on "Profile" label explaining container isolation.
+                    KitTooltip::new("Isolate cookies and logins in a container profile for this space").child(
+                        rect().cursor(CursorIcon::Help).child(
+                            label()
+                                .text("Profile")
+                                .font_size(12.5)
+                                .font_weight(FontWeight::MEDIUM)
+                                .color(palette.text),
+                        ),
                     ),
-            );
+                )
+                .child(
+                    rect()
+                        .a11y_focusable(true)
+                        .a11y_role(AccessibilityRole::Button)
+                        .a11y_alt(format!("Select profile: {current_profile}"))
+                        .height(Size::px(28.0))
+                        .padding(Gaps::new(0.0, 10.0, 0.0, 10.0))
+                        .corner_radius(CornerRadius::new_all(6.0))
+                        .background(if profile_btn_hovered() { field_hover_bg } else { pill_bg })
+                        .center()
+                        .cursor(CursorIcon::Pointer)
+                        .on_pointer_enter(move |_| profile_btn_hovered.set_if_modified(true))
+                        .on_pointer_leave(move |_| profile_btn_hovered.set_if_modified(false))
+                        .on_press(move |e: Event<PressEventData>| {
+                            e.stop_propagation();
+                            let mut open = editing.profile_menu_open;
+                            let next = !*open.peek();
+                            open.set(next);
+                            let mut icon_p = editing.icon_picker_open;
+                            icon_p.set_if_modified(false);
+                        })
+                        .child(
+                            label()
+                                .text(current_profile.clone())
+                                .font_size(12.0)
+                                .font_weight(FontWeight::MEDIUM)
+                                .color(palette.text)
+                                .max_lines(1),
+                        ),
+                )
+        });
 
-        let profile_dropdown = profile_menu_open.then(|| {
+        // CRF-01: Floating dismissible profile menu popover (does NOT push layout, closes on outside click & Escape).
+        let profile_overlay = profile_menu_open.then(|| {
+            let (px, py, pw) = *profile_btn_area.read();
+            let root_size = *Platform::get().current_window().root_size.read();
+            let clamped_x = px.clamp(8.0, (root_size.width - pw - 8.0).max(8.0));
+            let clamped_y = py.clamp(8.0, (root_size.height - 170.0).max(8.0));
             let menu_bg = match theme.scheme {
                 ResolvedScheme::Dark => Rgba::from_rgb_alpha(30, 31, 38, 0.98).to_color(),
                 ResolvedScheme::Light => Rgba::from_rgb_alpha(250, 250, 252, 0.98).to_color(),
             };
             rect()
-                .width(Size::fill())
-                .padding(Gaps::new_all(4.0))
-                .spacing(2.0)
-                .corner_radius(CornerRadius::new_all(8.0))
-                .background(menu_bg)
-                .border(
-                    Border::new()
-                        .width(1.0)
-                        .alignment(BorderAlignment::Inner)
-                        .fill(theme.color(ThemeRole::BorderSubtle)),
-                )
-                .children(SPACE_PROFILES.iter().map(|profile_name| {
-                    ProfileOptionRow {
-                        name: (*profile_name).to_string(),
-                        selected: current_profile == *profile_name,
-                        state: editing,
-                        key: DiffKey::from(profile_name),
+                .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
+                .position(Position::new_global().left(0.0).top(0.0))
+                .width(Size::window_percent(100.0))
+                .height(Size::window_percent(100.0))
+                .on_global_key_down(move |e: Event<KeyboardEventData>| {
+                    if matches!(e.key, Key::Named(NamedKey::Escape)) {
+                        e.stop_propagation();
+                        let mut open = editing.profile_menu_open;
+                        open.set(false);
                     }
-                    .into_element()
-                }))
+                })
+                .child(
+                    rect()
+                        .position(Position::new_global().left(0.0).top(0.0))
+                        .width(Size::window_percent(100.0))
+                        .height(Size::window_percent(100.0))
+                        .on_mouse_down(move |_| {
+                            let mut open = editing.profile_menu_open;
+                            open.set(false);
+                        }),
+                )
+                .child(
+                    rect()
+                        .position(Position::new_global().left(clamped_x).top(clamped_y))
+                        .width(Size::px(pw))
+                        .padding(Gaps::new_all(4.0))
+                        .spacing(2.0)
+                        .corner_radius(CornerRadius::new_all(8.0))
+                        .background(menu_bg)
+                        .border(
+                            Border::new()
+                                .width(1.0)
+                                .alignment(BorderAlignment::Inner)
+                                .fill(theme.color(ThemeRole::BorderSubtle)),
+                        )
+                        .shadow(Shadow::new().y(8.0).blur(20.0).color(Color::from_argb(95, 0, 0, 0)))
+                        .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
+                        .children(SPACE_PROFILES.iter().map(|profile_name| {
+                            ProfileOptionRow {
+                                name: (*profile_name).to_string(),
+                                selected: current_profile == *profile_name,
+                                state: editing,
+                                key: DiffKey::from(profile_name),
+                            }
+                            .into_element()
+                        })),
+                )
         });
 
         let theme_button = rect()
@@ -320,7 +396,12 @@ impl Component for SpaceCreationForm {
         } else {
             primary_disabled_bg
         };
-        let create_fg = if can_create { Color::WHITE } else { primary_disabled_fg };
+        // CRF-05: Use ThemeRole::TextOnAccent for high contrast on dark-mode Accent primary fill.
+        let create_fg = if can_create {
+            theme.color(ThemeRole::TextOnAccent)
+        } else {
+            primary_disabled_fg
+        };
 
         let btn_submit = submit_action.clone();
         let create_button = rect()
@@ -349,7 +430,7 @@ impl Component for SpaceCreationForm {
                 label()
                     .text("Create Space")
                     .font_size(12.5)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::SEMI_BOLD)
                     .color(create_fg)
                     .max_lines(1),
             );
@@ -397,6 +478,7 @@ impl Component for SpaceCreationForm {
             .on_global_key_down(move |e: Event<KeyboardEventData>| {
                 if matches!(e.key, Key::Named(NamedKey::Escape))
                     && !*editing.icon_picker_open.peek()
+                    && !*editing.profile_menu_open.peek()
                     && !*editing.theme_picker_open.peek()
                 {
                     e.stop_propagation();
@@ -409,19 +491,27 @@ impl Component for SpaceCreationForm {
                     .cross_align(Alignment::center())
                     .spacing(6.0)
                     .child(
-                        label()
-                            .text("Create a Space")
-                            .font_size(16.5)
-                            .font_weight(FontWeight::BOLD)
-                            .text_align(TextAlign::Center)
-                            .color(palette.text),
+                        StaggeredRow::new(0).animate_on_mount(true).child(
+                            rect().width(Size::fill()).cross_align(Alignment::center()).child(
+                                label()
+                                    .text("Create a Space")
+                                    .font_size(16.5)
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_align(TextAlign::Center)
+                                    .color(palette.text),
+                            ),
+                        ),
                     )
                     .child(
-                        label()
-                            .text("Spaces are used to organize your tabs and sessions.")
-                            .font_size(11.5)
-                            .text_align(TextAlign::Center)
-                            .color(palette.text_muted),
+                        StaggeredRow::new(1).animate_on_mount(true).child(
+                            rect().width(Size::fill()).cross_align(Alignment::center()).child(
+                                label()
+                                    .text("Spaces are used to organize your tabs and sessions.")
+                                    .font_size(11.5)
+                                    .text_align(TextAlign::Center)
+                                    .color(palette.text_muted),
+                            ),
+                        ),
                     ),
             )
             .child(
@@ -429,19 +519,19 @@ impl Component for SpaceCreationForm {
                     .width(Size::fill())
                     .padding(Gaps::new(40.0, 0.0, 0.0, 0.0))
                     .spacing(9.0)
-                    .child(name_row)
-                    .child(profile_row)
-                    .maybe_child(profile_dropdown)
-                    .child(theme_button),
+                    .child(StaggeredRow::new(2).animate_on_mount(true).child(name_row))
+                    .maybe_child(profile_row.map(|row| StaggeredRow::new(3).animate_on_mount(true).child(row)))
+                    .child(StaggeredRow::new(4).animate_on_mount(true).child(theme_button)),
             )
             .child(rect().width(Size::fill()).height(Size::flex(1.0)))
             .child(
                 rect()
                     .width(Size::fill())
                     .spacing(8.0)
-                    .child(create_button)
-                    .child(cancel_button),
+                    .child(StaggeredRow::new(5).animate_on_mount(true).child(create_button))
+                    .child(StaggeredRow::new(6).animate_on_mount(true).child(cancel_button)),
             )
+            .maybe_child(profile_overlay)
             .maybe_child(icon_picker_overlay)
     }
 }
@@ -543,6 +633,7 @@ impl Component for ProfileOptionRow {
     }
 }
 
+/// ICO-01 & ICO-02: Segmented Emoji + 86-SVG Icon Picker with live search input and `closeOnSelect: false`.
 #[derive(Clone, PartialEq)]
 struct DraftIconPickerPopover {
     state: SpaceEditingState,
@@ -554,17 +645,24 @@ impl Component for DraftIconPickerPopover {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let palette = ChromePalette::for_scheme(theme.scheme);
+        let mut active_tab_svg = use_state(|| false);
+        let search_query = use_state(String::new);
+        let search_a11y = use_hook(AccessibilityId::new_unique);
         let editing = self.state;
 
         let panel_bg = match theme.scheme {
             ResolvedScheme::Dark => Rgba::from_rgb_alpha(26, 28, 38, 0.98).to_color(),
             ResolvedScheme::Light => Rgba::from_rgb_alpha(252, 252, 255, 0.98).to_color(),
         };
+        let input_bg = match theme.scheme {
+            ResolvedScheme::Dark => Rgba::from_rgb_alpha(255, 255, 255, 0.06).to_color(),
+            ResolvedScheme::Light => Rgba::from_rgb_alpha(0, 0, 0, 0.05).to_color(),
+        };
 
         let clear_button = rect()
             .a11y_role(AccessibilityRole::Button)
             .a11y_alt("Clear space icon")
-            .padding(Gaps::new(4.0, 10.0, 4.0, 10.0))
+            .padding(Gaps::new(4.0, 9.0, 4.0, 9.0))
             .corner_radius(CornerRadius::new_all(6.0))
             .background(palette.surface_pill)
             .cursor(CursorIcon::Pointer)
@@ -572,39 +670,114 @@ impl Component for DraftIconPickerPopover {
                 e.stop_propagation();
                 let mut icon = editing.draft_icon;
                 icon.set(String::new());
-                let mut open = editing.icon_picker_open;
-                open.set(false);
             })
             .child(
                 label()
                     .text("None")
-                    .font_size(11.5)
+                    .font_size(11.0)
                     .font_weight(FontWeight::MEDIUM)
                     .color(palette.text_muted),
             );
 
+        let is_svg = active_tab_svg();
+        let tab_pill = |label_text: &'static str, selected: bool, target_svg: bool| {
+            rect()
+                .a11y_role(AccessibilityRole::Tab)
+                .a11y_alt(label_text)
+                .width(Size::flex(1.0))
+                .height(Size::px(26.0))
+                .corner_radius(CornerRadius::new_all(6.0))
+                .background(if selected {
+                    palette.surface_pill_hover
+                } else {
+                    Color::TRANSPARENT
+                })
+                .center()
+                .cursor(CursorIcon::Pointer)
+                .on_press(move |e: Event<PressEventData>| {
+                    e.stop_propagation();
+                    active_tab_svg.set_if_modified(target_svg);
+                })
+                .child(
+                    label()
+                        .text(label_text)
+                        .font_size(11.5)
+                        .font_weight(if selected {
+                            FontWeight::SEMI_BOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .color(if selected { palette.text } else { palette.text_muted }),
+                )
+        };
+
+        let query_str = search_query.read().clone();
         let mut rows: Vec<Element> = Vec::new();
-        for chunk in SELECTABLE_SPACE_ICONS.chunks(6) {
+        if is_svg {
+            let filtered = filter_svg_icons(&query_str);
+            for (r_idx, chunk) in filtered.chunks(7).enumerate() {
+                rows.push(
+                    rect()
+                        .key(format!("svg-row-{r_idx}"))
+                        .direction(Direction::Horizontal)
+                        .spacing(4.0)
+                        .children(chunk.iter().map(|entry| {
+                            DraftIconTile {
+                                value: entry.icon_name.to_string(),
+                                is_emoji: false,
+                                selected: self.current_icon == entry.icon_name,
+                                state: editing,
+                                key: DiffKey::from(&entry.icon_name),
+                            }
+                            .into_element()
+                        }))
+                        .into_element(),
+                );
+            }
+        } else {
+            let filtered = filter_emojis(&query_str);
+            for (r_idx, chunk) in filtered.chunks(7).enumerate() {
+                rows.push(
+                    rect()
+                        .key(format!("emoji-row-{r_idx}"))
+                        .direction(Direction::Horizontal)
+                        .spacing(4.0)
+                        .children(chunk.iter().map(|entry| {
+                            DraftIconTile {
+                                value: entry.glyph.to_string(),
+                                is_emoji: true,
+                                selected: self.current_icon == entry.glyph,
+                                state: editing,
+                                key: DiffKey::from(&entry.glyph),
+                            }
+                            .into_element()
+                        }))
+                        .into_element(),
+                );
+            }
+        }
+
+        if rows.is_empty() {
             rows.push(
                 rect()
-                    .direction(Direction::Horizontal)
-                    .spacing(4.0)
-                    .children(chunk.iter().map(|icon_name| {
-                        DraftIconTile {
-                            icon_name: (*icon_name).to_string(),
-                            selected: self.current_icon == *icon_name,
-                            state: editing,
-                            key: DiffKey::from(icon_name),
-                        }
-                        .into_element()
-                    }))
+                    .width(Size::fill())
+                    .padding(Gaps::new(20.0, 0.0, 20.0, 0.0))
+                    .center()
+                    .child(
+                        label()
+                            .text("No matching icons")
+                            .font_size(11.5)
+                            .color(palette.text_muted),
+                    )
                     .into_element(),
             );
         }
 
+        let picker_w = 264.0;
+        let picker_h = 310.0;
         let root_size = *Platform::get().current_window().root_size.read();
-        let max_x = (root_size.width - 236.0).max(8.0);
-        let max_y = (root_size.height - 230.0).max(8.0);
+        let max_x = (root_size.width - picker_w - 8.0).max(8.0);
+        let max_y = (root_size.height - picker_h - 8.0).max(8.0);
         let x = self.anchor.0.clamp(8.0, max_x);
         let y = self.anchor.1.clamp(8.0, max_y);
 
@@ -633,9 +806,9 @@ impl Component for DraftIconPickerPopover {
             .child(
                 rect()
                     .position(Position::new_global().left(x).top(y))
-                    .width(Size::px(228.0))
-                    .padding(Gaps::new_all(12.0))
-                    .spacing(10.0)
+                    .width(Size::px(picker_w))
+                    .padding(Gaps::new_all(10.0))
+                    .spacing(8.0)
                     .corner_radius(CornerRadius::new_all(12.0))
                     .background(panel_bg)
                     .border(
@@ -656,25 +829,57 @@ impl Component for DraftIconPickerPopover {
                         rect()
                             .width(Size::fill())
                             .direction(Direction::Horizontal)
-                            .main_align(Alignment::SpaceBetween)
+                            .content(Content::Flex)
                             .cross_align(Alignment::center())
+                            .spacing(6.0)
                             .child(
-                                label()
-                                    .text("Choose Icon")
-                                    .font_size(12.5)
-                                    .font_weight(FontWeight::SEMI_BOLD)
-                                    .color(palette.text),
+                                rect()
+                                    .width(Size::flex(1.0))
+                                    .padding(Gaps::new_all(2.0))
+                                    .direction(Direction::Horizontal)
+                                    .content(Content::Flex)
+                                    .corner_radius(CornerRadius::new_all(7.0))
+                                    .background(input_bg)
+                                    .child(tab_pill("Emoji", !is_svg, false))
+                                    .child(tab_pill("Icons", is_svg, true)),
                             )
                             .child(clear_button),
                     )
-                    .child(rect().spacing(4.0).children(rows)),
+                    .child(
+                        rect()
+                            .width(Size::fill())
+                            .height(Size::px(30.0))
+                            .padding(Gaps::new(0.0, 8.0, 0.0, 8.0))
+                            .spacing(6.0)
+                            .direction(Direction::Horizontal)
+                            .content(Content::Flex)
+                            .cross_align(Alignment::center())
+                            .corner_radius(CornerRadius::new_all(7.0))
+                            .background(input_bg)
+                            .child(Icon::new("search").size(12.5).role(ThemeRole::TextMuted))
+                            .child(
+                                TextField::new(search_query)
+                                    .a11y_id(search_a11y)
+                                    .placeholder(if is_svg { "Search icons..." } else { "Search emojis..." })
+                                    .width(Size::flex(1.0))
+                                    .color(palette.text)
+                                    .placeholder_color(palette.text_muted),
+                            ),
+                    )
+                    .child(
+                        ScrollView::new()
+                            .width(Size::fill())
+                            .height(Size::px(210.0))
+                            .child(rect().spacing(4.0).children(rows)),
+                    ),
             )
     }
 }
 
 #[derive(Clone, PartialEq)]
 struct DraftIconTile {
-    icon_name: String,
+    value: String,
+    is_emoji: bool,
     selected: bool,
     state: SpaceEditingState,
     key: DiffKey,
@@ -692,7 +897,7 @@ impl Component for DraftIconTile {
         let palette = ChromePalette::for_scheme(theme.scheme);
         let mut hovered = use_state(|| false);
         let editing = self.state;
-        let icon_name = self.icon_name.clone();
+        let value = self.value.clone();
 
         let bg = if self.selected {
             theme.color(ThemeRole::Accent).with_a(48)
@@ -702,9 +907,26 @@ impl Component for DraftIconTile {
             Color::TRANSPARENT
         };
 
+        let glyph: Element = if self.is_emoji {
+            label()
+                .text(self.value.clone())
+                .font_size(15.5)
+                .color(palette.text)
+                .into_element()
+        } else {
+            Icon::new(self.value.clone())
+                .size(15.5)
+                .role(if self.selected || hovered() {
+                    ThemeRole::Text
+                } else {
+                    ThemeRole::TextMuted
+                })
+                .into_element()
+        };
+
         rect()
             .a11y_role(AccessibilityRole::Button)
-            .a11y_alt(format!("Icon {}", self.icon_name))
+            .a11y_alt(format!("Icon {}", self.value))
             .width(Size::px(30.0))
             .height(Size::px(30.0))
             .corner_radius(CornerRadius::new_all(7.0))
@@ -723,20 +945,11 @@ impl Component for DraftIconTile {
             .on_pointer_leave(move |_| hovered.set_if_modified(false))
             .on_press(move |e: Event<PressEventData>| {
                 e.stop_propagation();
+                // ICO-02: Keep picker open (`closeOnSelect: false`) so users can live-preview multiple icons.
                 let mut icon = editing.draft_icon;
-                icon.set(icon_name.clone());
-                let mut open = editing.icon_picker_open;
-                open.set(false);
+                icon.set(value.clone());
             })
-            .child(
-                Icon::new(self.icon_name.clone())
-                    .size(16.0)
-                    .role(if self.selected || hovered() {
-                        ThemeRole::Text
-                    } else {
-                        ThemeRole::TextMuted
-                    }),
-            )
+            .child(glyph)
     }
 
     fn render_key(&self) -> DiffKey {

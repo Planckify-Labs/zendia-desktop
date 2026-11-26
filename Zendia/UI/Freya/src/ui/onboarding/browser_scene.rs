@@ -163,6 +163,36 @@ pub fn draw_rrect_stroke(canvas: &sk::Canvas, x: f32, y: f32, w: f32, h: f32, r:
     canvas.draw_rrect(rr, &paint);
 }
 
+/// Paints a dashed rounded-rectangle outline matching CSS `border: 1.5px dashed ...`.
+pub fn draw_dashed_rrect_stroke(
+    canvas: &sk::Canvas,
+    rect: sk::Rect,
+    radius: f32,
+    stroke_w: f32,
+    dash: &[f32],
+    color: sk::Color,
+) {
+    let inset = stroke_w * 0.5;
+    let inner = sk::Rect::from_ltrb(
+        rect.left + inset,
+        rect.top + inset,
+        (rect.right - inset).max(rect.left + inset),
+        (rect.bottom - inset).max(rect.top + inset),
+    );
+    let r = (radius - inset).max(0.0);
+    let mut paint = sk::Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_style(sk::PaintStyle::Stroke);
+    paint.set_stroke_width(stroke_w);
+    paint.set_stroke_cap(sk::PaintCap::Round);
+    paint.set_color(color);
+    if let Some(effect) = sk::PathEffect::dash(dash, 0.0) {
+        paint.set_path_effect(effect);
+    }
+    let rr = sk::RRect::new_rect_xy(inner, r, r);
+    canvas.draw_rrect(rr, &paint);
+}
+
 pub fn draw_circle_fill(canvas: &sk::Canvas, cx: f32, cy: f32, r: f32, color: sk::Color) {
     let mut paint = sk::Paint::default();
     paint.set_anti_alias(true);

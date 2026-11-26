@@ -13,7 +13,9 @@ use crate::address_bar::SearchEngine;
 use crate::agent::{
     AgentDeclaredPage, AgentInstruction, AgentSelection, AgentTable, ContextChoice, SidePanelPrefs, SteerStatus,
 };
-use crate::contributions::{Contributions, SidePanelId, ToolbarArea, ToolbarPlacementRules};
+use crate::contributions::{
+    Contributions, SidePanelId, ToolbarArea, ToolbarItem, ToolbarPlacement, ToolbarPlacementRules,
+};
 use crate::events::Event;
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
@@ -336,6 +338,14 @@ pub struct MediaSession {
     pub supports_pip: bool,
     /// Set when the user closes the controls; cleared when the media plays again.
     pub dismissed: bool,
+    /// True while the tab is capturing the microphone.
+    pub sharing_mic: bool,
+    /// True while the tab is capturing the camera.
+    pub sharing_camera: bool,
+    /// True when the tab's microphone capture is muted from the media controls card.
+    pub mic_muted: bool,
+    /// True when the tab's camera capture is muted from the media controls card.
+    pub camera_muted: bool,
 }
 
 /// An available AI agent that can run sessions in Zendia.
@@ -663,8 +673,8 @@ pub enum SidebarSide {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum CompactHide {
     /// The sidebar and the top toolbar.
-    #[default]
     Both,
+    #[default]
     Sidebar,
     Toolbar,
 }
@@ -706,11 +716,12 @@ impl Default for LayoutSettings {
     fn default() -> Self {
         Self {
             toolbar_layout: ToolbarLayout::Single,
-            sidebar_side: SidebarSide::Left,
+            // Zendia's defaults: the sidebar on the right, and compact mode hiding the sidebar.
+            sidebar_side: SidebarSide::Right,
             sidebar_expanded: true,
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
             compact_mode: false,
-            compact_hide: CompactHide::Both,
+            compact_hide: CompactHide::Sidebar,
             tab_switch_motion: true,
         }
     }
@@ -728,18 +739,23 @@ impl LayoutSettings {
 
     /// Whether compact mode hides the sidebar now.
     pub fn compact_hides_sidebar(&self) -> bool {
-        self.compact_mode && matches!(self.compact_hide, CompactHide::Both | CompactHide::Sidebar)
+        crate::shell_layout::effective_compact_hides_sidebar(self)
     }
 
     /// Whether compact mode hides the top toolbar now (only layouts with a top toolbar have one to hide).
     pub fn compact_hides_toolbar(&self) -> bool {
-        self.compact_mode && matches!(self.compact_hide, CompactHide::Both | CompactHide::Toolbar)
+        crate::shell_layout::effective_compact_hides_toolbar(self)
+    }
+
+    /// Normalizes illegal compact states (e.g. Collapsed + Right + Hide Toolbar Only).
+    pub fn normalize_compact_state(&mut self) {
+        crate::shell_layout::normalize_compact_layout(self);
     }
 
     /// Logical width the sidebar occupies in its current expanded/collapsed state.
     pub fn effective_sidebar_width(&self) -> f32 {
         if self.sidebar_expanded {
-            Self::clamp_sidebar_width(self.sidebar_width)
+            crate::shell_layout::clamp_sidebar_width_for_layout(self, self.sidebar_width)
         } else {
             SIDEBAR_COLLAPSED_WIDTH
         }
@@ -750,9 +766,43 @@ impl LayoutSettings {
         !matches!(self.toolbar_layout, ToolbarLayout::Single)
     }
 
-    /// Resolves which [`ToolbarArea`] an item occupies under this layout's toolbar mode.
+    /// Whether single-toolbar compact mode provides the collapsible compact top bar for Agents, Chat, and window
+    /// controls.
+    pub fn has_compact_top_bar(&self) -> bool {
+        crate::shell_layout::effective_has_compact_top_bar(self)
+    }
+
+    /// With multiple toolbars, whether the sidebar's top buttons (Compact Mode) stay at the top of the sidebar. They
+    /// move to the start of the top toolbar when the sidebar is collapsed, or when compact mode takes it away; a
+    /// right-hand sidebar that stays while only the toolbar hides keeps them, as Zen keeps them with the window buttons.
+    pub fn keeps_top_buttons_in_sidebar(&self) -> bool {
+        self.toolbar_layout == ToolbarLayout::Multiple
+            && self.sidebar_expanded
+            && (!self.compact_mode
+                || (self.compact_hide == CompactHide::Toolbar && self.sidebar_side == SidebarSide::Right))
+    }
+
+    /// Whether the top toolbar spans only the page, leaving the sidebar its full height beside it.
+    pub fn top_toolbar_beside_sidebar(&self) -> bool {
+        self.toolbar_layout == ToolbarLayout::Multiple && self.sidebar_expanded && !self.compact_hides_sidebar()
+    }
+
+    /// The [`ToolbarArea`] `item` occupies, counting where the sidebar's top buttons are at the moment.
+    pub fn toolbar_area_of(&self, item: &ToolbarItem) -> Option<ToolbarArea> {
+        let area = self.resolve_toolbar_area(item.placement_rules)?;
+        if item.placement == ToolbarPlacement::SidebarTop
+            && area == ToolbarArea::TopBarStart
+            && self.keeps_top_buttons_in_sidebar()
+        {
+            return Some(ToolbarArea::SidebarTopStart);
+        }
+        Some(area)
+    }
+
+    /// Resolves which [`ToolbarArea`] an item occupies under this layout's toolbar mode and compact state.
     pub fn resolve_toolbar_area(&self, rules: ToolbarPlacementRules) -> Option<ToolbarArea> {
         match self.toolbar_layout {
+            ToolbarLayout::Single if self.has_compact_top_bar() => rules.single_toolbar_compact,
             ToolbarLayout::Single => rules.single_toolbar,
             ToolbarLayout::Multiple => rules.multiple_toolbars,
             ToolbarLayout::Collapsed => rules.collapsed_toolbar,
@@ -780,6 +830,7 @@ pub struct BrowserModel {
     pub library_media: Vec<crate::library_media::LibraryMediaItem>,
     pub library_media_folders: Vec<String>,
     pub history: Vec<HistoryEntry>,
+    pub closed_tabs: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub search_engine: SearchEngine,
     pub site_info: BTreeMap<String, SiteInfo>,
@@ -821,6 +872,13 @@ pub struct BrowserModel {
     pub shield_enabled: bool,
     pub onboarding: OnboardingState,
     pub zoom_level: f32,
+    pub about_update_status: crate::menus::AboutUpdateStatus,
+    /// Original URL recorded when a tab was pinned (for Zen's pinned URL-drift reset button).
+    pub pinned_urls: BTreeMap<TabId, String>,
+    /// Tabs currently unloaded/discarded (`pending="true"` in Zen).
+    pub unloaded_tabs: std::collections::BTreeSet<TabId>,
+    /// Optional parent folder mapping for nested folders (`FLD-05`).
+    pub folder_parents: BTreeMap<FolderId, FolderId>,
 }
 
 impl BrowserModel {
@@ -851,6 +909,53 @@ impl BrowserModel {
     /// Returns the stored [`SpaceAppearance`] for `space_id`, or an empty default appearance if none has been set.
     pub fn space_appearance(&self, space_id: SpaceId) -> SpaceAppearance {
         self.space_appearances.get(&space_id).cloned().unwrap_or_default()
+    }
+
+    /// Original URL recorded when `tab_id` was pinned.
+    pub fn pinned_url_for(&self, tab_id: TabId) -> Option<&str> {
+        self.pinned_urls.get(&tab_id).map(String::as_str)
+    }
+
+    /// Whether a pinned tab has navigated away from its original pinned URL (`zen-pinned-changed="true"`).
+    pub fn has_pinned_url_drift(&self, tab_id: TabId) -> bool {
+        let Some(tab) = self.tab(tab_id) else {
+            return false;
+        };
+        if tab.kind != TabKind::Pinned {
+            return false;
+        }
+        let Some(pinned_url) = self.pinned_urls.get(&tab_id) else {
+            return false;
+        };
+        !pinned_url.is_empty() && !tab.url.is_empty() && tab.url != *pinned_url
+    }
+
+    /// Whether `tab_id` is currently unloaded/discarded.
+    pub fn is_tab_unloaded(&self, tab_id: TabId) -> bool {
+        self.unloaded_tabs.contains(&tab_id)
+    }
+
+    /// Ordered vertical tab IDs visible in `space_id` (pinned -> expanded folder children -> normal) for Shift+Click range selection.
+    pub fn ordered_vertical_tab_ids_in_space(&self, space_id: SpaceId) -> Vec<TabId> {
+        let mut out = Vec::new();
+        for tab in self.pinned_tabs_in_space(space_id) {
+            out.push(tab.id);
+        }
+        for folder in self.folders_in_space(space_id) {
+            if !folder.collapsed {
+                for tab in self.folder_tabs(folder.id) {
+                    out.push(tab.id);
+                }
+            } else if let Some(active) = self.active_tab
+                && folder.tab_ids.contains(&active)
+            {
+                out.push(active);
+            }
+        }
+        for tab in self.normal_tabs_in_space(space_id) {
+            out.push(tab.id);
+        }
+        out
     }
 
     /// Essential tabs shared across all spaces, in their configured tile order.
@@ -909,6 +1014,23 @@ impl BrowserModel {
             .iter()
             .filter(|folder| folder.space_id == space_id)
             .collect()
+    }
+
+    /// Nesting depth of `folder_id` (0 for top-level folders, capped at 4 against cycles).
+    pub fn folder_depth(&self, folder_id: FolderId) -> usize {
+        let mut depth = 0usize;
+        let mut cur = folder_id;
+        while depth < 4 {
+            if let Some(&parent) = self.folder_parents.get(&cur)
+                && parent != cur
+            {
+                depth += 1;
+                cur = parent;
+            } else {
+                break;
+            }
+        }
+        depth
     }
 
     /// All tabs contained in `folder_id`, in folder order.
@@ -1151,6 +1273,8 @@ impl BrowserModel {
                 }
                 self.essentials.retain(|item| item.tab_id != *tab_id);
                 self.pinned_tabs.retain(|item| item.tab_id != *tab_id);
+                self.pinned_urls.remove(tab_id);
+                self.unloaded_tabs.remove(tab_id);
                 for folder in &mut self.folders {
                     folder.tab_ids.retain(|id| id != tab_id);
                 }
@@ -1179,6 +1303,9 @@ impl BrowserModel {
             }
             Event::TabActivated { tab_id } => {
                 self.active_tab = *tab_id;
+                if let Some(id) = *tab_id {
+                    self.unloaded_tabs.remove(&id);
+                }
                 if let Some(window) = self.windows.first_mut() {
                     window.active_tab = *tab_id;
                 }
@@ -1356,6 +1483,10 @@ impl BrowserModel {
                 self.library_media_folders = folders.clone();
                 true
             }
+            Event::ClosedTabsChanged { closed_tabs } => {
+                self.closed_tabs = closed_tabs.clone();
+                true
+            }
             Event::ModeChanged { mode } => {
                 self.input_mode = *mode;
                 true
@@ -1452,6 +1583,7 @@ impl BrowserModel {
             }
             Event::ExtensionsChanged { extensions } => {
                 self.extensions = extensions.clone();
+                self.site_extensions = crate::modules::unpinned_site_extensions(extensions);
                 true
             }
             Event::LayoutSettingsChanged { layout } => {
@@ -1474,6 +1606,26 @@ impl BrowserModel {
             Event::ImportStarted { .. } => false,
             Event::ZoomChanged { zoom_level } => {
                 self.zoom_level = *zoom_level;
+                true
+            }
+            Event::AboutUpdateStatusChanged { status } => {
+                self.about_update_status = status.clone();
+                true
+            }
+            Event::TabPinnedUrlsChanged { pinned_urls } => {
+                self.pinned_urls = pinned_urls.clone();
+                true
+            }
+            Event::TabUnloadedChanged { unloaded_tabs } => {
+                self.unloaded_tabs = unloaded_tabs.clone();
+                true
+            }
+            Event::FolderHierarchyChanged {
+                folders,
+                folder_parents,
+            } => {
+                self.folders = folders.clone();
+                self.folder_parents = folder_parents.clone();
                 true
             }
             Event::SearchEngineChanged { engine } => {

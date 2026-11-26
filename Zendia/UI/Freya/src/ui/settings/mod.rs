@@ -16,7 +16,7 @@ pub mod tabs_and_spaces;
 pub mod zendia_groups;
 
 use crate::ui::core_view::use_provide_core_with_observer;
-use crate::ui::kit::Icon;
+use crate::ui::kit::{Icon, IconButton, TextField, use_provide_text_focus};
 use crate::ui::settings::controls::SettingsPalette;
 use crate::ui::settings::look_and_feel::LookAndFeelGroup;
 use crate::ui::settings::plugins_and_extensions::{ExtensionsAndServicesGroup, PluginsGroup};
@@ -121,6 +121,7 @@ impl App for SettingsOsWindowApp {
     fn render(&self) -> impl IntoElement {
         let core = use_provide_core_with_observer(Arc::clone(&self.core), |_| {});
         let _theme_state = use_provide_theme(&core);
+        let _text_focus = use_provide_text_focus();
         let mut active_group = use_state(|| self.initial_group);
         let search_query = use_state(String::new);
 
@@ -175,6 +176,10 @@ impl Component for SettingsView {
         let theme = use_theme();
         let palette = SettingsPalette::for_scheme(theme.scheme);
         let search_a11y_id = use_hook(AccessibilityId::new_unique);
+        let search_focus = use_focus(search_a11y_id);
+        let mut search_focus_seq = use_state(|| 0u64);
+        let mut view_width = use_state(|| 1080.0_f32);
+        let mut scroll_controller = use_scroll_controller(ScrollConfig::default);
         let mut active_group = self.active_group;
         let mut search_query = self.search_query;
 
@@ -183,7 +188,24 @@ impl Component for SettingsView {
         let is_searching = !current_query.trim().is_empty();
         let closable = self.closable_os_window;
 
+        // Reset scroll to top whenever the active group or search-active state changes (`SET-04`).
+        let mut last_scroll_key = use_state(|| (current_group, is_searching));
+        if *last_scroll_key.peek() != (current_group, is_searching) {
+            last_scroll_key.set((current_group, is_searching));
+            scroll_controller.scroll_to_y(0);
+        }
+
+        let compact = *view_width.read() < 880.0;
+
         let on_global_key_down = move |e: Event<KeyboardEventData>| {
+            if e.modifiers.intersects(Modifiers::CONTROL | Modifiers::META) && e.code == Code::KeyF {
+                e.stop_propagation();
+                e.prevent_default();
+                let next = search_focus_seq.peek().wrapping_add(1);
+                search_focus_seq.set(next);
+                search_a11y_id.request_focus();
+                return;
+            }
             if matches!(e.key, Key::Named(NamedKey::Escape)) {
                 if !search_query.peek().is_empty() {
                     search_query.set(String::new());
@@ -217,54 +239,51 @@ impl Component for SettingsView {
             }
         };
 
-        let search_bar =
-            rect()
-                .width(Size::fill())
-                .height(Size::px(38.0))
-                .padding(Gaps::new(0.0, 12.0, 0.0, 12.0))
-                .corner_radius(CornerRadius::new_all(8.0))
-                .background(palette.input_bg)
-                .border(Border::new().width(1.5).alignment(BorderAlignment::Inner).fill(
-                    if search_a11y_id.is_focused() {
+        let search_focused = search_focus() != Focus::Not;
+        let search_bar = rect()
+            .width(Size::fill())
+            .height(Size::px(38.0))
+            .padding(Gaps::new(0.0, 10.0, 0.0, 12.0))
+            .corner_radius(CornerRadius::new_all(8.0))
+            .background(palette.input_bg)
+            .border(
+                Border::new()
+                    .width(1.5)
+                    .alignment(BorderAlignment::Inner)
+                    .fill(if search_focused {
                         theme.color(ThemeRole::Accent)
                     } else {
                         palette.input_border
-                    },
-                ))
-                .direction(Direction::Horizontal)
-                .content(Content::Flex)
-                .cross_align(Alignment::center())
-                .spacing(8.0)
-                .child(Icon::new("search-glass").size(15.0).role(ThemeRole::TextMuted))
-                .child(
-                    rect().width(Size::flex(1.0)).font_size(13.5).child(
-                        Input::new(search_query)
-                            .a11y_id(search_a11y_id)
-                            .flat()
-                            .compact()
-                            .placeholder("Find in Settings")
-                            .width(Size::fill())
-                            .background(Color::TRANSPARENT)
-                            .focus_background(Color::TRANSPARENT)
-                            .border_fill(Color::TRANSPARENT)
-                            .focus_border_fill(Color::TRANSPARENT)
-                            .color(theme.color(ThemeRole::Text))
-                            .placeholder_color(theme.color(ThemeRole::TextMuted)),
-                    ),
-                )
-                .maybe_child(is_searching.then(|| {
-                    rect()
-                        .a11y_focusable(true)
-                        .a11y_role(AccessibilityRole::Button)
-                        .a11y_alt("Clear search")
-                        .width(Size::px(22.0))
-                        .height(Size::px(22.0))
-                        .corner_radius(CornerRadius::new_all(6.0))
-                        .center()
-                        .cursor(CursorIcon::Pointer)
-                        .on_press(move |_| search_query.set(String::new()))
-                        .child(Icon::new("close").size(12.0).role(ThemeRole::TextMuted))
-                }));
+                    }),
+            )
+            .direction(Direction::Horizontal)
+            .content(Content::Flex)
+            .cross_align(Alignment::center())
+            .spacing(8.0)
+            .child(Icon::new("search-glass").size(15.0).role(ThemeRole::TextMuted))
+            .child(
+                rect().width(Size::flex(1.0)).font_size(13.5).child(
+                    TextField::new(search_query)
+                        .a11y_id(search_a11y_id)
+                        .select_all_on_open(true)
+                        .select_all_seq(*search_focus_seq.read())
+                        .placeholder("Find in Settings")
+                        .width(Size::fill())
+                        .padding(Gaps::new(0.0, 2.0, 0.0, 2.0))
+                        .background(Color::TRANSPARENT)
+                        .focus_background(Color::TRANSPARENT)
+                        .color(theme.color(ThemeRole::Text))
+                        .placeholder_color(theme.color(ThemeRole::TextMuted)),
+                ),
+            )
+            .maybe_child(is_searching.then(|| {
+                IconButton::new("close", "Clear search")
+                    .size(22.0)
+                    .icon_size(12.0)
+                    .on_press(move |_| search_query.set(String::new()))
+            }));
+
+        let h_pad = if compact { 20.0 } else { 44.0 };
 
         rect()
             .width(Size::fill())
@@ -273,30 +292,40 @@ impl Component for SettingsView {
             .content(Content::Flex)
             .background(palette.canvas_bg)
             .color(theme.color(ThemeRole::Text))
+            .on_sized(move |e: Event<SizedEventData>| {
+                let w = e.area.width();
+                if w > 0.0 && (*view_width.peek() - w).abs() > 1.0 {
+                    view_width.set(w);
+                }
+            })
             .on_global_key_down(on_global_key_down)
             .child(SettingsSidebar {
                 active_group: current_group,
                 searching: is_searching,
+                compact,
                 on_select_group: EventHandler::new(move |group| {
                     search_query.set(String::new());
                     active_group.set(group);
                 }),
             })
             .child(
-                ScrollView::new().width(Size::flex(1.0)).height(Size::fill()).child(
-                    rect()
-                        .width(Size::fill())
-                        .padding(Gaps::new(24.0, 44.0, 40.0, 44.0))
-                        .cross_align(Alignment::center())
-                        .child(
-                            rect()
-                                .width(Size::fill())
-                                .max_width(Size::px(760.0))
-                                .spacing(22.0)
-                                .child(search_bar)
-                                .child(content_el),
-                        ),
-                ),
+                ScrollView::new_controlled(scroll_controller)
+                    .width(Size::flex(1.0))
+                    .height(Size::fill())
+                    .child(
+                        rect()
+                            .width(Size::fill())
+                            .padding(Gaps::new(24.0, h_pad, 40.0, h_pad))
+                            .cross_align(Alignment::center())
+                            .child(
+                                rect()
+                                    .width(Size::fill())
+                                    .max_width(Size::px(760.0))
+                                    .spacing(22.0)
+                                    .child(search_bar)
+                                    .child(content_el),
+                            ),
+                    ),
             )
     }
 

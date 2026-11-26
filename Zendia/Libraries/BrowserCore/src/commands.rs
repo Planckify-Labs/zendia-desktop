@@ -168,6 +168,21 @@ pub enum Command {
     TabTogglePin {
         tab_id: Option<TabId>,
     },
+    TabUnload {
+        tab_id: Option<TabId>,
+    },
+    TabResetPin {
+        tab_id: Option<TabId>,
+    },
+    TabPinnedCloseAction {
+        tab_id: Option<TabId>,
+    },
+    TabCloseMultiple {
+        tab_ids: Vec<TabId>,
+    },
+    TabDetachToNewWindow {
+        tab_id: TabId,
+    },
     TabAddToEssentials {
         tab_id: Option<TabId>,
     },
@@ -222,6 +237,14 @@ pub enum Command {
     },
     FolderToggleCollapsed {
         folder_id: FolderId,
+    },
+    FolderUnloadTabs {
+        folder_id: FolderId,
+    },
+    FolderReorder {
+        folder_id: FolderId,
+        target_index: usize,
+        parent_folder_id: Option<FolderId>,
     },
     NotificationDismiss {
         notification_id: NotificationId,
@@ -397,6 +420,10 @@ pub enum Command {
     },
     MenuAppToggle,
     AppAbout,
+    AppCheckUpdates,
+    AppSetUpdateStatus {
+        status: crate::menus::AboutUpdateStatus,
+    },
     AppQuit,
     PageInspectElement {
         tab_id: Option<TabId>,
@@ -525,6 +552,8 @@ pub enum Command {
     StatuslineClearAnnouncement,
     /// Opens the all-keymaps which-key popup for the active vim mode (`<leader>?`).
     WhichKeyShowAll,
+    /// Steps back one prefix token in the active which-key popup (`BS back`), hiding it when empty.
+    WhichKeyBack,
     /// Dismisses the active which-key popup.
     WhichKeyHide,
     /// Focuses the sidebar explorer in vim mode.
@@ -1090,6 +1119,11 @@ impl Command {
             Self::TabPin { .. } => "tab.pin",
             Self::TabUnpin { .. } => "tab.unpin",
             Self::TabTogglePin { .. } => "tab.toggle_pin",
+            Self::TabUnload { .. } => "tab.unload",
+            Self::TabResetPin { .. } => "tab.reset_pin",
+            Self::TabPinnedCloseAction { .. } => "tab.pinned_close_action",
+            Self::TabCloseMultiple { .. } => "tab.close_multiple",
+            Self::TabDetachToNewWindow { .. } => "tab.detach_to_new_window",
             Self::TabAddToEssentials { .. } => "tab.add_to_essentials",
             Self::TabRemoveFromEssentials { .. } => "tab.remove_from_essentials",
             Self::TabToggleEssential { .. } => "tab.toggle_essential",
@@ -1106,6 +1140,8 @@ impl Command {
             Self::FolderDelete { .. } => "folder.delete",
             Self::FolderUnpack { .. } => "folder.unpack",
             Self::FolderToggleCollapsed { .. } => "folder.toggle_collapsed",
+            Self::FolderUnloadTabs { .. } => "folder.unload_tabs",
+            Self::FolderReorder { .. } => "folder.reorder",
             Self::NotificationDismiss { .. } => "notification.dismiss",
             Self::SplitAdd { .. } => "split.add",
             Self::PanelToggle { .. } => "panel.toggle",
@@ -1163,6 +1199,8 @@ impl Command {
             Self::ZoomReset { .. } => "zoom.reset",
             Self::MenuAppToggle => "menu.app.toggle",
             Self::AppAbout => "app.about",
+            Self::AppCheckUpdates => "app.check_updates",
+            Self::AppSetUpdateStatus { .. } => "app.set_update_status",
             Self::AppQuit => "app.quit",
             Self::PageInspectElement { .. } => "page.inspect_element",
             Self::PageCut { .. } => "page.cut",
@@ -1214,6 +1252,7 @@ impl Command {
             Self::StatuslineAnnounce { .. } => "statusline.announce",
             Self::StatuslineClearAnnouncement => "statusline.clear_announcement",
             Self::WhichKeyShowAll => "which_key.show_all",
+            Self::WhichKeyBack => "which_key.back",
             Self::WhichKeyHide => "which_key.hide",
             Self::ExplorerOpen => "explorer.toggle",
             Self::ExplorerClose => "explorer.close",
@@ -1456,6 +1495,32 @@ impl Command {
             }),
             "tab.toggle_pin" => Ok(Self::TabTogglePin {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.unload" => Ok(Self::TabUnload {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.reset_pin" => Ok(Self::TabResetPin {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.pinned_close_action" => Ok(Self::TabPinnedCloseAction {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "tab.close_multiple" => Ok(Self::TabCloseMultiple {
+                tab_ids: parse_u64_list_arg(name, args, "tab_ids")?
+                    .into_iter()
+                    .map(TabId)
+                    .collect(),
+            }),
+            "tab.detach_to_new_window" => Ok(Self::TabDetachToNewWindow {
+                tab_id: TabId(parse_required_u64_arg(name, args, "tab_id")?),
+            }),
+            "folder.unload_tabs" => Ok(Self::FolderUnloadTabs {
+                folder_id: FolderId(parse_required_u64_arg(name, args, "folder_id")?),
+            }),
+            "folder.reorder" => Ok(Self::FolderReorder {
+                folder_id: FolderId(parse_required_u64_arg(name, args, "folder_id")?),
+                target_index: parse_required_u64_arg(name, args, "target_index")? as usize,
+                parent_folder_id: parse_optional_u64_arg(name, args, "parent_folder_id")?.map(FolderId),
             }),
             "tab.add_to_essentials" => Ok(Self::TabAddToEssentials {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
@@ -1823,6 +1888,17 @@ impl Command {
             }),
             "menu.app.toggle" => Ok(Self::MenuAppToggle),
             "app.about" => Ok(Self::AppAbout),
+            "app.check_updates" => Ok(Self::AppCheckUpdates),
+            "app.set_update_status" => {
+                let raw = parse_required_string_arg(name, args, "status")?;
+                let status = crate::menus::AboutUpdateStatus::from_preset(&raw).ok_or_else(|| {
+                    CommandError::InvalidArgument {
+                        command: name.to_string(),
+                        message: format!("unknown status `{raw}`"),
+                    }
+                })?;
+                Ok(Self::AppSetUpdateStatus { status })
+            }
             "app.quit" => Ok(Self::AppQuit),
             "page.inspect_element" => Ok(Self::PageInspectElement {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
@@ -1981,6 +2057,8 @@ impl Command {
             }),
             "media.session.toggle_play"
             | "media.session.toggle_mute"
+            | "media.session.toggle_mic"
+            | "media.session.toggle_camera"
             | "media.session.previous"
             | "media.session.next"
             | "media.session.pip"
@@ -1990,6 +2068,8 @@ impl Command {
                 let control = match name {
                     "media.session.toggle_play" => MediaControl::TogglePlay,
                     "media.session.toggle_mute" => MediaControl::ToggleMute,
+                    "media.session.toggle_mic" => MediaControl::ToggleMic,
+                    "media.session.toggle_camera" => MediaControl::ToggleCamera,
                     "media.session.previous" => MediaControl::Previous,
                     "media.session.next" => MediaControl::Next,
                     "media.session.pip" => MediaControl::PictureInPicture,
@@ -2035,6 +2115,7 @@ impl Command {
             }),
             "statusline.clear_announcement" => Ok(Self::StatuslineClearAnnouncement),
             "which_key.show_all" => Ok(Self::WhichKeyShowAll),
+            "which_key.back" => Ok(Self::WhichKeyBack),
             "which_key.hide" => Ok(Self::WhichKeyHide),
             // Entering the focus surfaces uses the names of the vim profile (Base/res/keyboard/vim.toml).
             "explorer.toggle" => Ok(Self::ExplorerOpen),
@@ -3233,6 +3314,23 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             arguments: Vec::new(),
         },
         CommandDescriptor {
+            name: "app.check_updates".to_string(),
+            title: "Check for Updates".to_string(),
+            description: "Check whether a newer version of Zendia is available".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "app.set_update_status".to_string(),
+            title: "Set Update Status".to_string(),
+            description: "Update the About dialog's update status state".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "status",
+                ArgumentType::String,
+                true,
+                "Update status preset name",
+            )],
+        },
+        CommandDescriptor {
             name: "app.quit".to_string(),
             title: "Quit".to_string(),
             description: "Close all windows and exit Zendia".to_string(),
@@ -3925,6 +4023,12 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             name: "which_key.show_all".to_string(),
             title: "Show All Vim Keymaps".to_string(),
             description: "Open the which-key popup listing every mapping in the active vim mode".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "which_key.back".to_string(),
+            title: "Which-Key Step Back".to_string(),
+            description: "Pop one pending prefix key in the active which-key popup".to_string(),
             arguments: Vec::new(),
         },
         CommandDescriptor {

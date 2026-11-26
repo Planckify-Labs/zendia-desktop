@@ -7,7 +7,7 @@
 //! Left navigation sidebar of Zendia's native settings window.
 
 use crate::ui::core_view::use_core;
-use crate::ui::kit::Icon;
+use crate::ui::kit::{Icon, focus_ring_border, use_interactive_feedback};
 use crate::ui::settings::controls::SettingsPalette;
 use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
@@ -18,6 +18,7 @@ use zendia_browser_core::settings::SettingsGroupId;
 pub struct SettingsSidebar {
     pub active_group: SettingsGroupId,
     pub searching: bool,
+    pub compact: bool,
     pub on_select_group: EventHandler<SettingsGroupId>,
 }
 
@@ -34,7 +35,7 @@ impl Component for SettingsSidebar {
             rect()
                 .width(Size::fill())
                 .height(Size::px(1.0))
-                .margin(Gaps::new(6.0, 8.0, 6.0, 8.0))
+                .margin(Gaps::new(6.0, 12.0, 6.0, 12.0))
                 .background(palette.divider)
         };
 
@@ -50,22 +51,18 @@ impl Component for SettingsSidebar {
             }
         };
 
+        let sidebar_width = if self.compact { 200.0 } else { 248.0 };
+
         rect()
-            .width(Size::px(248.0))
+            .width(Size::px(sidebar_width))
             .height(Size::fill())
             .background(palette.sidebar_bg)
-            .border(
-                Border::new()
-                    .width(1.0)
-                    .alignment(BorderAlignment::Inner)
-                    .fill(palette.card_border),
-            )
-            .padding(Gaps::new(20.0, 12.0, 16.0, 12.0))
-            .spacing(12.0)
+            .padding(Gaps::new(22.0, 10.0, 16.0, 14.0))
+            .spacing(10.0)
             .child(
                 rect()
                     .width(Size::fill())
-                    .padding(Gaps::new(0.0, 8.0, 6.0, 8.0))
+                    .padding(Gaps::new(0.0, 10.0, 6.0, 12.0))
                     .direction(Direction::Horizontal)
                     .cross_align(Alignment::center())
                     .spacing(10.0)
@@ -146,18 +143,17 @@ impl Component for SettingsNavRow {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let palette = SettingsPalette::for_scheme(theme.scheme);
-        let mut hovered = use_state(|| false);
+        let feedback = use_interactive_feedback(true);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
         let on_press = self.on_press.clone();
 
-        let bg = if self.active {
+        let rest_bg = if self.active {
             palette.selected_pill_bg
-        } else if *hovered.read() {
-            palette.row_hover_bg
         } else {
             Color::TRANSPARENT
         };
+        let bg = feedback.background(rest_bg, palette.row_hover_bg, palette.selected_pill_bg);
 
         let icon_role = if self.active {
             ThemeRole::Accent
@@ -165,14 +161,7 @@ impl Component for SettingsNavRow {
             ThemeRole::TextMuted
         };
 
-        let border = if focus() == Focus::Keyboard {
-            Border::new()
-                .width(1.5)
-                .alignment(BorderAlignment::Inner)
-                .fill(theme.color(ThemeRole::FocusRing))
-        } else {
-            Border::new()
-        };
+        let border = focus_ring_border(focus() == Focus::Keyboard, &theme, Border::new());
 
         rect()
             .a11y_id(a11y_id)
@@ -180,20 +169,39 @@ impl Component for SettingsNavRow {
             .a11y_role(AccessibilityRole::Button)
             .a11y_alt(self.label.clone())
             .width(Size::fill())
-            .height(Size::px(34.0))
-            .padding(Gaps::new(0.0, 10.0, 0.0, 10.0))
-            .corner_radius(CornerRadius::new_all(8.0))
+            .height(Size::px(40.0))
+            .padding(Gaps::new(0.0, 12.0, 0.0, 4.0))
+            .corner_radius(CornerRadius::new_all(6.0))
             .background(bg)
             .border(border)
+            .scale(feedback.scale())
             .direction(Direction::Horizontal)
             .content(Content::Flex)
             .main_align(Alignment::SpaceBetween)
             .cross_align(Alignment::center())
             .spacing(8.0)
             .cursor(CursorIcon::Pointer)
-            .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
+            .on_pointer_down(feedback.on_pointer_down())
+            .on_global_pointer_up(feedback.on_pointer_up())
             .on_press(move |_| on_press.call(()))
+            .on_key_down(move |e: Event<KeyboardEventData>| {
+                if e.key == Key::Named(NamedKey::Enter) || matches!(&e.key, Key::Character(c) if c == " ") {
+                    e.stop_propagation();
+                }
+            })
+            .child(
+                rect()
+                    .width(Size::px(3.0))
+                    .height(Size::px(20.0))
+                    .corner_radius(CornerRadius::new_all(2.0))
+                    .background(if self.active {
+                        theme.color(ThemeRole::Accent)
+                    } else {
+                        Color::TRANSPARENT
+                    }),
+            )
             .child(
                 rect()
                     .width(Size::flex(1.0))
@@ -201,18 +209,22 @@ impl Component for SettingsNavRow {
                     .content(Content::Flex)
                     .cross_align(Alignment::center())
                     .spacing(10.0)
-                    .child(Icon::new(self.icon.clone()).size(15.0).role(icon_role))
+                    .child(Icon::new(self.icon.clone()).size(16.0).role(icon_role))
                     .child(
                         label()
                             .width(Size::flex(1.0))
                             .text(self.label.clone())
-                            .font_size(13.0)
+                            .font_size(13.5)
                             .font_weight(if self.active {
                                 FontWeight::SEMI_BOLD
                             } else {
                                 FontWeight::NORMAL
                             })
-                            .color(theme.color(ThemeRole::Text))
+                            .color(if self.active {
+                                theme.color(ThemeRole::Accent)
+                            } else {
+                                theme.color(ThemeRole::Text)
+                            })
                             .max_lines(1)
                             .text_overflow(TextOverflow::Ellipsis),
                     ),

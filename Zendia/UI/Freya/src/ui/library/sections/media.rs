@@ -11,10 +11,11 @@
 use crate::ui::chrome::menus::{OpenContextMenu, try_use_menu_state};
 use crate::ui::core_view::use_core;
 use crate::ui::kit::icons::prepared_icon_bytes;
+use crate::ui::kit::list_nav::scroll_item_into_view;
 use crate::ui::kit::{Icon, KitChip};
 use crate::ui::library::nav::{LibraryCursorRing, LibraryNavLayout, LibraryNavRow, use_library_nav};
-use crate::ui::library::search::LibrarySearchBar;
-use crate::ui::theme::{ResolvedScheme, ThemeRole, use_theme};
+use crate::ui::library::search::{LibraryFilterChip, LibraryFilterGroup, LibrarySearchBar};
+use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, use_theme};
 use freya::prelude::*;
 use std::path::PathBuf;
 use zendia_browser_core::commands::Command;
@@ -23,13 +24,13 @@ use zendia_browser_core::library_media::{
     LibraryMediaItem, LibraryMediaKind, build_media_context_menu, filter_media_items, format_duration,
 };
 
-/// Width of this section's body next to the rail.
-pub const WIDTH: f32 = 420.0;
+/// Width of this section's body next to the rail (Zen's `418px - 110px`).
+pub const WIDTH: f32 = 308.0;
 
-/// Number of thumbnail columns rendered in the Media grid (`420px` fits 3 × ~124px square tiles with 12px gaps).
-pub const MEDIA_GRID_COLUMNS: usize = 3;
+/// Number of thumbnail columns rendered in the Media grid (`308px` fits 2 × 134px square tiles with 12px gap + 14px padding).
+pub const MEDIA_GRID_COLUMNS: usize = 2;
 
-const TILE_SIZE: f32 = 122.0;
+const TILE_SIZE: f32 = 134.0;
 const GRID_GAP: f32 = 12.0;
 
 #[derive(Clone, PartialEq)]
@@ -40,8 +41,11 @@ impl Component for MediaSection {
         let core = use_core();
         let theme = use_theme();
         let mut query = use_state(String::new);
-        let mut filters_open = use_state(|| false);
+        let filters_open = use_state(|| false);
         let mut active_folders = use_state(Vec::<String>::new);
+        let mut scroll_controller = use_scroll_controller(ScrollConfig::default);
+        let mut viewport_height = use_state(|| 480.0f32);
+        let mut last_scrolled_cursor = use_state(|| None::<String>);
 
         let (enabled, items, folders) = {
             let model = core.model().read();
@@ -89,148 +93,58 @@ impl Component for MediaSection {
         };
         let focused_key = use_library_nav(LibrarySection::Media, nav_layout, nav_rows);
 
+        if enabled && *last_scrolled_cursor.peek() != focused_key {
+            last_scrolled_cursor.set(focused_key.clone());
+            if let Some(target_key) = focused_key.as_deref()
+                && let Some(idx) = visible_items
+                    .iter()
+                    .position(|item| format!("media:{}", item.id.0) == target_key)
+            {
+                let row_idx = idx / MEDIA_GRID_COLUMNS;
+                let total_rows = visible_items.len().div_ceil(MEDIA_GRID_COLUMNS);
+                let item_top = 6.0 + row_idx as f32 * (TILE_SIZE + GRID_GAP);
+                let content_height = 6.0 + total_rows as f32 * (TILE_SIZE + GRID_GAP) + 16.0;
+                let vh = *viewport_height.peek();
+                scroll_item_into_view(&mut scroll_controller, item_top, TILE_SIZE, vh, content_height);
+            }
+        }
+
         if !enabled {
             let opt_in_focused = focused_key.as_deref() == Some("media:opt-in");
             return render_opt_in_state(&core, &theme, opt_in_focused);
         }
 
-        let is_filters_open = *filters_open.read();
         let show_filter_button = folders.len() >= 2;
         let active_folder_count = folder_filter.len();
-        let pill_bg = match theme.scheme {
-            ResolvedScheme::Dark => Color::from_argb(22, 255, 255, 255),
-            ResolvedScheme::Light => Color::from_argb(18, 0, 0, 0),
-        };
-        let pill_active_bg = theme.rgba(ThemeRole::Accent).with_alpha(0.24).to_color();
-
-        let top_bar: Element = if !is_filters_open {
-            rect()
-                .width(Size::fill())
-                .padding(Gaps::new(10.0, 12.0, 6.0, 10.0))
-                .direction(Direction::Horizontal)
-                .content(Content::Flex)
-                .cross_align(Alignment::center())
-                .spacing(6.0)
-                .child(
-                    rect()
-                        .width(Size::flex(1.0))
-                        .child(LibrarySearchBar::new("Search Media…", query)),
-                )
-                .maybe_child(show_filter_button.then(|| {
-                    rect()
-                        .height(Size::px(34.0))
-                        .padding(Gaps::new(0.0, 10.0, 0.0, 10.0))
-                        .corner_radius(CornerRadius::new_all(10.0))
-                        .background(if active_folder_count > 0 {
-                            pill_active_bg
-                        } else {
-                            pill_bg
-                        })
-                        .direction(Direction::Horizontal)
-                        .cross_align(Alignment::center())
-                        .spacing(6.0)
-                        .cursor(CursorIcon::Pointer)
-                        .on_press(move |_| {
-                            filters_open.set(true);
-                        })
-                        .child(
-                            Icon::new("circle-bars-filter")
-                                .size(15.0)
-                                .role(if active_folder_count > 0 {
-                                    ThemeRole::Accent
-                                } else {
-                                    ThemeRole::TextMuted
-                                }),
-                        )
-                        .child(
-                            label()
-                                .text(if active_folder_count > 0 {
-                                    format!("Filter ({active_folder_count})")
-                                } else {
-                                    "Filter".to_string()
-                                })
-                                .font_size(13.0)
-                                .font_weight(FontWeight::MEDIUM)
-                                .color(if active_folder_count > 0 {
-                                    theme.color(ThemeRole::Accent)
-                                } else {
-                                    theme.color(ThemeRole::Text)
-                                }),
-                        )
-                }))
-                .into_element()
+        let filter_groups = if show_filter_button {
+            vec![LibraryFilterGroup::new(
+                "folder",
+                "Where to look",
+                folders
+                    .iter()
+                    .map(|folder| {
+                        let selected = folder_filter.iter().any(|f| f == folder);
+                        LibraryFilterChip::new(folder.clone(), folder.clone(), selected)
+                    })
+                    .collect(),
+            )]
         } else {
-            rect()
-                .width(Size::fill())
-                .padding(Gaps::new(12.0, 14.0, 10.0, 14.0))
-                .spacing(10.0)
-                .child(
-                    rect()
-                        .width(Size::fill())
-                        .direction(Direction::Horizontal)
-                        .main_align(Alignment::SpaceBetween)
-                        .cross_align(Alignment::center())
-                        .child(
-                            label()
-                                .text("Filter Media…")
-                                .font_size(14.0)
-                                .font_weight(FontWeight::BOLD)
-                                .color(theme.color(ThemeRole::Text)),
-                        )
-                        .child(
-                            rect()
-                                .padding(Gaps::new(6.0, 14.0, 6.0, 14.0))
-                                .corner_radius(CornerRadius::new_all(10.0))
-                                .background(pill_bg)
-                                .cursor(CursorIcon::Pointer)
-                                .on_press(move |_| {
-                                    filters_open.set(false);
-                                })
-                                .child(
-                                    label()
-                                        .text("Done")
-                                        .font_size(13.0)
-                                        .font_weight(FontWeight::SEMI_BOLD)
-                                        .color(theme.color(ThemeRole::Text)),
-                                ),
-                        ),
-                )
-                .child(
-                    rect()
-                        .width(Size::fill())
-                        .spacing(8.0)
-                        .child(
-                            label()
-                                .text("Where to look")
-                                .font_size(12.5)
-                                .font_weight(FontWeight::SEMI_BOLD)
-                                .color(theme.color(ThemeRole::TextMuted)),
-                        )
-                        .child(
-                            rect()
-                                .width(Size::fill())
-                                .direction(Direction::Horizontal)
-                                .content(Content::wrap())
-                                .spacing(6.0)
-                                .children(folders.iter().map(|folder| {
-                                    let selected = folder_filter.iter().any(|f| f == folder);
-                                    let folder_name = folder.clone();
-                                    KitChip::new(folder.clone())
-                                        .key(folder.clone())
-                                        .selected(selected)
-                                        .on_press(move |_| {
-                                            let mut list = active_folders.write();
-                                            if let Some(pos) = list.iter().position(|f| f == &folder_name) {
-                                                list.remove(pos);
-                                            } else {
-                                                list.push(folder_name.clone());
-                                            }
-                                        })
-                                })),
-                        ),
-                )
-                .into_element()
+            Vec::new()
         };
+
+        let top_bar = LibrarySearchBar::new("Search Media…", query)
+            .filter_title("Filter Media…")
+            .filter_groups(filter_groups)
+            .filters_open(filters_open)
+            .active_filter_count(active_folder_count)
+            .on_toggle_filter(move |(_, folder_name): (String, String)| {
+                let mut list = active_folders.write();
+                if let Some(pos) = list.iter().position(|f| f == &folder_name) {
+                    list.remove(pos);
+                } else {
+                    list.push(folder_name);
+                }
+            });
 
         let content_body: Element = if visible_items.is_empty() {
             let has_filter = !query_text.trim().is_empty() || !folder_filter.is_empty();
@@ -284,15 +198,26 @@ impl Component for MediaSection {
                 })
                 .collect();
 
-            ScrollView::new()
+            rect()
                 .width(Size::fill())
                 .height(Size::flex(1.0))
+                .on_sized(move |e: Event<SizedEventData>| {
+                    let h = e.area.height();
+                    if (*viewport_height.peek() - h).abs() > 1.0 {
+                        viewport_height.set(h);
+                    }
+                })
                 .child(
-                    rect()
+                    ScrollView::new_controlled(scroll_controller)
                         .width(Size::fill())
-                        .padding(Gaps::new(6.0, 14.0, 16.0, 14.0))
-                        .spacing(GRID_GAP)
-                        .children(rows),
+                        .height(Size::fill())
+                        .child(
+                            rect()
+                                .width(Size::fill())
+                                .padding(Gaps::new(6.0, 14.0, 16.0, 14.0))
+                                .spacing(GRID_GAP)
+                                .children(rows),
+                        ),
                 )
                 .into_element()
         };
@@ -340,11 +265,11 @@ fn render_opt_in_state(
                 .direction(Direction::Horizontal)
                 .content(Content::Flex)
                 .spacing(12.0)
-                .children((0..3).map(|col_idx| {
+                .children((0..MEDIA_GRID_COLUMNS).map(|col_idx| {
                     rect()
                         .key(col_idx)
                         .width(Size::flex(1.0))
-                        .height(Size::px(118.0))
+                        .height(Size::px(TILE_SIZE))
                         .corner_radius(CornerRadius::new_all(16.0))
                         .background(skeleton_tile_bg)
                 }))
@@ -353,17 +278,16 @@ fn render_opt_in_state(
         .collect();
 
     let enable_core = core.clone();
-    let button_bg = theme.color(ThemeRole::Accent);
-    let button_fg = if theme.scheme.is_dark() {
-        theme.palette.night.to_color()
-    } else {
-        Color::WHITE
+    let button_bg = match theme.scheme {
+        ResolvedScheme::Dark => Rgba::rgb(90, 92, 118).to_color(),
+        ResolvedScheme::Light => Rgba::rgb(122, 118, 178).to_color(),
     };
+    let button_fg = Color::WHITE;
     let show_button = LibraryCursorRing::new(
         button_focused,
         rect()
             .width(Size::fill())
-            .height(Size::px(42.0))
+            .height(Size::px(40.0))
             .corner_radius(CornerRadius::new_all(10.0))
             .background(button_bg)
             .center()
@@ -379,12 +303,13 @@ fn render_opt_in_state(
                     .color(button_fg),
             ),
     )
-    .corner_radius(10.0);
+    .corner_radius(10.0)
+    .fill(false);
 
     let card = rect()
         .width(Size::fill())
-        .max_width(Size::px(336.0))
-        .padding(Gaps::new(22.0, 22.0, 18.0, 22.0))
+        .max_width(Size::px(276.0))
+        .padding(Gaps::new(22.0, 20.0, 18.0, 20.0))
         .corner_radius(CornerRadius::new_all(22.0))
         .background(card_bg)
         .border(
@@ -396,7 +321,7 @@ fn render_opt_in_state(
         .shadow(card_shadow)
         .cross_align(Alignment::center())
         .spacing(12.0)
-        .child(Icon::new("new-tab-image").size(36.0).role(ThemeRole::Accent))
+        .child(Icon::new("library-media").size(40.0).role(ThemeRole::Text))
         .child(
             label()
                 .width(Size::fill())
@@ -540,10 +465,11 @@ impl Component for MediaTile {
                     )
             }));
 
-        rect()
-            .width(Size::px(TILE_SIZE))
-            .height(Size::px(TILE_SIZE))
-            .child(LibraryCursorRing::new(self.focused, tile).corner_radius(16.0))
+        rect().width(Size::px(TILE_SIZE)).height(Size::px(TILE_SIZE)).child(
+            LibraryCursorRing::new(self.focused, tile)
+                .corner_radius(16.0)
+                .fill(false),
+        )
     }
 
     fn render_key(&self) -> DiffKey {

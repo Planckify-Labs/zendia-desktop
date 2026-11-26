@@ -18,15 +18,12 @@ use crate::ui::library::try_use_library_state;
 use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, motion, use_theme};
 use freya::animation::*;
 use freya::prelude::*;
-use std::time::Duration;
 use zendia_browser_core::commands::Command;
 
 /// Corner radius shared by the search box, Filter button, Done button, and filter chips (`--zen-library-radius`).
 pub const SEARCH_RADIUS: f32 = 12.0;
 /// Height of the search box and Filter button.
 pub const SEARCH_BOX_HEIGHT: f32 = 36.0;
-/// Slide-down / fade transition duration for the filter panel (`0.28 s`).
-const FILTER_PANEL_DURATION: Duration = Duration::from_millis(280);
 
 /// One selectable option chip inside a [`LibraryFilterGroup`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,7 +83,9 @@ pub struct LibrarySearchBar {
     filter_title: Option<String>,
     filter_groups: Vec<LibraryFilterGroup>,
     filters_open: Option<State<bool>>,
+    active_filter_count: usize,
     on_toggle_filter: Option<EventHandler<(String, String)>>,
+    trailing_action: Option<Element>,
     auto_focus: bool,
     force_focused_ring: bool,
 }
@@ -99,7 +98,9 @@ impl LibrarySearchBar {
             filter_title: None,
             filter_groups: Vec::new(),
             filters_open: None,
+            active_filter_count: 0,
             on_toggle_filter: None,
+            trailing_action: None,
             auto_focus: false,
             force_focused_ring: false,
         }
@@ -120,8 +121,20 @@ impl LibrarySearchBar {
         self
     }
 
+    /// Shows an active filter count badge on the Filter button when greater than zero.
+    pub fn active_filter_count(mut self, count: usize) -> Self {
+        self.active_filter_count = count;
+        self
+    }
+
     pub fn on_toggle_filter(mut self, handler: impl Into<EventHandler<(String, String)>>) -> Self {
         self.on_toggle_filter = Some(handler.into());
+        self
+    }
+
+    /// Optional button placed inline on the right of the search input (e.g. Space Routing's `+ New`).
+    pub fn trailing_action(mut self, action: impl IntoElement) -> Self {
+        self.trailing_action = Some(action.into_element());
         self
     }
 
@@ -161,6 +174,17 @@ impl Component for LibrarySearchBar {
         let fallback_filters_open = use_state(|| false);
         let mut filter_btn_hovered = use_state(|| false);
         let mut done_btn_hovered = use_state(|| false);
+        let mut last_query = use_state(|| self.query.peek().clone());
+
+        // Reset list cursor to the top match whenever the search query changes (`LIB-KB-02`).
+        let current_query = self.query.read().clone();
+        if *last_query.peek() != current_query {
+            last_query.set(current_query);
+            if let Some(lib) = library {
+                let mut cursor = lib.nav.cursor;
+                cursor.set_if_modified(None);
+            }
+        }
 
         let filters_open_state = self.filters_open.unwrap_or(fallback_filters_open);
         let has_filters = !self.filter_groups.is_empty();
@@ -182,7 +206,7 @@ impl Component for LibrarySearchBar {
             conf.on_change(OnChange::Rerun);
             let (from, to) = if *open { (0.0, 1.0) } else { (1.0, 0.0) };
             AnimNum::new(from, to)
-                .duration(FILTER_PANEL_DURATION)
+                .duration(motion::LIBRARY_FILTER_PANEL)
                 .ease(Ease::Out)
                 .function(motion::ease_out_fn())
         });
@@ -252,6 +276,22 @@ impl Component for LibrarySearchBar {
                         e.prevent_default();
                         if let Some(lib) = library {
                             lib.nav.move_cursor(NavMove::Up);
+                        }
+                        false
+                    }
+                    Key::Named(NamedKey::PageDown) => {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        if let Some(lib) = library {
+                            lib.nav.move_cursor(NavMove::HalfPageDown);
+                        }
+                        false
+                    }
+                    Key::Named(NamedKey::PageUp) => {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        if let Some(lib) = library {
+                            lib.nav.move_cursor(NavMove::HalfPageUp);
                         }
                         false
                     }
@@ -345,12 +385,25 @@ impl Component for LibrarySearchBar {
                 )
                 .into_element()
         } else {
+            let active_count = self.active_filter_count;
             let filter_button = has_filters.then(|| {
                 let mut open_state = filters_open_state;
-                let bg = if *filter_btn_hovered.read() {
+                let bg = if active_count > 0 {
+                    theme.rgba(ThemeRole::Accent).with_alpha(0.24).to_color()
+                } else if *filter_btn_hovered.read() {
                     pill_hover_bg
                 } else {
                     pill_bg
+                };
+                let label_text = if active_count > 0 {
+                    format!("Filter ({active_count})")
+                } else {
+                    "Filter".to_string()
+                };
+                let role = if active_count > 0 {
+                    ThemeRole::Accent
+                } else {
+                    ThemeRole::Text
                 };
                 rect()
                     .a11y_role(AccessibilityRole::Button)
@@ -366,13 +419,13 @@ impl Component for LibrarySearchBar {
                     .on_pointer_enter(move |_| filter_btn_hovered.set_if_modified(true))
                     .on_pointer_leave(move |_| filter_btn_hovered.set_if_modified(false))
                     .on_press(move |_| open_state.set(true))
-                    .child(Icon::new("circle-bars-filter").size(15.0).role(ThemeRole::Text))
+                    .child(Icon::new("circle-bars-filter").size(15.0).role(role))
                     .child(
                         label()
-                            .text("Filter")
+                            .text(label_text)
                             .font_size(13.5)
                             .font_weight(FontWeight::MEDIUM)
-                            .color(text_color),
+                            .color(theme.color(role)),
                     )
             });
 
@@ -433,6 +486,7 @@ impl Component for LibrarySearchBar {
                         ),
                 )
                 .maybe_child(filter_button)
+                .maybe_child(self.trailing_action.clone())
                 .into_element()
         };
 

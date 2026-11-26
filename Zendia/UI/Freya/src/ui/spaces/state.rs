@@ -21,6 +21,8 @@ pub enum SpaceSwipeMode {
     SwitchSpace,
     /// Swiping past the last space to reveal the `+` add-space badge.
     AddSpace,
+    /// Swiping past the first space toward the Library edge (`SWP-04`).
+    OpenLibrary,
 }
 
 /// Transient view state for an in-progress horizontal space swipe in the sidebar.

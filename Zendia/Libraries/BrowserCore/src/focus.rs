@@ -10,7 +10,7 @@
 //! than view-local widget ids, so Freya, headless runners, and tests share the same traversal, selection, hint-label,
 //! and split-pane landing rules.
 
-use crate::contributions::{ContributionId, ToolbarArea, ToolbarItem, ToolbarPlacement};
+use crate::contributions::{ContributionId, ToolbarArea, ToolbarItem};
 use crate::model::{BrowserModel, FolderId, SidebarSide, SplitDirection, SplitGroup, SplitGroupId, TabId};
 use crate::split::{self, DropZone, PaneRect};
 
@@ -33,6 +33,7 @@ pub enum FocusTarget {
     Folder(FolderId),
     Tab(TabId),
     SplitGroup(SplitGroupId),
+    SidebarFooter(ContributionId),
     ToolbarItem(ContributionId),
     Pane(TabId),
 }
@@ -339,6 +340,18 @@ pub fn explorer_targets(model: &BrowserModel) -> Vec<FocusTarget> {
             }
         }
     }
+
+    // Sidebar footer buttons (Library, Agents, Chat, WebChat, Spaces, +), matching `#zen-sidebar-foot-buttons` (`VIM-EX-04`, `VIM-HT-03`).
+    let mut foot_items: Vec<&ToolbarItem> = model
+        .contributions
+        .toolbar_items
+        .iter()
+        .filter(|item| item.visible && model.layout.toolbar_area_of(item) == Some(ToolbarArea::SidebarBottom))
+        .collect();
+    foot_items.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
+    for item in foot_items {
+        out.push(FocusTarget::SidebarFooter(item.id.clone()));
+    }
     out
 }
 
@@ -379,7 +392,7 @@ pub fn toolbar_targets(model: &BrowserModel) -> Vec<FocusTarget> {
     let collect_sorted = |area: ToolbarArea| -> Vec<&ToolbarItem> {
         let mut bucket: Vec<&ToolbarItem> = items
             .iter()
-            .filter(|item| item.visible && layout.resolve_toolbar_area(item.placement_rules) == Some(area))
+            .filter(|item| item.visible && layout.toolbar_area_of(item) == Some(area))
             .collect();
         bucket.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
         bucket
@@ -387,44 +400,44 @@ pub fn toolbar_targets(model: &BrowserModel) -> Vec<FocusTarget> {
 
     let mut ordered: Vec<&ToolbarItem> = Vec::new();
     if layout.has_top_toolbar() {
-        let top_start = collect_sorted(ToolbarArea::TopBarStart);
-        let sidebar_toggles: Vec<&ToolbarItem> = top_start
-            .iter()
-            .copied()
-            .filter(|item| item.placement == ToolbarPlacement::SidebarTop)
-            .collect();
-        let nav_start: Vec<&ToolbarItem> = top_start
-            .iter()
-            .copied()
-            .filter(|item| item.placement != ToolbarPlacement::SidebarTop)
-            .collect();
-        let top_center = collect_sorted(ToolbarArea::TopBarCenter);
-        let top_end = collect_sorted(ToolbarArea::TopBarEnd);
-
-        match layout.sidebar_side {
-            SidebarSide::Left => {
-                ordered.extend(sidebar_toggles);
-                ordered.extend(nav_start);
-                ordered.extend(top_center);
-                ordered.extend(top_end);
-            }
-            SidebarSide::Right => {
-                ordered.extend(nav_start);
-                ordered.extend(top_center);
-                ordered.extend(top_end);
-                ordered.extend(sidebar_toggles);
-            }
+        // The top bar reads left to right. Buttons kept at the top of the sidebar come before it when the sidebar is
+        // on the left, and after it when the sidebar is on the right.
+        let in_sidebar = collect_sorted(ToolbarArea::SidebarTopStart);
+        if layout.sidebar_side == SidebarSide::Left {
+            ordered.extend(in_sidebar.iter().copied());
+        }
+        ordered.extend(collect_sorted(ToolbarArea::TopBarStart));
+        ordered.extend(collect_sorted(ToolbarArea::TopBarCenter));
+        ordered.extend(collect_sorted(ToolbarArea::TopBarEnd));
+        if layout.sidebar_side == SidebarSide::Right {
+            ordered.extend(in_sidebar);
         }
     } else {
         ordered.extend(collect_sorted(ToolbarArea::SidebarTopStart));
         ordered.extend(collect_sorted(ToolbarArea::SidebarTopEnd));
         ordered.extend(collect_sorted(ToolbarArea::SidebarUrlBar));
+        if layout.has_compact_top_bar() {
+            ordered.extend(collect_sorted(ToolbarArea::TopBarEnd));
+        }
     }
 
-    ordered
+    let mut result: Vec<FocusTarget> = ordered
         .into_iter()
         .map(|item| FocusTarget::ToolbarItem(item.id.clone()))
-        .collect()
+        .collect();
+
+    // Include visible window control buttons in toolbar focus order (`VIM-TB-03`, `ZendiaToolbar.sys.mjs:74`).
+    if layout.has_top_toolbar() || layout.has_compact_top_bar() || layout.sidebar_side == SidebarSide::Right {
+        for id in [
+            "builtin.window_minimize",
+            "builtin.window_maximize",
+            "builtin.window_close",
+        ] {
+            result.push(FocusTarget::ToolbarItem(ContributionId::new(id)));
+        }
+    }
+
+    result
 }
 
 /// Ordered pane targets window mode walks: the active split group's panes in pane order, or the lone active tab.
@@ -669,11 +682,19 @@ fn rect_center(rect: PaneRect) -> (f32, f32) {
     (rect.x + rect.width * 0.5, rect.y + rect.height * 0.5)
 }
 
-/// Finds the nearest non-edge landing target in `direction` using Zendia's directional score (`along + 2 * across`).
+/// Finds the nearest landing target in `direction` using Zendia's directional score (`along + 2 * across`).
+///
+/// Prefers inner pane targets (`PaneSide` / `PaneSwap`) in `direction`, and steps onto the outer `SplitEdge` matching
+/// `direction` when no closer inner target lies further in that direction (`VIM-WM-01`).
 pub fn step_landing_target(targets: &[LandingTarget], current: usize, direction: PaneDirection) -> usize {
     let Some(origin) = targets.get(current) else {
         return 0;
     };
+    let edge_zone = direction.drop_zone();
+    // Already resting on the outermost edge in `direction`: stay put instead of bouncing back inward.
+    if matches!(origin.kind, LandingKind::SplitEdge { zone } if zone == edge_zone) {
+        return current;
+    }
     let (ox, oy) = rect_center(origin.rect);
     let (dx, dy) = direction.delta();
     let mut best = None;
@@ -696,7 +717,19 @@ pub fn step_landing_target(targets: &[LandingTarget], current: usize, direction:
         }
     }
 
-    best.unwrap_or(current)
+    if let Some(idx) = best {
+        return idx;
+    }
+
+    // No inner target further in `direction`: step onto the outer split edge for that direction.
+    if let Some(edge_idx) = targets
+        .iter()
+        .position(|target| matches!(target.kind, LandingKind::SplitEdge { zone } if zone == edge_zone))
+    {
+        return edge_idx;
+    }
+
+    current
 }
 
 /// Finds the neighboring pane of `active_tab` in `direction`, if one exists in `group`.
@@ -920,6 +953,8 @@ mod tests {
     #[test]
     fn toolbar_targets_follow_layout_order() {
         let mut model = sample_model(true);
+        // A left sidebar: on the right, the single toolbar also holds the window buttons.
+        model.layout.sidebar_side = SidebarSide::Left;
         model.layout.toolbar_layout = ToolbarLayout::Single;
         let single_ids: Vec<String> = toolbar_targets(&model)
             .into_iter()
@@ -959,8 +994,10 @@ mod tests {
                 "zendia.agents",
                 "zendia.chat",
                 "zendia.webchat",
-                "builtin.extensions",
                 "builtin.app_menu",
+                "builtin.window_minimize",
+                "builtin.window_maximize",
+                "builtin.window_close",
             ]
         );
     }
@@ -983,6 +1020,25 @@ mod tests {
         assert_eq!(targets.len(), 14);
         assert_eq!(neighbor_pane(&group, TabId(12), PaneDirection::Right), Some(TabId(10)));
         assert_eq!(neighbor_pane(&group, TabId(12), PaneDirection::Down), Some(TabId(11)));
+
+        // Stepping repeatedly to the right reaches and stays on the outer `Right` split edge (`VIM-WM-01`).
+        let mut cur = targets
+            .iter()
+            .position(|t| matches!(t.kind, LandingKind::PaneSwap { .. }))
+            .unwrap();
+        for _ in 0..7 {
+            cur = step_landing_target(&targets, cur, PaneDirection::Right);
+        }
+        assert!(
+            matches!(targets[cur].kind, LandingKind::SplitEdge { zone: DropZone::Right }),
+            "expected Right SplitEdge, got {:?}",
+            targets[cur].kind
+        );
+        // Pressing Right again stays on Right SplitEdge instead of bouncing back inward.
+        assert_eq!(step_landing_target(&targets, cur, PaneDirection::Right), cur);
+        // Stepping back left leaves the outer edge onto an inner target.
+        let back = step_landing_target(&targets, cur, PaneDirection::Left);
+        assert!(!matches!(targets[back].kind, LandingKind::SplitEdge { .. }));
 
         let (moved, dir) = move_pane_layout(&group, TabId(12), PaneDirection::Right).expect("move right");
         assert_eq!(moved, vec![TabId(10), TabId(11), TabId(12)]);

@@ -8,21 +8,26 @@
 //! zones a dragged tab can land on, Zendia's tab switch motion and Glance on top.
 //!
 //! Pane geometry comes from [`zendia_browser_core::split`]; this view adds gaps, rings and motion. Resizing, focusing
-//! a pane and dropping a tab are commands. Only drag progress and animation stay here.
+//! a pane and dropping a tab are commands. Only drag progress, zoom-in-view, and animation stay here.
 
 use crate::ui::chrome::menus::{open_tab_context_menu, try_use_menu_state};
 use crate::ui::chrome::sidebar::{PageDrop, try_use_sidebar_state};
 use crate::ui::core_view::use_core;
-use crate::ui::page::glance::{GLANCE_BACKGROUND_OPACITY, GLANCE_BACKGROUND_SCALE, GlanceLayer, glance_spring};
+use crate::ui::kit::{Icon, use_last_some};
+use crate::ui::page::glance::{
+    GLANCE_BACKGROUND_OPACITY, GLANCE_BACKGROUND_SCALE, GLANCE_CLOSE, GLANCE_OPEN, GlanceLayer, glance_spring,
+};
 use crate::ui::page::surface::PageSurface;
+use crate::ui::page::surface_store::PageSurfaceContext;
+use crate::ui::panels::try_use_dock_state;
 use crate::ui::theme::{ThemeRole, motion, use_theme};
 use crate::ui::vim::RegionPickerOverlay;
 use crate::ui::vim::window_mode::{WindowModeOverlay, active_pane_ring_role};
 use freya::animation::*;
 use freya::prelude::*;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use zendia_browser_core::commands::Command;
-use zendia_browser_core::model::{SplitDirection, SplitGroupId, TabId};
+use zendia_browser_core::model::{SpaceId, SplitDirection, SplitGroup, SplitGroupId, TabId};
 use zendia_browser_core::split::{self, DropZone, HandleAxis, PaneRect};
 
 /// Space between split panes, as in Zen.
@@ -30,6 +35,7 @@ pub const SPLIT_GAP: f32 = 6.0;
 const PANE_RADIUS: f32 = 8.0;
 const ACTIVE_RING_WIDTH: f32 = 2.0;
 const HANDLE_HIT: f32 = 10.0;
+const DOUBLE_CLICK_MS: Duration = Duration::from_millis(350);
 
 /// Whether panes show live Hub views or stand-in pages (the gallery has no Hub).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,19 +113,34 @@ fn zone_pixels(pane: (f32, f32, f32, f32), zone: DropZone) -> (f32, f32, f32, f3
     }
 }
 
+/// Directional label shown in the accent drop-zone pill (matching Zen's split preview).
+pub fn drop_zone_label(zone: DropZone) -> &'static str {
+    match zone {
+        DropZone::Left => "Split left",
+        DropZone::Right => "Split right",
+        DropZone::Top => "Split above",
+        DropZone::Bottom => "Split below",
+    }
+}
+
 impl Component for PageArea {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
-        let theme = use_theme();
         let sidebar_state = try_use_sidebar_state();
+        let page_ctx = try_consume_context::<PageSurfaceContext>();
         let mut area = use_state(|| (0.0f32, 0.0f32, 0.0f32, 0.0f32));
         let resize_preview = use_state(|| None::<(SplitGroupId, Vec<f32>)>);
+        let mut zoomed_pane = use_state(|| None::<TabId>);
+        let rearrange_drag = use_state(|| None::<TabId>);
         let mut last_key = use_state(|| None::<(bool, u64)>);
         let mut last_active = use_state(|| None::<TabId>);
+        let mut last_space = use_state(|| None::<SpaceId>);
         let mut last_switch = use_state(|| None::<Instant>);
         let mut slide = use_state(|| (0u64, 0.0f32));
+        // Pending live-tab switch waiting for the newly selected Hub view to paint within `motion::TAB_PENDING`.
+        let mut pending_slide = use_state(|| None::<(u64, f32, Instant)>);
 
-        let (panes, group, active_tab, order, motion_enabled, glance) = {
+        let (panes, group, active_tab, active_tab_url, active_tab_view_id, active_space, order, motion_enabled, glance) = {
             let model = core.model().read();
             let group = model.active_split_group().cloned();
             let panes: Vec<Pane> = match &group {
@@ -148,18 +169,38 @@ impl Component for PageArea {
                     .into_iter()
                     .collect(),
             };
+            let (active_url, active_view_id) = model
+                .active_tab()
+                .map(|t| (t.url.clone(), t.view_id))
+                .unwrap_or_default();
             (
                 panes,
                 group,
                 model.active_tab,
+                active_url,
+                active_view_id,
+                model.active_space,
                 model.tabs_in_active_space_order(),
                 model.layout.tab_switch_motion,
                 model.glance.clone(),
             )
         };
 
+        // Clear pane zoom if the zoomed tab left the active split group.
+        let current_zoom = *zoomed_pane.peek();
+        if let Some(zoomed_id) = current_zoom
+            && !group.as_ref().is_some_and(|g| g.tab_ids.contains(&zoomed_id))
+        {
+            zoomed_pane.set(None);
+        }
+        let active_zoom = *zoomed_pane.read();
+        let is_resizing = resize_preview.read().is_some();
+
+        let is_empty_url = |url: &str| url.is_empty() || url == "about:blank" || url == "about:newtab";
+
         // Zendia's tab switch motion: the page slides in from below when the new tab sits below the old one in the
-        // sidebar, and from above otherwise. Switching a group's panes or switching fast (key repeat) does not move.
+        // sidebar, and from above otherwise. Suppressed on intra-split switches, key repeat (<90ms), space switches,
+        // empty/newtab pages, or while Glance is open. Live tabs without a painted frame wait up to `TAB_PENDING`.
         let shown_key = group
             .as_ref()
             .map(|g| (true, g.id.0))
@@ -169,9 +210,12 @@ impl Component for PageArea {
             let repeat = last_switch
                 .peek()
                 .is_some_and(|at| now.duration_since(at) < motion::TAB_REPEAT);
+            let same_space = *last_space.peek() == active_space;
             let previous = *last_active.peek();
-            if motion_enabled
-                && !repeat
+            let suppress =
+                !motion_enabled || repeat || !same_space || glance.is_some() || is_empty_url(&active_tab_url);
+            pending_slide.set_if_modified(None);
+            if !suppress
                 && last_key.peek().is_some()
                 && let (Some(from), Some(to)) = (previous, active_tab)
                 && let (Some(from_index), Some(to_index)) = (
@@ -181,14 +225,56 @@ impl Component for PageArea {
                 && from_index != to_index
             {
                 let direction = if to_index > from_index { 1.0 } else { -1.0 };
-                let seq = slide.peek().0 + 1;
-                slide.set((seq, direction));
+                let needs_paint_wait = self.mode == PaneMode::Live
+                    && active_tab_view_id.is_some_and(|vid| {
+                        page_ctx
+                            .as_ref()
+                            .is_some_and(|ctx| ctx.surfaces().peek().get(&vid).is_none_or(|s| s.frame.is_none()))
+                    });
+                if needs_paint_wait && let Some(vid) = active_tab_view_id {
+                    let started_at = now;
+                    pending_slide.set(Some((vid, direction, started_at)));
+                    spawn(async move {
+                        timer(motion::TAB_PENDING).await;
+                        if pending_slide
+                            .peek()
+                            .is_some_and(|(id, _, at)| id == vid && at == started_at)
+                        {
+                            pending_slide.set(None);
+                        }
+                    });
+                } else {
+                    let seq = slide.peek().0 + 1;
+                    slide.set((seq, direction));
+                }
             }
             last_switch.set(Some(now));
             last_key.set(shown_key);
         }
         if *last_active.peek() != active_tab {
             last_active.set(active_tab);
+        }
+        if *last_space.peek() != active_space {
+            last_space.set(active_space);
+        }
+
+        // Release a pending live-tab slide once the newly selected view presents a frame within `motion::TAB_PENDING`.
+        let current_pending = *pending_slide.read();
+        if let Some((target_vid, direction, started_at)) = current_pending
+            && let Some(ctx) = &page_ctx
+        {
+            let has_frame = ctx
+                .surfaces()
+                .read()
+                .get(&target_vid)
+                .is_some_and(|surface| surface.frame.is_some());
+            if has_frame {
+                pending_slide.set(None);
+                if started_at.elapsed() <= motion::TAB_PENDING {
+                    let seq = slide.peek().0 + 1;
+                    slide.set((seq, direction));
+                }
+            }
         }
 
         let (slide_seq, slide_direction) = *slide.read();
@@ -200,26 +286,53 @@ impl Component for PageArea {
                 .ease(Ease::Out)
                 .function(motion::ease_out_fn())
         });
+        let fade_anim = use_animation_with_dependencies(&slide_seq, move |conf, _| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            AnimNum::new(motion::TAB_FADE_FROM, 1.0)
+                .duration(motion::TAB_FADE)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
         let slide_t = slide_anim.get().value().clamp(0.0, 1.0);
         let slide_offset = slide_direction * motion::TAB_SLIDE_PX * (1.0 - slide_t);
-        let fade_t = (slide_t * motion::TAB_SLIDE.as_secs_f32() / motion::TAB_FADE.as_secs_f32()).min(1.0);
-        let slide_opacity = motion::TAB_FADE_FROM + (1.0 - motion::TAB_FADE_FROM) * fade_t;
+        let slide_opacity = fade_anim.get().value().clamp(0.0, 1.0);
 
-        let glance_key = glance.as_ref().map(|g| g.tab_id.0);
-        let glance_anim = use_animation_with_dependencies(&glance_key, move |conf, _| {
-            conf.on_creation(OnCreation::Run);
+        let glance_open = glance.is_some();
+        let glance_tab_key = glance.as_ref().map(|g| g.tab_id.0);
+        let cached_glance = use_last_some(&glance);
+        let glance_anim = use_animation_with_dependencies(&(glance_open, glance_tab_key), move |conf, (open, _)| {
+            conf.on_creation(if *open { OnCreation::Run } else { OnCreation::Finish });
             conf.on_change(OnChange::Rerun);
-            AnimNum::new(0.0, 1.0)
-                .duration(crate::ui::page::glance::GLANCE_OPEN)
-                .ease(Ease::Out)
-                .function(glance_spring())
+            if *open {
+                AnimNum::new(0.0, 1.0)
+                    .duration(GLANCE_OPEN)
+                    .ease(Ease::Out)
+                    .function(glance_spring())
+            } else {
+                AnimNum::new(1.0, 0.0)
+                    .duration(GLANCE_CLOSE)
+                    .ease(Ease::Out)
+                    .function(motion::ease_out_fn())
+            }
         });
         let glance_t = match (&glance, self.glance_progress) {
-            (None, _) => 0.0,
             (Some(_), Some(pinned)) => pinned,
             (Some(_), None) => glance_anim.get().value(),
+            (None, _) => {
+                if cached_glance.is_some() {
+                    glance_anim.get().value().clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            }
         };
-        let behind = glance_t.clamp(0.0, 1.0);
+        let show_glance_layer = glance.is_some() || (cached_glance.is_some() && glance_t > 0.01);
+        let behind = if show_glance_layer {
+            glance_t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let behind_scale = 1.0 - (1.0 - GLANCE_BACKGROUND_SCALE) * behind;
         let behind_opacity = 1.0 - (1.0 - GLANCE_BACKGROUND_OPACITY) * behind;
 
@@ -263,6 +376,39 @@ impl Component for PageArea {
             }
         };
 
+        // Finish a pane-rearrange drag by swapping the source pane with whichever pane the pointer released over.
+        let swap_panes = panes.clone();
+        let swap_group = group.clone();
+        let swap_core = core.clone();
+        let on_global_pointer_up = move |e: Event<PointerEventData>| {
+            let mut drag_src = rearrange_drag;
+            let Some(source_id) = drag_src.write().take() else {
+                return;
+            };
+            let Some(grp) = &swap_group else {
+                return;
+            };
+            let (ox, oy, w, h) = *area.peek();
+            let px = e.global_location().x as f32 - ox;
+            let py = e.global_location().y as f32 - oy;
+            if let Some(target) = swap_panes.iter().find(|pane| {
+                let (x, y, pw, ph) = pane_pixels(pane.rect, (w, h), true);
+                pane.tab_id != source_id && px >= x && px <= x + pw && py >= y && py <= y + ph
+            }) {
+                let mut reordered = grp.tab_ids.clone();
+                if let (Some(a), Some(b)) = (
+                    reordered.iter().position(|id| *id == source_id),
+                    reordered.iter().position(|id| *id == target.tab_id),
+                ) {
+                    reordered.swap(a, b);
+                    swap_core.invoke_or_log(Command::SplitTabs {
+                        tab_ids: reordered,
+                        direction: grp.direction,
+                    });
+                }
+            }
+        };
+
         let mut content = rect()
             .width(Size::fill())
             .height(Size::fill())
@@ -271,9 +417,18 @@ impl Component for PageArea {
             .scale((behind_scale, behind_scale));
 
         for pane in &panes {
-            let (x, y, w, h) = pane_pixels(pane.rect, size, in_split);
+            let is_zoomed = active_zoom == Some(pane.tab_id);
+            if active_zoom.is_some() && !is_zoomed {
+                continue;
+            }
+            let (x, y, w, h) = if is_zoomed {
+                (0.0, 0.0, width, height)
+            } else {
+                pane_pixels(pane.rect, size, in_split)
+            };
             content = content.child(SplitPaneView {
                 tab_id: pane.tab_id,
+                group: group.clone(),
                 left: x,
                 top: y,
                 width: if width > 0.0 { w } else { 0.0 },
@@ -281,12 +436,17 @@ impl Component for PageArea {
                 fill: width <= 0.0,
                 active: Some(pane.tab_id) == active_tab,
                 in_split,
+                is_resizing,
+                zoomed: is_zoomed,
+                zoomed_pane,
+                rearrange_drag,
                 mode: self.mode,
             });
         }
 
         if let Some(group) = &group
             && width > 0.0
+            && active_zoom.is_none()
         {
             let ratios = match &*resize_preview.read() {
                 Some((id, ratios)) if *id == group.id => ratios.clone(),
@@ -310,52 +470,31 @@ impl Component for PageArea {
             }
         }
 
-        let drop_overlay = sidebar_state
+        let drop_target = sidebar_state
             .and_then(|state| state.drag_state.read().clone())
             .and_then(|drag| drag.page_drop)
             .and_then(|drop| {
                 let pane = panes.iter().find(|pane| pane.tab_id == drop.target_tab)?;
-                let (x, y, w, h) = zone_pixels(pane_pixels(pane.rect, size, in_split), drop.zone);
-                let accent = theme.rgba(ThemeRole::Accent);
-                Some(
-                    rect()
-                        .layer(Layer::Relative(8))
-                        .position(Position::new_absolute().left(x + 4.0).top(y + 4.0))
-                        .width(Size::px((w - 8.0).max(0.0)))
-                        .height(Size::px((h - 8.0).max(0.0)))
-                        .corner_radius(CornerRadius::new_all(PANE_RADIUS))
-                        .background(accent.with_alpha(0.18).to_color())
-                        .border(
-                            Border::new()
-                                .width(2.0)
-                                .alignment(BorderAlignment::Inner)
-                                .fill(accent.with_alpha(0.85).to_color()),
-                        )
-                        .center()
-                        .child(
-                            rect()
-                                .padding(Gaps::new(6.0, 12.0, 6.0, 12.0))
-                                .corner_radius(CornerRadius::new_all(999.0))
-                                .background(theme.color(ThemeRole::SurfaceRaised))
-                                .direction(Direction::Horizontal)
-                                .cross_align(Alignment::center())
-                                .spacing(6.0)
-                                .child(crate::ui::kit::Icon::new("split").size(14.0).role(ThemeRole::Accent))
-                                .child(
-                                    label()
-                                        .text("Split View")
-                                        .font_size(theme.font_sizes.sm)
-                                        .color(theme.color(ThemeRole::Text)),
-                                ),
-                        )
-                        .into_element(),
-                )
+                Some((
+                    zone_pixels(pane_pixels(pane.rect, size, in_split), drop.zone),
+                    drop.zone,
+                ))
             });
+        let drop_overlay = drop_target.map(|(bounds, zone)| SplitDropZoneOverlay { bounds, zone }.into_element());
 
-        let glance_layer = glance.map(|glance| {
+        let share_receive_overlay = zendia_browser_core::share::parse_share_url(&active_tab_url).map(|_| {
+            crate::ui::share::ShareReceiveOverlay {
+                preview: zendia_browser_core::share::sample_share_preview(&active_tab_url),
+                host_tab_id: active_tab,
+            }
+            .into_element()
+        });
+
+        let glance_layer = show_glance_layer.then(|| cached_glance.clone()).flatten().map(|g| {
             GlanceLayer {
-                glance,
+                glance: g,
                 progress: glance_t,
+                closing: !glance_open,
                 area: size,
                 mode: self.mode,
             }
@@ -372,9 +511,11 @@ impl Component for PageArea {
                 }
             })
             .on_global_pointer_move(on_global_pointer_move)
+            .on_global_pointer_up(on_global_pointer_up)
             .child(content)
             .maybe_child(drop_overlay)
             .child(WindowModeOverlay { area: size })
+            .maybe_child(share_receive_overlay)
             .maybe_child(glance_layer)
             .child(RegionPickerOverlay)
     }
@@ -384,10 +525,99 @@ impl Component for PageArea {
     }
 }
 
-/// One pane: a live page or a stand-in, with the active ring and the pane handle when it is part of a split.
+/// Animated drop-zone highlight and directional accent pill (`SV-03`, `SV-04`).
+#[derive(Clone, PartialEq)]
+struct SplitDropZoneOverlay {
+    bounds: (f32, f32, f32, f32),
+    zone: DropZone,
+}
+
+impl Component for SplitDropZoneOverlay {
+    fn render(&self) -> impl IntoElement {
+        let theme = use_theme();
+        let target = self.bounds;
+        let mut from = use_state(|| target);
+        let start = *from.peek();
+        let rect_key = (
+            target.0.to_bits(),
+            target.1.to_bits(),
+            target.2.to_bits(),
+            target.3.to_bits(),
+        );
+        let rect_anim = use_animation_with_dependencies(&rect_key, move |conf, _| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            AnimNum::new(0.0, 1.0)
+                .duration(motion::SPLIT_DROP_ZONE)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let pill_anim = use_animation(move |conf| {
+            conf.on_creation(OnCreation::Run);
+            AnimNum::new(0.0, 1.0)
+                .duration(Duration::from_millis(150))
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        if *from.peek() != target {
+            from.set(target);
+        }
+
+        let t = rect_anim.get().value().clamp(0.0, 1.0);
+        let lerp = |a: f32, b: f32| a + (b - a) * t;
+        let (x, y, w, h) = (
+            lerp(start.0, target.0),
+            lerp(start.1, target.1),
+            lerp(start.2, target.2),
+            lerp(start.3, target.3),
+        );
+        let pt = pill_anim.get().value().clamp(0.0, 1.0);
+        let pill_scale = 0.92 + 0.08 * pt;
+        let accent = theme.rgba(ThemeRole::Accent);
+
+        rect()
+            .layer(Layer::Relative(14))
+            .position(Position::new_absolute().left(x + 4.0).top(y + 4.0))
+            .width(Size::px((w - 8.0).max(0.0)))
+            .height(Size::px((h - 8.0).max(0.0)))
+            .corner_radius(CornerRadius::new_all(PANE_RADIUS))
+            .background(accent.with_alpha(0.18).to_color())
+            .border(
+                Border::new()
+                    .width(2.0)
+                    .alignment(BorderAlignment::Inner)
+                    .fill(accent.with_alpha(0.85).to_color()),
+            )
+            .center()
+            .child(
+                rect()
+                    .scale(pill_scale)
+                    .opacity(pt)
+                    .padding(Gaps::new(6.0, 13.0, 6.0, 12.0))
+                    .corner_radius(CornerRadius::new_all(999.0))
+                    .background(theme.color(ThemeRole::Accent))
+                    .shadow(Shadow::new().y(4.0).blur(14.0).color(Color::from_argb(72, 0, 0, 0)))
+                    .direction(Direction::Horizontal)
+                    .cross_align(Alignment::center())
+                    .spacing(6.0)
+                    .child(Icon::new("split").size(14.0).role(ThemeRole::TextOnAccent))
+                    .child(
+                        label()
+                            .text(drop_zone_label(self.zone))
+                            .font_size(theme.font_sizes.sm)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .color(theme.color(ThemeRole::TextOnAccent)),
+                    ),
+            )
+    }
+}
+
+/// One pane: a live page or a stand-in, with smooth layout transitions (`SV-03`), active ring, and hover-revealed
+/// 3-dot nub + 150ms expandable action chip (`SV-01`, `SV-09`) lifted above live Hub `PageSurface`s.
 #[derive(Clone, PartialEq)]
 struct SplitPaneView {
     tab_id: TabId,
+    group: Option<SplitGroup>,
     left: f32,
     top: f32,
     width: f32,
@@ -396,6 +626,10 @@ struct SplitPaneView {
     fill: bool,
     active: bool,
     in_split: bool,
+    is_resizing: bool,
+    zoomed: bool,
+    zoomed_pane: State<Option<TabId>>,
+    rearrange_drag: State<Option<TabId>>,
     mode: PaneMode,
 }
 
@@ -403,16 +637,59 @@ impl Component for SplitPaneView {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();
-        let menu_state = try_use_menu_state();
+        let panel_focused = try_use_dock_state().is_some_and(|ds| ds.focused_panel.read().is_some());
         let tab_id = self.tab_id;
+        let mut pane_hovered = use_state(|| false);
 
-        let (title, url, active_ring_role) = {
+        // Smooth 90ms inset transition on split layout switches (disabled during live resize drag for zero lag).
+        let target_geom = (self.left, self.top, self.width, self.height);
+        let mut prev_geom = use_state(|| target_geom);
+        let start_geom = *prev_geom.peek();
+        let geom_changed = !self.fill
+            && !self.is_resizing
+            && start_geom.2 > 0.0
+            && target_geom.2 > 0.0
+            && ((start_geom.0 - target_geom.0).abs() > 0.5
+                || (start_geom.1 - target_geom.1).abs() > 0.5
+                || (start_geom.2 - target_geom.2).abs() > 0.5
+                || (start_geom.3 - target_geom.3).abs() > 0.5);
+        let mut geom_seq = use_state(|| 0u64);
+        let mut anim_from = use_state(|| target_geom);
+        if geom_changed {
+            anim_from.set(start_geom);
+            let next = geom_seq.peek().wrapping_add(1);
+            geom_seq.set(next);
+        }
+        if *prev_geom.peek() != target_geom {
+            prev_geom.set(target_geom);
+        }
+        let current_seq = *geom_seq.read();
+        let layout_anim = use_animation_with_dependencies(&current_seq, move |conf, _| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            AnimNum::new(0.0, 1.0)
+                .duration(motion::SPLIT_LAYOUT)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let lt = if self.is_resizing || self.fill {
+            1.0
+        } else {
+            layout_anim.get().value().clamp(0.0, 1.0)
+        };
+        let from_g = *anim_from.read();
+        let cur_left = from_g.0 + (target_geom.0 - from_g.0) * lt;
+        let cur_top = from_g.1 + (target_geom.1 - from_g.1) * lt;
+        let cur_width = from_g.2 + (target_geom.2 - from_g.2) * lt;
+        let cur_height = from_g.3 + (target_geom.3 - from_g.3) * lt;
+
+        let (title, url, favicon, active_ring_role) = {
             let model = core.model().read();
-            let (title, url) = model
+            let (title, url, favicon) = model
                 .tab(tab_id)
-                .map(|tab| (tab.display_title(), tab.url.clone()))
+                .map(|tab| (tab.display_title(), tab.url.clone(), tab.favicon.clone()))
                 .unwrap_or_default();
-            (title, url, active_pane_ring_role(&model))
+            (title, url, favicon, active_pane_ring_role(&model))
         };
 
         let page: Element = match self.mode {
@@ -421,7 +698,11 @@ impl Component for SplitPaneView {
                 .width(Size::fill())
                 .height(Size::fill())
                 .into_element(),
-            PaneMode::Placeholder => PlaceholderPage { title, url }.into_element(),
+            PaneMode::Placeholder => PlaceholderPage {
+                title: title.clone(),
+                url,
+            }
+            .into_element(),
         };
 
         let focus_core = core.clone();
@@ -435,25 +716,44 @@ impl Component for SplitPaneView {
         let position = if self.fill {
             Position::new_absolute().left(0.0).top(0.0)
         } else {
-            Position::new_absolute().left(self.left).top(self.top)
+            Position::new_absolute().left(cur_left).top(cur_top)
         };
         let (width, height) = if self.fill {
             (Size::fill(), Size::fill())
         } else {
-            (Size::px(self.width), Size::px(self.height))
+            (Size::px(cur_width), Size::px(cur_height))
         };
+
+        // In a split, clip the page to the inner rounded radius inside the 2px ring padding so live web views never
+        // paint over the straight edges or rounded corners of the active pane ring.
+        let clipped_page: Element = if self.in_split {
+            rect()
+                .width(Size::fill())
+                .height(Size::fill())
+                .corner_radius(CornerRadius::new_all((PANE_RADIUS - ACTIVE_RING_WIDTH).max(0.0)))
+                .overflow(Overflow::Clip)
+                .child(page)
+                .into_element()
+        } else {
+            page
+        };
+        let is_being_rearranged = *self.rearrange_drag.read() == Some(tab_id);
 
         let mut pane = rect()
             .position(position)
             .width(width)
             .height(height)
+            .opacity(if is_being_rearranged { 0.4 } else { 1.0 })
             .overflow(Overflow::Clip)
+            .on_pointer_enter(move |_| pane_hovered.set_if_modified(true))
+            .on_pointer_leave(move |_| pane_hovered.set_if_modified(false))
             .on_mouse_down(on_mouse_down)
-            .child(page);
+            .child(clipped_page);
 
         // In a split, the ring sits in a padding the page never covers, so focusing a pane does not resize its page.
+        // DF-03 / XIX-07: Suppress the active split-pane accent ring while a side panel holds focus.
         if self.in_split {
-            let ring = if self.active {
+            let ring = if self.active && !panel_focused {
                 Border::new()
                     .width(ACTIVE_RING_WIDTH)
                     .alignment(BorderAlignment::Inner)
@@ -470,37 +770,21 @@ impl Component for SplitPaneView {
                 .border(ring);
         }
 
-        let handle = (self.in_split && self.active).then(|| {
-            let menu_core = core.clone();
-            rect()
-                .position(Position::new_absolute().left(self.width / 2.0 - 14.0).top(6.0))
-                .width(Size::px(28.0))
-                .height(Size::px(10.0))
-                .corner_radius(CornerRadius::new_all(999.0))
-                .background(theme.color(ThemeRole::SurfaceRaised))
-                .a11y_role(AccessibilityRole::Button)
-                .a11y_alt("Split pane options")
-                .direction(Direction::Horizontal)
-                .main_align(Alignment::center())
-                .cross_align(Alignment::center())
-                .spacing(3.0)
-                .on_mouse_down(move |e: Event<MouseEventData>| {
-                    e.stop_propagation();
-                    if let Some(menu_state) = &menu_state {
-                        let model = menu_core.model().peek().clone();
-                        let position = (e.global_location.x as f32, e.global_location.y as f32);
-                        open_tab_context_menu(menu_state, &model, tab_id, position);
-                    }
-                })
-                .children((0..3).map(|_| {
-                    rect()
-                        .width(Size::px(3.0))
-                        .height(Size::px(3.0))
-                        .corner_radius(CornerRadius::new_all(2.0))
-                        .background(theme.color(ThemeRole::Text))
-                        .into_element()
-                }))
-                .into_element()
+        // Lifted above `PageSurface`'s `image(frame)` via `Layer::Relative(12)` so it stays visible over live Hub pages.
+        let handle = (self.in_split && !self.is_resizing && cur_width > 60.0).then(|| {
+            SplitPaneTopHandle {
+                tab_id,
+                title,
+                favicon,
+                pane_width: cur_width,
+                active: self.active,
+                pane_hovered: *pane_hovered.read(),
+                zoomed: self.zoomed,
+                zoomed_pane: self.zoomed_pane,
+                rearrange_drag: self.rearrange_drag,
+                can_unsplit: self.group.is_some(),
+            }
+            .into_element()
         });
 
         pane.maybe_child(handle)
@@ -511,7 +795,292 @@ impl Component for SplitPaneView {
     }
 }
 
+/// Hover-revealed 3-dot nub (`120 ms`, accent dots on active pane) and `150 ms`-delayed expandable pane action chip
+/// (rearrange drag handle, favicon, title, Fill View/Zoom, Move to Own Tab, Close) (`SV-01`, `SV-09`).
+#[derive(Clone, PartialEq)]
+struct SplitPaneTopHandle {
+    tab_id: TabId,
+    title: String,
+    favicon: Option<String>,
+    pane_width: f32,
+    active: bool,
+    pane_hovered: bool,
+    zoomed: bool,
+    zoomed_pane: State<Option<TabId>>,
+    rearrange_drag: State<Option<TabId>>,
+    can_unsplit: bool,
+}
+
+impl Component for SplitPaneTopHandle {
+    fn render(&self) -> impl IntoElement {
+        let core = use_core();
+        let theme = use_theme();
+        let menu_state = try_use_menu_state();
+        let mut handle_hovered = use_state(|| false);
+        let mut chip_expanded = use_state(|| false);
+        let mut hover_gen = use_state(|| 0u64);
+
+        let show_nub = (self.pane_hovered || self.zoomed || self.active) && !*chip_expanded.read();
+        let nub_anim = use_animation_with_dependencies(&show_nub, move |conf, shown| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *shown { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::SPLIT_NUB_FADE)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let expanded = *chip_expanded.read();
+        let chip_anim = use_animation_with_dependencies(&expanded, move |conf, open| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *open { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::SPLIT_NUB_FADE)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+
+        let nub_t = nub_anim.get().value().clamp(0.0, 1.0);
+        let chip_t = chip_anim.get().value().clamp(0.0, 1.0);
+        let tab_id = self.tab_id;
+        let dot_color = if self.active {
+            theme.color(ThemeRole::Accent)
+        } else {
+            theme.rgba(ThemeRole::Text).with_alpha(0.7).to_color()
+        };
+
+        let on_zone_enter = move |_| {
+            handle_hovered.set_if_modified(true);
+            let next_gen = hover_gen.peek().wrapping_add(1);
+            hover_gen.set(next_gen);
+            spawn(async move {
+                timer(motion::SPLIT_CHIP_DELAY).await;
+                if *hover_gen.peek() == next_gen && *handle_hovered.peek() {
+                    chip_expanded.set_if_modified(true);
+                }
+            });
+        };
+        let on_zone_leave = move |_| {
+            handle_hovered.set_if_modified(false);
+            let next_gen = hover_gen.peek().wrapping_add(1);
+            hover_gen.set(next_gen);
+            chip_expanded.set_if_modified(false);
+        };
+
+        let nub = (nub_t > 0.01 && !expanded).then(|| {
+            let menu_core = core.clone();
+            let nub_scale = 0.85 + 0.15 * nub_t;
+            rect()
+                .width(Size::px(30.0))
+                .height(Size::px(11.0))
+                .scale(nub_scale)
+                .opacity(nub_t)
+                .corner_radius(CornerRadius::new_all(6.0))
+                .background(theme.rgba(ThemeRole::SurfaceRaised).with_alpha(0.92).to_color())
+                .border(
+                    Border::new()
+                        .width(1.0)
+                        .alignment(BorderAlignment::Inner)
+                        .fill(theme.color(ThemeRole::BorderSubtle)),
+                )
+                .shadow(Shadow::new().y(1.0).blur(4.0).color(Color::from_argb(55, 0, 0, 0)))
+                .cursor(CursorIcon::Pointer)
+                .a11y_role(AccessibilityRole::Button)
+                .a11y_alt("Split pane options")
+                .direction(Direction::Horizontal)
+                .main_align(Alignment::center())
+                .cross_align(Alignment::center())
+                .spacing(3.0)
+                .on_mouse_down(move |e: Event<MouseEventData>| {
+                    e.stop_propagation();
+                    if e.button == Some(MouseButton::Right) {
+                        if let Some(menu_state) = &menu_state {
+                            let model = menu_core.model().peek().clone();
+                            let position = (e.global_location.x as f32, e.global_location.y as f32);
+                            open_tab_context_menu(menu_state, &model, tab_id, position);
+                        }
+                    } else {
+                        chip_expanded.set(true);
+                    }
+                })
+                .children((0..3).map(|_| {
+                    rect()
+                        .width(Size::px(3.2))
+                        .height(Size::px(3.2))
+                        .corner_radius(CornerRadius::new_all(2.0))
+                        .background(dot_color)
+                        .into_element()
+                }))
+        });
+
+        let chip = (chip_t > 0.01 || expanded).then(|| {
+            let mut zoom_state = self.zoomed_pane;
+            let mut drag_state = self.rearrange_drag;
+            let detach_core = core.clone();
+            let close_core = core.clone();
+            let zoomed = self.zoomed;
+            let chip_scale = 0.96 + 0.04 * chip_t;
+            let chip_y = -4.0 * (1.0 - chip_t);
+            let max_title_w = (self.pane_width - 150.0).clamp(40.0, 180.0);
+
+            rect()
+                .offset_y(chip_y)
+                .scale(chip_scale)
+                .opacity(chip_t)
+                .padding(Gaps::new_all(3.0))
+                .spacing(2.0)
+                .corner_radius(CornerRadius::new_all(9.0))
+                .background(theme.color(ThemeRole::SurfaceRaised))
+                .border(
+                    Border::new()
+                        .width(1.0)
+                        .alignment(BorderAlignment::Inner)
+                        .fill(theme.color(ThemeRole::Border)),
+                )
+                .shadow(Shadow::new().y(2.0).blur(10.0).color(Color::from_argb(65, 0, 0, 0)))
+                .direction(Direction::Horizontal)
+                .cross_align(Alignment::center())
+                .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
+                .child(
+                    rect()
+                        .width(Size::px(20.0))
+                        .height(Size::px(24.0))
+                        .corner_radius(CornerRadius::new_all(6.0))
+                        .center()
+                        .cursor(CursorIcon::Grab)
+                        .a11y_role(AccessibilityRole::Button)
+                        .a11y_alt("Drag to rearrange pane")
+                        .on_pointer_down(move |e: Event<PointerEventData>| {
+                            e.stop_propagation();
+                            drag_state.set(Some(tab_id));
+                        })
+                        .child(Icon::new("drag-indicator").size(13.0).role(ThemeRole::TextMuted)),
+                )
+                .child(
+                    Icon::new(self.favicon.clone().unwrap_or_else(|| "globe".to_string()))
+                        .size(13.5)
+                        .role(ThemeRole::Text),
+                )
+                .child(
+                    rect()
+                        .max_width(Size::px(max_title_w))
+                        .padding(Gaps::new(0.0, 5.0, 0.0, 3.0))
+                        .child(
+                            label()
+                                .text(self.title.clone())
+                                .font_size(12.0)
+                                .color(theme.color(ThemeRole::Text))
+                                .max_lines(1)
+                                .text_overflow(TextOverflow::Ellipsis),
+                        ),
+                )
+                .child(SplitChipButton {
+                    icon: if zoomed { "fullscreen-exit" } else { "fullscreen" },
+                    label: if zoomed { "Restore split view" } else { "Fill view" },
+                    danger: false,
+                    on_press: EventHandler::new(move |_| {
+                        if zoomed {
+                            zoom_state.set(None);
+                        } else {
+                            zoom_state.set(Some(tab_id));
+                        }
+                    }),
+                })
+                .maybe_child(self.can_unsplit.then(|| SplitChipButton {
+                    icon: "u-turn-to-left",
+                    label: "Move to own tab",
+                    danger: false,
+                    on_press: EventHandler::new(move |_| {
+                        detach_core.invoke_or_log(Command::SplitRemoveTab { tab_id });
+                    }),
+                }))
+                .child(SplitChipButton {
+                    icon: "close",
+                    label: "Close pane",
+                    danger: true,
+                    on_press: EventHandler::new(move |_| {
+                        close_core.invoke_or_log(Command::TabClose {
+                            tab_id: Some(tab_id),
+                            force: false,
+                        });
+                    }),
+                })
+        });
+
+        let zone_w = if expanded {
+            self.pane_width.clamp(120.0, 350.0)
+        } else {
+            120.0_f32.min(self.pane_width)
+        };
+
+        rect()
+            .layer(Layer::Relative(12))
+            .position(Position::new_absolute().left((self.pane_width - zone_w) * 0.5).top(4.0))
+            .width(Size::px(zone_w))
+            .min_height(Size::px(if expanded { 32.0 } else { 20.0 }))
+            .cross_align(Alignment::center())
+            .on_pointer_enter(on_zone_enter)
+            .on_pointer_leave(on_zone_leave)
+            .maybe_child(nub)
+            .maybe_child(chip)
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct SplitChipButton {
+    icon: &'static str,
+    label: &'static str,
+    danger: bool,
+    on_press: EventHandler<()>,
+}
+
+impl Component for SplitChipButton {
+    fn render(&self) -> impl IntoElement {
+        let theme = use_theme();
+        let mut hovered = use_state(|| false);
+        let on_press = self.on_press.clone();
+
+        let bg = if *hovered.read() {
+            if self.danger {
+                theme.rgba(ThemeRole::Danger).with_alpha(0.18).to_color()
+            } else {
+                theme.color(ThemeRole::Hover)
+            }
+        } else {
+            Color::TRANSPARENT
+        };
+        let role = if *hovered.read() && self.danger {
+            ThemeRole::Danger
+        } else if *hovered.read() {
+            ThemeRole::Text
+        } else {
+            ThemeRole::TextMuted
+        };
+
+        rect()
+            .width(Size::px(24.0))
+            .height(Size::px(24.0))
+            .corner_radius(CornerRadius::new_all(6.0))
+            .background(bg)
+            .center()
+            .cursor(CursorIcon::Pointer)
+            .a11y_role(AccessibilityRole::Button)
+            .a11y_alt(self.label)
+            .a11y_focusable(true)
+            .on_pointer_enter(move |_| hovered.set_if_modified(true))
+            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
+            .on_press(move |e: Event<PressEventData>| {
+                e.stop_propagation();
+                on_press.call(());
+            })
+            .child(Icon::new(self.icon).size(13.0).role(role))
+    }
+}
+
 /// A draggable boundary between panes. Dragging previews the new sizes; releasing invokes `split.resize`.
+/// Double-clicking equalizes panes to default shares (`SV-02`). Grabber fades in over `100 ms` on hover (`SV-06`).
 #[derive(Clone, PartialEq)]
 struct SplitHandleView {
     group_id: SplitGroupId,
@@ -533,6 +1102,7 @@ impl Component for SplitHandleView {
         let theme = use_theme();
         let mut hovered = use_state(|| false);
         let mut dragging = use_state(|| false);
+        let mut last_down = use_state(|| None::<Instant>);
 
         let (ox, oy, width, height) = self.area;
         let handle = self.handle;
@@ -567,6 +1137,7 @@ impl Component for SplitHandleView {
                 preview.set(Some((group_id, next)));
             }
         };
+        let up_core = core.clone();
         let on_global_pointer_up = move |_: Event<PointerEventData>| {
             if !*dragging.peek() {
                 return;
@@ -574,22 +1145,29 @@ impl Component for SplitHandleView {
             dragging.set(false);
             let finished = preview.write().take();
             if let Some((group_id, ratios)) = finished {
-                core.invoke_or_log(Command::SplitResize { group_id, ratios });
+                up_core.invoke_or_log(Command::SplitResize { group_id, ratios });
             }
         };
 
         let lit = *hovered.read() || *dragging.read() || self.highlight;
-        let grip_color = if lit {
-            theme.color(ThemeRole::Accent)
-        } else {
-            theme.rgba(ThemeRole::Text).with_alpha(0.35).to_color()
-        };
+        let grip_anim = use_animation_with_dependencies(&lit, move |conf, shown| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *shown { (0.0, 1.0) } else { (1.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::SPLIT_HANDLE_FADE)
+                .ease(Ease::InOut)
+                .function(motion::ease_out_fn())
+        });
+        let grip_opacity = grip_anim.get().value().clamp(0.0, 1.0);
         let (grip_w, grip_h) = match handle.axis {
-            HandleAxis::Column => (3.0, 36.0),
-            HandleAxis::Row => (36.0, 3.0),
+            HandleAxis::Column => (2.5, 50.0),
+            HandleAxis::Row => (50.0, 2.5),
         };
 
+        let dbl_core = core.clone();
         rect()
+            .layer(Layer::Relative(10))
             .position(Position::new_absolute().left(left).top(top))
             .width(Size::px(w.max(0.0)))
             .height(Size::px(h.max(0.0)))
@@ -604,7 +1182,22 @@ impl Component for SplitHandleView {
             .on_pointer_leave(move |_| hovered.set(false))
             .on_pointer_down(move |e: Event<PointerEventData>| {
                 e.stop_propagation();
-                dragging.set(true);
+                let now = Instant::now();
+                let is_double = last_down
+                    .peek()
+                    .is_some_and(|prev| now.duration_since(prev) <= DOUBLE_CLICK_MS);
+                if is_double {
+                    last_down.set(None);
+                    dragging.set(false);
+                    preview.set(None);
+                    dbl_core.invoke_or_log(Command::SplitResize {
+                        group_id,
+                        ratios: split::default_ratios(direction, count),
+                    });
+                } else {
+                    last_down.set(Some(now));
+                    dragging.set(true);
+                }
             })
             .on_global_pointer_move(on_global_pointer_move)
             .on_global_pointer_up(on_global_pointer_up)
@@ -612,8 +1205,9 @@ impl Component for SplitHandleView {
                 rect()
                     .width(Size::px(grip_w))
                     .height(Size::px(grip_h))
+                    .opacity(grip_opacity)
                     .corner_radius(CornerRadius::new_all(2.0))
-                    .background(grip_color),
+                    .background(theme.color(ThemeRole::Accent)),
             )
     }
 
@@ -665,8 +1259,10 @@ impl Component for PlaceholderPage {
                 rect()
                     .width(Size::fill())
                     .height(Size::px(62.0))
-                    .padding(Gaps::new(0.0, 40.0, 0.0, 40.0))
+                    .padding(Gaps::new(0.0, 28.0, 0.0, 28.0))
+                    .spacing(12.0)
                     .direction(Direction::Horizontal)
+                    .content(Content::Flex)
                     .cross_align(Alignment::center())
                     .main_align(Alignment::SpaceBetween)
                     .overflow(Overflow::Clip)
@@ -674,12 +1270,14 @@ impl Component for PlaceholderPage {
                     .child(
                         label()
                             .text(title.clone())
+                            .width(Size::flex(1.0))
                             .font_size(15.0)
                             .font_weight(FontWeight::BOLD)
                             .color(text)
-                            .max_lines(1),
+                            .max_lines(1)
+                            .text_overflow(TextOverflow::Ellipsis),
                     )
-                    .child(rect().direction(Direction::Horizontal).spacing(22.0).children(
+                    .child(rect().direction(Direction::Horizontal).spacing(18.0).children(
                         ["Documentation", "Architecture", "Releases"].into_iter().map(|item| {
                             label()
                                 .text(item)
@@ -768,5 +1366,13 @@ mod tests {
             zone_pixels((0.0, 0.0, 400.0, 300.0), DropZone::Top),
             (0.0, 0.0, 400.0, 150.0)
         );
+    }
+
+    #[test]
+    fn drop_zone_labels_match_directions() {
+        assert_eq!(drop_zone_label(DropZone::Left), "Split left");
+        assert_eq!(drop_zone_label(DropZone::Right), "Split right");
+        assert_eq!(drop_zone_label(DropZone::Top), "Split above");
+        assert_eq!(drop_zone_label(DropZone::Bottom), "Split below");
     }
 }

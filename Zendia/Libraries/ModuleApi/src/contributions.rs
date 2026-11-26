@@ -91,6 +91,9 @@ pub enum ToolbarArea {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ToolbarPlacementRules {
     pub single_toolbar: Option<ToolbarArea>,
+    /// Placement in single-toolbar layout while compact mode's top bar is active (e.g. Agents and Chat move from the
+    /// sidebar bottom row into the compact top bar, matching `ZendiaChatButton.sys.mjs` and `ZendiaAgentsButton.sys.mjs`).
+    pub single_toolbar_compact: Option<ToolbarArea>,
     pub multiple_toolbars: Option<ToolbarArea>,
     pub collapsed_toolbar: Option<ToolbarArea>,
 }
@@ -101,26 +104,31 @@ impl ToolbarPlacementRules {
         match placement {
             ToolbarPlacement::NavigationStart => Self {
                 single_toolbar: Some(ToolbarArea::SidebarTopEnd),
+                single_toolbar_compact: Some(ToolbarArea::SidebarTopEnd),
                 multiple_toolbars: Some(ToolbarArea::TopBarStart),
                 collapsed_toolbar: Some(ToolbarArea::TopBarStart),
             },
             ToolbarPlacement::NavigationEnd => Self {
                 single_toolbar: Some(ToolbarArea::SidebarBottom),
+                single_toolbar_compact: Some(ToolbarArea::SidebarBottom),
                 multiple_toolbars: Some(ToolbarArea::TopBarEnd),
                 collapsed_toolbar: Some(ToolbarArea::TopBarEnd),
             },
             ToolbarPlacement::SidebarTop => Self {
                 single_toolbar: Some(ToolbarArea::SidebarTopStart),
+                single_toolbar_compact: Some(ToolbarArea::SidebarTopStart),
                 multiple_toolbars: Some(ToolbarArea::TopBarStart),
                 collapsed_toolbar: Some(ToolbarArea::TopBarStart),
             },
             ToolbarPlacement::SidebarBottom => Self {
                 single_toolbar: Some(ToolbarArea::SidebarBottom),
+                single_toolbar_compact: Some(ToolbarArea::SidebarBottom),
                 multiple_toolbars: Some(ToolbarArea::SidebarBottom),
                 collapsed_toolbar: Some(ToolbarArea::SidebarBottom),
             },
             ToolbarPlacement::AddressBarEnd => Self {
                 single_toolbar: Some(ToolbarArea::SidebarUrlBar),
+                single_toolbar_compact: Some(ToolbarArea::SidebarUrlBar),
                 multiple_toolbars: Some(ToolbarArea::TopBarCenter),
                 collapsed_toolbar: Some(ToolbarArea::TopBarCenter),
             },

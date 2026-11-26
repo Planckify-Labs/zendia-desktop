@@ -182,6 +182,7 @@ impl Component for VimPickersSection {
         let mut drag_start = use_state(|| None::<(f32, f32)>);
         let mut selection = use_state(|| init_region);
         let mut dragging = use_state(|| false);
+        let mut preview_dismissed = use_state(|| false);
         let mut applied_state = use_state(String::new);
 
         if *applied_state.peek() != self.state_id {
@@ -202,6 +203,7 @@ impl Component for VimPickersSection {
             drag_start.set(None);
             selection.set(init_region);
             dragging.set(false);
+            preview_dismissed.set(false);
         }
 
         let (model_snapshot, vim_enabled, active_url) = {
@@ -310,6 +312,7 @@ impl Component for VimPickersSection {
                         drag_start.set(None);
                         selection.set(r);
                         dragging.set(false);
+                        preview_dismissed.set(false);
                     })),
             );
 
@@ -338,29 +341,39 @@ impl Component for VimPickersSection {
             .maybe_child(region_preview_layer);
 
         let choose_core = core.clone();
-        let picker_overlay = picker_request.map(|request| {
-            let width = match request.layout {
-                PickerLayout::List => 560.0,
-                PickerLayout::Grid => 500.0,
-            };
-            rect()
-                .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
-                .position(Position::new_absolute().left(0.0).top(0.0))
-                .width(Size::percent(100.0))
-                .height(Size::percent(100.0))
-                .padding(Gaps::new(112.0, 24.0, 24.0, 24.0))
-                .cross_align(Alignment::center())
-                .child(
-                    VimPickerCard::new(request, query, cursor, filter_active)
-                        .width(width)
-                        .capture_keys(false)
-                        .on_choose(move |item: PickerItem| {
-                            if let Ok(cmd) = Command::from_name_and_args(&item.command, &item.command_args) {
-                                choose_core.invoke_or_log(cmd);
-                            }
-                        }),
-                )
-        });
+        let picker_overlay = (!*preview_dismissed.read())
+            .then_some(picker_request)
+            .flatten()
+            .map(|request| {
+                let width = match request.layout {
+                    PickerLayout::List => 560.0,
+                    PickerLayout::Grid => 500.0,
+                };
+                rect()
+                    .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
+                    .position(Position::new_absolute().left(0.0).top(0.0))
+                    .width(Size::percent(100.0))
+                    .height(Size::percent(100.0))
+                    .padding(Gaps::new(112.0, 24.0, 24.0, 24.0))
+                    .cross_align(Alignment::center())
+                    .on_mouse_down(move |_| {
+                        preview_dismissed.set(true);
+                    })
+                    .child(
+                        VimPickerCard::new(request, query, cursor, filter_active)
+                            .width(width)
+                            .capture_keys(true)
+                            .on_close(move |_| {
+                                preview_dismissed.set(true);
+                            })
+                            .on_choose(move |item: PickerItem| {
+                                if let Ok(cmd) = Command::from_name_and_args(&item.command, &item.command_args) {
+                                    choose_core.invoke_or_log(cmd);
+                                }
+                                preview_dismissed.set(true);
+                            }),
+                    )
+            });
 
         rect()
             .width(Size::fill())

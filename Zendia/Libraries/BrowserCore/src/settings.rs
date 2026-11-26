@@ -234,7 +234,11 @@ pub struct BrowserSettings {
     pub show_new_tab_on_tab_list: bool,
     pub new_tab_button_top: bool,
     pub compact_toolbar_flash_popup: bool,
+    pub compact_show_on_hover: bool,
+    pub compact_animate_sidebar: bool,
+    pub compact_show_background_tab_toast: bool,
     pub window_drag_from_content: bool,
+    pub grey_out_inactive_windows: bool,
 
     // Tab Management & Spaces
     pub sync_only_pinned_tabs: bool,
@@ -267,7 +271,11 @@ impl Default for BrowserSettings {
             show_new_tab_on_tab_list: true,
             new_tab_button_top: true,
             compact_toolbar_flash_popup: false,
+            compact_show_on_hover: true,
+            compact_animate_sidebar: true,
+            compact_show_background_tab_toast: true,
             window_drag_from_content: true,
+            grey_out_inactive_windows: true,
 
             sync_only_pinned_tabs: false,
             hide_default_container_indicator: true,
@@ -445,6 +453,33 @@ pub fn settings_catalog() -> Vec<SettingEntry> {
             SettingControl::Toggle,
         )
         .keywords(&["compact", "flash", "popup", "toolbar"]),
+        SettingEntry::new(
+            "compact.show_on_hover",
+            SettingsGroupId::LookAndFeel,
+            "Compact mode",
+            "Show hidden toolbars when hovering near the window edge",
+            "Reveal the sidebar or top toolbar automatically when moving the pointer to the edge in compact mode.",
+            SettingControl::Toggle,
+        )
+        .keywords(&["compact", "hover", "reveal", "sidebar", "toolbar"]),
+        SettingEntry::new(
+            "compact.animate_sidebar",
+            SettingsGroupId::LookAndFeel,
+            "Compact mode",
+            "Animate sidebar reveal in compact mode",
+            "Use Zendia's smooth slide animation when revealing and hiding the compact sidebar.",
+            SettingControl::Toggle,
+        )
+        .keywords(&["compact", "animate", "sidebar", "motion"]),
+        SettingEntry::new(
+            "compact.show_background_tab_toast",
+            SettingsGroupId::LookAndFeel,
+            "Compact mode",
+            "Show notification toast when opening a tab in the background",
+            "Display a brief toast confirming that a link opened in a background tab while the tab bar is hidden.",
+            SettingControl::Toggle,
+        )
+        .keywords(&["compact", "toast", "background tab", "notification"]),
         SettingEntry::new(
             "window.drag_from_content",
             SettingsGroupId::LookAndFeel,
@@ -814,6 +849,9 @@ pub fn setting_bool_value(model: &BrowserModel, key: &str) -> Option<bool> {
         "tabs.newtab_button_top" => Some(s.new_tab_button_top),
         "layout.compact_mode" => Some(model.layout.compact_mode),
         "compact.toolbar_flash_popup" => Some(s.compact_toolbar_flash_popup),
+        "compact.show_on_hover" => Some(s.compact_show_on_hover),
+        "compact.animate_sidebar" => Some(s.compact_animate_sidebar),
+        "compact.show_background_tab_toast" => Some(s.compact_show_background_tab_toast),
         "window.drag_from_content" => Some(s.window_drag_from_content),
         "layout.tab_switch_motion" => Some(model.layout.tab_switch_motion),
         "workspaces.sync_only_pinned_tabs" => Some(s.sync_only_pinned_tabs),
@@ -1006,10 +1044,7 @@ pub fn command_for_setting_change(key: &str, value: &str) -> Option<Command> {
         "plugins.enabled" => Some(Command::PluginSetAllEnabled {
             enabled: parse_bool(value)?,
         }),
-        "spaces.create" => Some(Command::Custom {
-            name: "space.create_form.open".to_string(),
-            args: Vec::new(),
-        }),
+        "spaces.create" => Some(Command::SpaceCreateFormOpen),
         _ => Some(Command::SettingsSet {
             key: key.to_string(),
             value: value.to_string(),
@@ -1024,6 +1059,9 @@ pub fn apply_browser_setting(settings: &mut BrowserSettings, key: &str, value: &
         "tabs.show_newtab_vertical" => settings.show_new_tab_on_tab_list = bool_val(value)?,
         "tabs.newtab_button_top" => settings.new_tab_button_top = bool_val(value)?,
         "compact.toolbar_flash_popup" => settings.compact_toolbar_flash_popup = bool_val(value)?,
+        "compact.show_on_hover" => settings.compact_show_on_hover = bool_val(value)?,
+        "compact.animate_sidebar" => settings.compact_animate_sidebar = bool_val(value)?,
+        "compact.show_background_tab_toast" => settings.compact_show_background_tab_toast = bool_val(value)?,
         "window.drag_from_content" => settings.window_drag_from_content = bool_val(value)?,
         "workspaces.sync_only_pinned_tabs" => settings.sync_only_pinned_tabs = bool_val(value)?,
         "workspaces.hide_default_container_indicator" => settings.hide_default_container_indicator = bool_val(value)?,
@@ -1060,6 +1098,9 @@ pub fn reset_browser_settings_group(settings: &mut BrowserSettings, group: Setti
             settings.show_new_tab_on_tab_list = defaults.show_new_tab_on_tab_list;
             settings.new_tab_button_top = defaults.new_tab_button_top;
             settings.compact_toolbar_flash_popup = defaults.compact_toolbar_flash_popup;
+            settings.compact_show_on_hover = defaults.compact_show_on_hover;
+            settings.compact_animate_sidebar = defaults.compact_animate_sidebar;
+            settings.compact_show_background_tab_toast = defaults.compact_show_background_tab_toast;
             settings.window_drag_from_content = defaults.window_drag_from_content;
         }
         SettingsGroupId::TabManagement => {
@@ -1154,10 +1195,7 @@ mod tests {
         );
         assert_eq!(
             command_for_setting_change("spaces.create", ""),
-            Some(Command::Custom {
-                name: "space.create_form.open".to_string(),
-                args: Vec::new(),
-            })
+            Some(Command::SpaceCreateFormOpen)
         );
     }
 

@@ -14,9 +14,9 @@
 //!   textarea) followed inline by a full-width `"+ Add instruction"` pill outline button.
 //! - Footer: full-width solid `ThemeRole::Accent` `"Done"` pill button.
 
-use crate::ui::agent::{agent_input_colors, agent_input_layout, chevron_left_icon};
+use crate::ui::agent::{agent_input_colors, chevron_left_icon};
 use crate::ui::core_view::use_core;
-use crate::ui::kit::{Icon, KitSwitch};
+use crate::ui::kit::{Icon, KitSwitch, TextField};
 use crate::ui::panels::try_use_dock_state;
 use crate::ui::theme::{ResolvedScheme, ThemeRole, use_theme};
 use freya::prelude::*;
@@ -215,6 +215,15 @@ impl Component for AgentInstructionsPage {
             .content(Content::Flex)
             .background(panel_bg)
             .on_pointer_down(|e: Event<PointerEventData>| e.stop_propagation())
+            .on_global_key_down(move |e: Event<KeyboardEventData>| {
+                if e.key == Key::Named(NamedKey::Escape)
+                    && let Some(mut ds) = dock_state
+                    && *ds.instructions_open.peek()
+                {
+                    e.stop_propagation();
+                    ds.instructions_open.set(false);
+                }
+            })
             .child(header)
             .child(body)
             .maybe_child(
@@ -258,6 +267,7 @@ impl Component for InstructionCard {
         let mut text_state = use_state(|| self.item.text.clone());
         let mut last_item_title = use_state(|| self.item.title.clone());
         let mut last_item_text = use_state(|| self.item.text.clone());
+        let text_a11y_id = use_a11y();
 
         if *last_item_title.peek() != self.item.title {
             last_item_title.set(self.item.title.clone());
@@ -287,9 +297,17 @@ impl Component for InstructionCard {
         let core_toggle = core.clone();
         let core_delete = core.clone();
         let core_title = core.clone();
+        let core_title_blur = core.clone();
         let core_text = core.clone();
+        let core_text_blur = core.clone();
         let core_attach = core.clone();
         let core_detach = core.clone();
+        let title_colors = agent_input_colors(&theme, true);
+        let body_colors = agent_input_colors(&theme, false);
+        let pref_color = |pref: Option<Preference<Color>>, fallback: Color| match pref {
+            Some(Preference::Specific(c)) => c,
+            _ => fallback,
+        };
 
         let file_slot: Element = if let Some(file) = &self.item.file {
             let size_label = format_file_size(file.size_bytes);
@@ -412,19 +430,38 @@ impl Component for InstructionCard {
                             .font_size(12.5)
                             .font_weight(FontWeight::SEMI_BOLD)
                             .child(
-                                Input::new(title_state)
+                                TextField::new(title_state)
                                     .placeholder("Instruction title")
                                     .width(Size::fill())
-                                    .compact()
-                                    .theme_colors(agent_input_colors(&theme, true))
-                                    .theme_layout(agent_input_layout(Gaps::new(2.0, 2.0, 2.0, 2.0), 4.0))
-                                    .on_submit(move |val: String| {
+                                    .color(pref_color(title_colors.color, theme.color(ThemeRole::Text)))
+                                    .placeholder_color(pref_color(
+                                        title_colors.placeholder_color,
+                                        theme.color(ThemeRole::TextMuted),
+                                    ))
+                                    .padding(Gaps::new(2.0, 2.0, 2.0, 2.0))
+                                    .corner_radius(CornerRadius::new_all(4.0))
+                                    .on_change(move |val: String| {
+                                        last_item_title.set(val.clone());
                                         core_title.invoke_or_log(Command::AgentInstructionUpdate {
                                             id,
                                             enabled: None,
                                             title: Some(val),
                                             text: None,
                                         });
+                                    })
+                                    .on_submit(move |_| {
+                                        text_a11y_id.request_focus();
+                                    })
+                                    .on_blur(move |val: String| {
+                                        if *last_item_title.peek() != val {
+                                            last_item_title.set(val.clone());
+                                            core_title_blur.invoke_or_log(Command::AgentInstructionUpdate {
+                                                id,
+                                                enabled: None,
+                                                title: Some(val),
+                                                text: None,
+                                            });
+                                        }
                                     }),
                             ),
                     )
@@ -458,21 +495,45 @@ impl Component for InstructionCard {
                             .height(Size::px(72.0))
                             .font_size(12.0)
                             .child(
-                                Input::new(text_state)
+                                TextField::new(text_state)
+                                    .a11y_id(text_a11y_id)
                                     .multiline(true)
                                     .placeholder("Write guidelines for the agent…")
                                     .width(Size::fill())
                                     .height(Size::px(72.0))
-                                    .compact()
-                                    .theme_colors(agent_input_colors(&theme, false))
-                                    .theme_layout(agent_input_layout(Gaps::new(6.0, 8.0, 6.0, 8.0), 10.0))
-                                    .on_submit(move |val: String| {
+                                    .background(pref_color(body_colors.background, Color::TRANSPARENT))
+                                    .focus_background(pref_color(body_colors.focus_background, Color::TRANSPARENT))
+                                    .border(pref_color(body_colors.border_fill, Color::TRANSPARENT), 1.0)
+                                    .focus_border(
+                                        pref_color(body_colors.focus_border_fill, theme.color(ThemeRole::Accent)),
+                                        1.25,
+                                    )
+                                    .color(pref_color(body_colors.color, theme.color(ThemeRole::Text)))
+                                    .placeholder_color(pref_color(
+                                        body_colors.placeholder_color,
+                                        theme.color(ThemeRole::TextMuted),
+                                    ))
+                                    .padding(Gaps::new(6.0, 8.0, 6.0, 8.0))
+                                    .corner_radius(CornerRadius::new_all(10.0))
+                                    .on_change(move |val: String| {
+                                        last_item_text.set(val.clone());
                                         core_text.invoke_or_log(Command::AgentInstructionUpdate {
                                             id,
                                             enabled: None,
                                             title: None,
                                             text: Some(val),
                                         });
+                                    })
+                                    .on_blur(move |val: String| {
+                                        if *last_item_text.peek() != val {
+                                            last_item_text.set(val.clone());
+                                            core_text_blur.invoke_or_log(Command::AgentInstructionUpdate {
+                                                id,
+                                                enabled: None,
+                                                title: None,
+                                                text: Some(val),
+                                            });
+                                        }
                                     }),
                             ),
                     ),

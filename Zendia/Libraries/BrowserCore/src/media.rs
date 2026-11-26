@@ -11,11 +11,19 @@
 
 use crate::model::{BrowserModel, MediaSession, MediaSessionId, TabId};
 
+/// Maximum number of background media sessions stacked in the sidebar controls card (matches Zen's `MAX_STACKED_CARDS`).
+pub const MAX_STACKED_CARDS: usize = 3;
+
+/// Duration threshold in seconds above which media is treated as a livestream and its seek bar is hidden.
+pub const LIVESTREAM_DURATION_THRESHOLD_SECS: f32 = 900_000.0;
+
 /// What a media control button does to a session.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MediaControl {
     TogglePlay,
     ToggleMute,
+    ToggleMic,
+    ToggleCamera,
     Previous,
     Next,
     PictureInPicture,
@@ -32,6 +40,8 @@ impl MediaControl {
         match self {
             Self::TogglePlay => "media.session.toggle_play",
             Self::ToggleMute => "media.session.toggle_mute",
+            Self::ToggleMic => "media.session.toggle_mic",
+            Self::ToggleCamera => "media.session.toggle_camera",
             Self::Previous => "media.session.previous",
             Self::Next => "media.session.next",
             Self::PictureInPicture => "media.session.pip",
@@ -42,19 +52,40 @@ impl MediaControl {
     }
 }
 
-/// The session the sidebar's media controls show, if any.
+/// Up to [`MAX_STACKED_CARDS`] background media sessions to render in the sidebar media controls stack.
 ///
-/// As in Zen, the controls follow media in a tab other than the one on screen: playing media first, then paused media,
-/// latest session first. Dismissed sessions are skipped.
-pub fn controls_session(model: &BrowserModel) -> Option<&MediaSession> {
-    let visible = |session: &&MediaSession| !session.dismissed && Some(session.tab_id) != model.active_tab;
-    model
+/// Playing sessions (or active mic/camera shares) come first, then paused sessions, latest first. Sessions belonging to
+/// the active tab on screen or explicitly dismissed are omitted.
+pub fn visible_sessions(model: &BrowserModel) -> Vec<&MediaSession> {
+    let eligible = |session: &&MediaSession| !session.dismissed && Some(session.tab_id) != model.active_tab;
+    let is_active = |session: &&MediaSession| session.is_playing || session.sharing_mic || session.sharing_camera;
+
+    let playing = model
         .media_sessions
         .iter()
         .rev()
-        .filter(visible)
-        .find(|session| session.is_playing)
-        .or_else(|| model.media_sessions.iter().rev().find(visible))
+        .filter(eligible)
+        .filter(|s| is_active(s));
+    let paused = model
+        .media_sessions
+        .iter()
+        .rev()
+        .filter(eligible)
+        .filter(|s| !is_active(s));
+
+    playing.chain(paused).take(MAX_STACKED_CARDS).collect()
+}
+
+/// The primary session the sidebar's media controls show at the front of the stack, if any.
+pub fn controls_session(model: &BrowserModel) -> Option<&MediaSession> {
+    visible_sessions(model).into_iter().next()
+}
+
+/// Returns whether `session` has a finite, bounded duration suitable for rendering the seek bar.
+pub fn has_seekable_duration(session: &MediaSession) -> bool {
+    session
+        .duration_secs
+        .is_some_and(|d| d.is_finite() && d > 0.0 && d < LIVESTREAM_DURATION_THRESHOLD_SECS)
 }
 
 /// Applies a control to `session`. Returns false when the control changes nothing in the model (Focus, Previous and
@@ -70,6 +101,14 @@ pub fn apply_control(session: &mut MediaSession, control: MediaControl) -> bool 
         }
         MediaControl::ToggleMute => {
             session.is_muted = !session.is_muted;
+            true
+        }
+        MediaControl::ToggleMic => {
+            session.mic_muted = !session.mic_muted;
+            true
+        }
+        MediaControl::ToggleCamera => {
+            session.camera_muted = !session.camera_muted;
             true
         }
         MediaControl::Dismiss => {
@@ -115,6 +154,10 @@ pub fn sample_session(id: MediaSessionId, tab_id: TabId) -> MediaSession {
         has_next: true,
         supports_pip: true,
         dismissed: false,
+        sharing_mic: false,
+        sharing_camera: false,
+        mic_muted: false,
+        camera_muted: false,
     }
 }
 
@@ -147,6 +190,43 @@ mod tests {
             Some(TabId(1)),
         );
         assert_eq!(controls_session(&model).map(|s| s.id), Some(MediaSessionId(1)));
+    }
+
+    #[test]
+    fn visible_sessions_stacks_playing_first_up_to_three() {
+        let mut s1 = sample_session(MediaSessionId(1), TabId(2));
+        s1.is_playing = false;
+        let s2 = sample_session(MediaSessionId(2), TabId(3));
+        let mut s3 = sample_session(MediaSessionId(3), TabId(4));
+        s3.is_playing = false;
+        let s4 = sample_session(MediaSessionId(4), TabId(5));
+        let s5 = sample_session(MediaSessionId(5), TabId(6));
+        let model = model_with(vec![s1, s2, s3, s4, s5], Some(TabId(1)));
+        let ids: Vec<_> = visible_sessions(&model).into_iter().map(|s| s.id.0).collect();
+        assert_eq!(ids, vec![5, 4, 2]);
+    }
+
+    #[test]
+    fn livestream_and_missing_duration_hide_progress() {
+        let mut session = sample_session(MediaSessionId(1), TabId(2));
+        assert!(has_seekable_duration(&session));
+        session.duration_secs = None;
+        assert!(!has_seekable_duration(&session));
+        session.duration_secs = Some(0.0);
+        assert!(!has_seekable_duration(&session));
+        session.duration_secs = Some(LIVESTREAM_DURATION_THRESHOLD_SECS);
+        assert!(!has_seekable_duration(&session));
+    }
+
+    #[test]
+    fn mic_and_camera_mute_toggles_update_session() {
+        let mut session = sample_session(MediaSessionId(1), TabId(2));
+        session.sharing_mic = true;
+        session.sharing_camera = true;
+        assert!(apply_control(&mut session, MediaControl::ToggleMic));
+        assert!(session.mic_muted);
+        assert!(apply_control(&mut session, MediaControl::ToggleCamera));
+        assert!(session.camera_muted);
     }
 
     #[test]

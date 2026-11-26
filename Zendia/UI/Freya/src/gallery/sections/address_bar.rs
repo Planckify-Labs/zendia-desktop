@@ -73,6 +73,7 @@ fn configure_address_bar_fixture(state_id: &str, gallery_core: &GalleryCore) {
             let mut secure_site = SiteInfo::for_url("https://zendia.local/docs");
             secure_site.bookmarked = true;
             secure_site.tracking_protection_enabled = true;
+            secure_site.reader_mode_available = true;
             secure_site.data = SiteDataSummary {
                 cookie_count: 4,
                 storage_bytes: 128 * 1024,
@@ -370,11 +371,6 @@ impl Component for AddressBarSection {
 
         let page = mock_workspace_page(theme.scheme == ResolvedScheme::Dark, &active_title);
 
-        let dim_color = match theme.scheme {
-            ResolvedScheme::Dark => Color::from_argb(85, 0, 0, 0),
-            ResolvedScheme::Light => Color::from_argb(36, 12, 16, 28),
-        };
-
         let stage_overlay: Element = if is_site_state {
             // Anchored directly beside the sidebar LocationBar's site-data button (matching reference shot).
             // Lift by +64 relative layers so the preview paints above WindowShell's deep page subtree while staying
@@ -385,7 +381,7 @@ impl Component for AddressBarSection {
                 .child(SiteDataPanelCard::new(site_info, extensions))
                 .into_element()
         } else {
-            // Centered floating address bar / Actions palette over dimmed window shell.
+            // Centered floating address bar / Actions palette over the window shell (no dimming scrim, as in Zen).
             let current_mode = *preview_mode.read();
             rect()
                 .layer(Layer::Relative(64))
@@ -393,7 +389,6 @@ impl Component for AddressBarSection {
                 .width(Size::percent(100.0))
                 .height(Size::percent(100.0))
                 .padding(Gaps::new(190.0, 0.0, 0.0, 0.0))
-                .background(dim_color)
                 .main_align(Alignment::Start)
                 .cross_align(Alignment::center())
                 .child(

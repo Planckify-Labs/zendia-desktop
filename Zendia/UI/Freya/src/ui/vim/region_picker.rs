@@ -269,14 +269,23 @@ impl Component for RegionPickerSurface {
             selection.set(Some(rect));
         };
 
+        let zoom_level_up = self.zoom_level;
+        let on_capture_up = self.on_capture.clone();
         let on_global_pointer_up = move |_: Event<PointerEventData>| {
             if !*dragging.peek() {
                 return;
             }
             dragging.set(false);
             drag_start.set(None);
-            let keep = selection.peek().filter(|r| r.is_valid_drag());
-            selection.set(keep);
+            let valid = selection.peek().filter(|r| r.is_valid_drag());
+            if let Some(r) = valid {
+                selection.set(Some(r));
+                if let Some(capture) = &on_capture_up {
+                    capture.call((r.to_page_coords(zoom_level_up), false));
+                }
+            } else {
+                selection.set(None);
+            }
         };
 
         let capture_keys = self.capture_keys;
@@ -394,15 +403,9 @@ impl Component for RegionPickerSurface {
                         .main_align(Alignment::center())
                         .child(
                             rect()
-                                .padding(Gaps::new(6.0, 14.0, 6.0, 14.0))
+                                .padding(Gaps::new(6.0, 12.0, 6.0, 12.0))
                                 .corner_radius(CornerRadius::new_all(999.0))
                                 .background(theme.color(ThemeRole::Surface))
-                                .border(
-                                    Border::new()
-                                        .width(1.0)
-                                        .alignment(BorderAlignment::Inner)
-                                        .fill(theme.color(ThemeRole::BorderSubtle)),
-                                )
                                 .shadow(banner_shadow)
                                 .child(
                                     label()
@@ -418,6 +421,22 @@ impl Component for RegionPickerSurface {
 
         let fallback_a11y = use_hook(AccessibilityId::new_unique);
         let a11y_id = self.focus_a11y_id.unwrap_or(fallback_a11y);
+        let focus = use_focus(a11y_id);
+        let mut was_focused = use_state(|| false);
+        let is_focused = focus() != Focus::Not;
+        if self.capture_keys {
+            if is_focused {
+                was_focused.set_if_modified(true);
+            } else if *was_focused.peek() {
+                was_focused.set(false);
+                dragging.set_if_modified(false);
+                drag_start.set_if_modified(None);
+                selection.set_if_modified(None);
+                if let Some(cancel) = &self.on_cancel {
+                    cancel.call(());
+                }
+            }
+        }
         rect()
             .a11y_id(a11y_id)
             .a11y_focusable(self.capture_keys)

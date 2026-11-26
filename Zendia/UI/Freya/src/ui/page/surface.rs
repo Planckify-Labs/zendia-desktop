@@ -10,6 +10,7 @@ use crate::input;
 use crate::ui::core_view::use_core;
 use crate::ui::page::keymap_context::use_keymap;
 use crate::ui::page::surface_store::{SurfaceRect, use_page_surfaces};
+use crate::ui::panels::try_use_dock_state;
 use crate::ui::theme::{ThemeRole, use_theme};
 use crate::ui::vim::try_use_vim_statusline_state;
 use freya::elements::image::image;
@@ -107,6 +108,7 @@ impl Component for PageSurface {
         let theme = use_theme();
         let keymap = use_keymap();
         let page_ctx = use_page_surfaces();
+        let dock_state = try_use_dock_state();
         let vim_state = try_use_vim_statusline_state();
 
         let fallback_a11y_id = use_hook(AccessibilityId::new_unique);
@@ -179,6 +181,9 @@ impl Component for PageSurface {
             let page_ctx = page_ctx.clone();
             let core = core.clone();
             move |e: Event<MouseEventData>| {
+                if dock_state.is_some_and(|ds| ds.is_any_panel_resizing()) {
+                    return;
+                }
                 a11y_id.request_focus();
                 if let Some(view_id) = view_id {
                     page_ctx.record_focused_surface(a11y_id, view_id);
@@ -204,6 +209,9 @@ impl Component for PageSurface {
         let on_mouse_up = {
             let tracker = Rc::clone(page_ctx.tracker());
             move |e: Event<MouseEventData>| {
+                if dock_state.is_some_and(|ds| ds.is_any_panel_resizing()) {
+                    return;
+                }
                 let (Some(view_id), Some(button)) = (view_id, e.button) else {
                     return;
                 };
@@ -220,6 +228,9 @@ impl Component for PageSurface {
         let on_mouse_move = {
             let tracker = Rc::clone(page_ctx.tracker());
             move |e: Event<MouseEventData>| {
+                if dock_state.is_some_and(|ds| ds.is_any_panel_resizing()) {
+                    return;
+                }
                 let Some(view_id) = view_id else { return };
                 let dpr = *Platform::get().current_window().scale_factor.peek();
                 tracker.borrow_mut().send_mouse_move(
@@ -304,6 +315,9 @@ impl Component for PageSurface {
             }
         };
 
+        let panel_resizing = dock_state.is_some_and(|ds| !ds.slide_resizing.read().is_empty());
+        let effective_cursor = if panel_resizing { CursorIcon::ColResize } else { cursor };
+
         let surface_rect = rect()
             .width(self.width.clone())
             .height(self.height.clone())
@@ -312,7 +326,7 @@ impl Component for PageSurface {
             .a11y_id(a11y_id)
             .a11y_focusable(true)
             .a11y_role(AccessibilityRole::Document)
-            .cursor(cursor)
+            .cursor(effective_cursor)
             .on_sized(on_sized)
             .on_mouse_down(on_mouse_down)
             .on_mouse_up(on_mouse_up)

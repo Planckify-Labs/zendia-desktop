@@ -46,12 +46,14 @@ fn toast(id: u64, message: &str, action: Option<(&str, &str)>) -> Toast {
     Toast {
         id: ToastId(id),
         message: message.to_string(),
+        description: None,
         action: action.map(|(label, command)| ToastAction {
             label: label.to_string(),
             command: command.to_string(),
             command_args: Vec::new(),
         }),
         timeout_ms: GALLERY_TOAST_MS,
+        bounce_seq: 0,
     }
 }
 
@@ -138,6 +140,7 @@ fn configure_fixture(
             id: 1,
             start: (980.0, 520.0),
             end,
+            viewport_height: 1000.0,
         }]);
     }
 }

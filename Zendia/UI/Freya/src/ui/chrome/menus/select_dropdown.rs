@@ -11,10 +11,14 @@ use crate::ui::chrome::menus::context_menu::{
 };
 use crate::ui::chrome::menus::state::{clamp_popup_origin, use_menu_state};
 use crate::ui::core_view::use_core;
-use crate::ui::kit::Icon;
+use crate::ui::kit::{
+    Icon, ListNavAction, ListNavConfig, TypeaheadState, classify_list_key, compute_scroll_into_view_y,
+    max_popup_height, moved_index, scroll_item_into_view,
+};
 use crate::ui::theme::POPUP_OVERLAY_LEVEL;
 use crate::ui::theme::{ThemeRole, use_theme};
 use freya::prelude::*;
+use std::time::Instant;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::menus::{SelectDropdownItem, SelectOption};
 use zendia_browser_core::model::TabId;
@@ -53,58 +57,49 @@ fn flatten_select_items(items: &[SelectDropdownItem]) -> Vec<FlatSelectRow> {
     rows
 }
 
-fn next_option_index(rows: &[FlatSelectRow], current: Option<usize>, delta: isize) -> Option<usize> {
-    let len = rows.len();
-    if len == 0 {
-        return None;
+const GROUP_HEADER_HEIGHT: f32 = 24.0;
+/// Space between the popup's outer edge and its first row, top and bottom together.
+const SELECT_CHROME_HEIGHT: f32 = 10.0;
+
+fn row_height(row: &FlatSelectRow) -> f32 {
+    match row {
+        FlatSelectRow::Option { .. } => CTX_MENU_ROW_HEIGHT,
+        FlatSelectRow::GroupHeader { .. } => GROUP_HEADER_HEIGHT,
+        FlatSelectRow::Separator => CTX_MENU_SEP_HEIGHT,
     }
-    let is_pickable = |idx: usize| {
-        matches!(
-            rows.get(idx),
-            Some(FlatSelectRow::Option { option, .. }) if !option.disabled
-        )
-    };
-    let start = match current {
-        Some(idx) => ((idx as isize + delta).rem_euclid(len as isize)) as usize,
-        None => {
-            if delta >= 0 {
-                0
-            } else {
-                len - 1
-            }
-        }
-    };
-    for step in 0..len {
-        let idx = ((start as isize + delta * step as isize).rem_euclid(len as isize)) as usize;
-        if is_pickable(idx) {
-            return Some(idx);
-        }
-    }
-    None
 }
 
-fn estimate_select_size(rows: &[FlatSelectRow], minimum_width: f32) -> (f32, f32) {
-    let mut height = 10.0;
+fn rows_height(rows: &[FlatSelectRow]) -> f32 {
+    rows.iter().map(row_height).sum()
+}
+
+fn is_pickable(rows: &[FlatSelectRow], idx: usize) -> bool {
+    matches!(rows.get(idx), Some(FlatSelectRow::Option { option, .. }) if !option.disabled)
+}
+
+fn option_label(rows: &[FlatSelectRow], idx: usize) -> Option<String> {
+    match rows.get(idx) {
+        Some(FlatSelectRow::Option { option, .. }) => Some(option.label.clone()),
+        _ => None,
+    }
+}
+
+/// The popup's `(width, height)`, with the height capped at `max_height`; taller lists scroll.
+fn estimate_select_size(rows: &[FlatSelectRow], minimum_width: f32, max_height: f32) -> (f32, f32) {
     let mut max_chars = 14usize;
     for row in rows {
         match row {
             FlatSelectRow::Option { option, indented } => {
-                height += CTX_MENU_ROW_HEIGHT;
                 max_chars = max_chars.max(option.label.chars().count() + if *indented { 3 } else { 0 });
             }
-            FlatSelectRow::GroupHeader { label } => {
-                height += 24.0;
-                max_chars = max_chars.max(label.chars().count());
-            }
-            FlatSelectRow::Separator => {
-                height += CTX_MENU_SEP_HEIGHT;
-            }
+            FlatSelectRow::GroupHeader { label } => max_chars = max_chars.max(label.chars().count()),
+            FlatSelectRow::Separator => {}
         }
     }
     let width = ((max_chars as f32) * 7.2 + 44.0)
         .max(minimum_width)
         .clamp(SELECT_MIN_WIDTH, SELECT_MAX_WIDTH);
-    (width, height.min(SELECT_MAX_HEIGHT))
+    (width, (rows_height(rows) + SELECT_CHROME_HEIGHT).min(max_height))
 }
 
 /// Overlay host rendering the active `<select>` dropdown popup in [`MenuViewState`].
@@ -122,7 +117,9 @@ impl Component for SelectDropdownOverlay {
         let rows = flatten_select_items(&open.items);
         let root_size = *Platform::get().current_window().root_size.read();
         let window_size = (root_size.width.max(320.0), root_size.height.max(240.0));
-        let est_size = estimate_select_size(&rows, open.minimum_width);
+        let max_height = max_popup_height(window_size.1, 12.0, SELECT_MAX_HEIGHT);
+        let est_size = estimate_select_size(&rows, open.minimum_width, max_height);
+        let seq = *menu_state.select_seq.read();
         let origin = clamp_popup_origin(open.position, est_size, window_size, 6.0);
 
         let dismiss_core = core.clone();
@@ -156,6 +153,8 @@ impl Component for SelectDropdownOverlay {
                     .position(Position::new_global().left(origin.0).top(origin.1))
                     .child(
                         SelectDropdownCard::new(open.items)
+                            .key(seq)
+                            .max_height(max_height)
                             .tab_id(choose_tab)
                             .minimum_width(open.minimum_width)
                             .capture_global_keys(true)
@@ -178,6 +177,7 @@ pub struct SelectDropdownCard {
     items: Vec<SelectDropdownItem>,
     tab_id: Option<TabId>,
     minimum_width: f32,
+    max_height: f32,
     capture_global_keys: bool,
     on_select: Option<EventHandler<Option<u32>>>,
     key: DiffKey,
@@ -195,6 +195,7 @@ impl SelectDropdownCard {
             items,
             tab_id: None,
             minimum_width: SELECT_MIN_WIDTH,
+            max_height: SELECT_MAX_HEIGHT,
             capture_global_keys: false,
             on_select: None,
             key: DiffKey::None,
@@ -208,6 +209,11 @@ impl SelectDropdownCard {
 
     pub fn minimum_width(mut self, width: f32) -> Self {
         self.minimum_width = width;
+        self
+    }
+
+    pub fn max_height(mut self, height: f32) -> Self {
+        self.max_height = height;
         self
     }
 
@@ -232,6 +238,17 @@ impl Component for SelectDropdownCard {
             .iter()
             .position(|row| matches!(row, FlatSelectRow::Option { option, .. } if option.selected && !option.disabled));
         let mut active_index = use_state(move || initial_selected);
+        let mut typeahead = use_state(TypeaheadState::default);
+
+        let viewport_height = self.max_height - SELECT_CHROME_HEIGHT;
+        let content_height = rows_height(&rows);
+        let scrolls = content_height > viewport_height;
+        // The popup opens with the chosen option on screen.
+        let mut scroll = use_hook(|| {
+            let top = initial_selected.map_or(0.0, |idx| rows_height(&rows[..idx]));
+            let y = compute_scroll_into_view_y(0, top, CTX_MENU_ROW_HEIGHT, viewport_height, content_height);
+            ScrollController::new(0, y.unwrap_or(0))
+        });
 
         let rows_for_keys = rows.clone();
         let on_select_keys = self.on_select.clone();
@@ -243,49 +260,55 @@ impl Component for SelectDropdownCard {
             if !capture {
                 return;
             }
-            match &e.key {
-                Key::Named(NamedKey::Escape) => {
-                    e.stop_propagation();
-                    if let Some(handler) = &on_select_keys {
-                        handler.call(None);
-                    } else {
-                        core_keys.invoke_or_log(Command::PageSelectDropdownChoose {
-                            tab_id: tab_id_keys,
-                            item_id: None,
-                        });
-                    }
+            let Some(mut action) = classify_list_key(&e, ListNavConfig::select()) else {
+                return;
+            };
+            if matches!(&e.key, Key::Character(ch) if ch == " ") && typeahead.peek().is_typing(Instant::now()) {
+                action = ListNavAction::Typeahead(' ');
+            }
+            e.stop_propagation();
+            e.prevent_default();
+            let choose = |item_id: Option<u32>| {
+                if let Some(handler) = &on_select_keys {
+                    handler.call(item_id);
+                } else {
+                    core_keys.invoke_or_log(Command::PageSelectDropdownChoose {
+                        tab_id: tab_id_keys,
+                        item_id,
+                    });
                 }
-                Key::Named(NamedKey::ArrowDown) => {
-                    e.stop_propagation();
-                    let next = next_option_index(&rows_for_keys, *active_index.peek(), 1);
-                    active_index.set(next);
-                }
-                Key::Named(NamedKey::ArrowUp) => {
-                    e.stop_propagation();
-                    let next = next_option_index(&rows_for_keys, *active_index.peek(), -1);
-                    active_index.set(next);
-                }
-                Key::Named(NamedKey::Enter) => {
-                    e.stop_propagation();
+            };
+            match action {
+                ListNavAction::Dismiss => choose(None),
+                ListNavAction::Activate => {
                     if let Some(idx) = *active_index.peek()
                         && let Some(FlatSelectRow::Option { option, .. }) = rows_for_keys.get(idx)
                         && !option.disabled
                     {
-                        if let Some(handler) = &on_select_keys {
-                            handler.call(Some(option.id));
-                        } else {
-                            core_keys.invoke_or_log(Command::PageSelectDropdownChoose {
-                                tab_id: tab_id_keys,
-                                item_id: Some(option.id),
-                            });
-                        }
+                        choose(Some(option.id));
                     }
                 }
-                _ => {}
+                _ => {
+                    let current = *active_index.peek();
+                    let next = moved_index(
+                        &action,
+                        &mut typeahead.write(),
+                        rows_for_keys.len(),
+                        current,
+                        false,
+                        |idx| option_label(&rows_for_keys, idx),
+                        |idx| is_pickable(&rows_for_keys, idx),
+                    );
+                    if let Some(idx) = next {
+                        active_index.set(Some(idx));
+                        let top = rows_height(&rows_for_keys[..idx]);
+                        scroll_item_into_view(&mut scroll, top, CTX_MENU_ROW_HEIGHT, viewport_height, content_height);
+                    }
+                }
             }
         };
 
-        let (width, _) = estimate_select_size(&rows, self.minimum_width);
+        let (width, _) = estimate_select_size(&rows, self.minimum_width, self.max_height);
         let current_active = *active_index.read();
 
         let rendered_rows = rows.iter().enumerate().map(|(idx, row)| match row {
@@ -293,7 +316,7 @@ impl Component for SelectDropdownCard {
             FlatSelectRow::GroupHeader { label: group_label } => rect()
                 .key(idx)
                 .width(Size::fill())
-                .height(Size::px(24.0))
+                .height(Size::px(GROUP_HEADER_HEIGHT))
                 .padding(Gaps::new(4.0, 10.0, 2.0, 10.0))
                 .cross_align(Alignment::center())
                 .direction(Direction::Horizontal)
@@ -388,11 +411,10 @@ impl Component for SelectDropdownCard {
             }
         });
 
-        let estimated_content_height = estimate_select_size(&rows, self.minimum_width).1;
-        let body: Element = if estimated_content_height > SELECT_MAX_HEIGHT {
-            ScrollView::new()
+        let body: Element = if scrolls {
+            ScrollView::new_controlled(scroll)
                 .width(Size::fill())
-                .height(Size::px(SELECT_MAX_HEIGHT - 8.0))
+                .height(Size::px(viewport_height))
                 .children(rendered_rows)
                 .into_element()
         } else {
@@ -402,7 +424,7 @@ impl Component for SelectDropdownCard {
         rect()
             .a11y_role(AccessibilityRole::ListBox)
             .width(Size::px(width))
-            .max_height(Size::px(SELECT_MAX_HEIGHT))
+            .max_height(Size::px(self.max_height))
             .padding(Gaps::new_all(4.0))
             .corner_radius(CornerRadius::new_all(6.0))
             .background(native_menu_bg(&theme))
