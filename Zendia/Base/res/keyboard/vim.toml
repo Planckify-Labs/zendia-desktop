@@ -423,8 +423,9 @@ description = "Reopen Closed Tab"
 [[bindings]]
 mode = "n"
 keys = "<leader>fn"
-command = "tab.new"
-description = "New Tab"
+command = "address_bar.open"
+args = { new_tab = true }
+description = "New Tab (URL bar)"
 
 # ---------------------------------------------------------------------------
 # Normal mode — navigation, URL & yank
@@ -574,9 +575,15 @@ description = "Prev Search Result"
 
 [[bindings]]
 mode = "n"
-keys = ["<leader><Space>", "<leader>ff"]
+keys = "<leader><Space>"
 command = "address_bar.open"
 description = "Find Tabs, History and Bookmarks"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>ff"
+command = "location.focus"
+description = "Open URL Bar"
 
 [[bindings]]
 mode = "n"
