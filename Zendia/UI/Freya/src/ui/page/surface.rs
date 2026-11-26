@@ -193,6 +193,12 @@ impl Component for PageSurface {
                 {
                     core.invoke_or_log(Command::TabActivate { tab_id });
                 }
+                // A click ends a jump, or its labels would go on taking the keys.
+                if core.model().peek().page_hints.is_some() {
+                    core.invoke_or_log(Command::Page(
+                        zendia_browser_core::page_actions::PageAction::PageHintCancel,
+                    ));
+                }
                 let (Some(view_id), Some(button)) = (view_id, e.button) else {
                     return;
                 };
@@ -251,10 +257,12 @@ impl Component for PageSurface {
 
         let on_wheel = {
             let tracker = Rc::clone(page_ctx.tracker());
+            let core = core.clone();
             move |e: Event<WheelEventData>| {
                 if let Some(state) = vim_state {
                     state.notify_page_scroll();
                 }
+                crate::ui::vim::follow_page_scroll(&core);
                 let Some(view_id) = view_id else { return };
                 let dpr = *Platform::get().current_window().scale_factor.peek();
                 tracker.borrow_mut().send_wheel(
@@ -273,12 +281,14 @@ impl Component for PageSurface {
             let core = core.clone();
             let tracker = Rc::clone(page_ctx.tracker());
             move |e: Event<KeyboardEventData>| {
-                if crate::ui::vim::focus_mode_captures_keys(&core.model().peek()) {
+                let model = core.model().peek();
+                if crate::ui::vim::surface_keeps_keys(&model) {
                     return;
                 }
-                if keymap.will_consume_key_down(&e) {
+                if keymap.will_consume_key_down(&e, &model) {
                     return;
                 }
+                drop(model);
                 let Some(view_id) = view_id else { return };
                 let event = input::key_event(true, &e.key, e.code, e.modifiers);
                 tracker.borrow().send_key(view_id, event);
@@ -315,6 +325,11 @@ impl Component for PageSurface {
             }
         };
 
+        // The page's viewport in logical pixels, which jump labels stay inside.
+        let viewport = frame.as_ref().map_or((0.0, 0.0), |(_, (width, height), dpr)| {
+            ((*width as f64 / dpr) as f32, (*height as f64 / dpr) as f32)
+        });
+
         let panel_resizing = dock_state.is_some_and(|ds| !ds.slide_resizing.read().is_empty());
         let effective_cursor = if panel_resizing { CursorIcon::ColResize } else { cursor };
 
@@ -340,6 +355,10 @@ impl Component for PageSurface {
                     .width(Size::px((width as f64 / frame_dpr) as f32))
                     .height(Size::px((height as f64 / frame_dpr) as f32))
             }))
+            .child(crate::ui::vim::page_hints::PageHintsOverlay::new(
+                view_id.map(zendia_browser_core::model::TabId),
+                viewport,
+            ))
             .maybe_child(hovered_link.map(|link| {
                 rect()
                     .position(Position::new_absolute().left(0.).bottom(0.))

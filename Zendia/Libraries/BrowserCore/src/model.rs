@@ -879,6 +879,36 @@ pub struct BrowserModel {
     pub unloaded_tabs: std::collections::BTreeSet<TabId>,
     /// Optional parent folder mapping for nested folders (`FLD-05`).
     pub folder_parents: BTreeMap<FolderId, FolderId>,
+    /// Active native page-DOM hint overlay session (`s`, `gs`, `S`, `v`+`s`, `i`, `gc`).
+    pub page_hints: Option<crate::page_actions::PageHintSession>,
+    /// Current visual-mode caret rectangle reported by the Automation World.
+    pub visual_caret: Option<zendia_automation::ViewportRect>,
+    /// What a yank or a put just took on the page, which the UI flashes for a moment.
+    pub page_flash: Option<PageFlash>,
+    /// Find in page: the last text searched, which `n` and `N` search again, and its matches.
+    pub page_find: PageFind,
+}
+
+/// Find in page (`/`, `n`, `N`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PageFind {
+    /// The last text searched for.
+    pub query: String,
+    /// The tab whose page shows its matches now, if any.
+    pub tab_id: Option<TabId>,
+    /// The match the page is on, from 0.
+    pub current: Option<usize>,
+    /// How many matches the page has, once it has counted them.
+    pub total: Option<usize>,
+}
+
+/// Rects of a page that the UI highlights for a moment: the text a visual yank copied, or the field a put went in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageFlash {
+    /// Grows with each flash, so the UI can tell a new one from the last.
+    pub serial: u64,
+    pub tab_id: TabId,
+    pub rects: Vec<zendia_automation::ViewportRect>,
 }
 
 impl BrowserModel {
@@ -1662,6 +1692,22 @@ impl BrowserModel {
                 self.active_chat_site_id = active_site_id.clone();
                 self.webchat_pending_prompt = pending_prompt.clone();
                 self.webchat_dictating = *dictating;
+                true
+            }
+            Event::PageHintsChanged { hints } => {
+                self.page_hints = hints.clone();
+                true
+            }
+            Event::VisualCaretChanged { caret } => {
+                self.visual_caret = *caret;
+                true
+            }
+            Event::PageFlashed { flash } => {
+                self.page_flash = Some(flash.clone());
+                true
+            }
+            Event::PageFindChanged { find } => {
+                self.page_find = find.clone();
                 true
             }
             Event::AgentRosterChanged

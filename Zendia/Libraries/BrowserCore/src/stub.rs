@@ -40,13 +40,19 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 mod agent;
+mod chrome_actions;
 mod focus;
 mod input_state;
 mod library_media;
 mod onboarding;
+mod page_actions;
 mod page_layouts;
 mod pickers;
 pub mod settings_modules;
+mod split_actions;
+mod tab_actions;
+mod vim;
+mod yank_webchat_actions;
 
 pub use agent::{AGENT_PANEL_ID, AGENTS_PANEL_ID, build_rich_sample_conversation, sample_declared_agent_page};
 
@@ -88,6 +94,7 @@ struct StubState {
     registered_pickers: BTreeMap<PickerRequestId, PickerRequest>,
     active_picker: Option<PickerRequest>,
     last_region_capture: Option<RegionCapture>,
+    vim: vim::VimState,
 }
 
 /// Stub [`BrowserCore`] backend used during the Freya UI port until the real command registry lands.
@@ -147,6 +154,7 @@ impl StubBackend {
                 registered_pickers: BTreeMap::new(),
                 active_picker: None,
                 last_region_capture: None,
+                vim: vim::VimState::default(),
             }),
             tab_source: Mutex::new(None),
             bus: EventBus::new(),
@@ -270,6 +278,8 @@ impl StubBackend {
             let should_activate = activate || state.model.active_tab.is_none();
             let activated = if should_activate {
                 state.model.active_tab = Some(tab.id);
+                state.vim.tab_recency.retain(|existing| *existing != tab.id);
+                state.vim.tab_recency.push(tab.id);
                 if let Some(window) = state.model.windows.first_mut() {
                     window.active_tab = Some(tab.id);
                 }
@@ -357,11 +367,14 @@ impl StubBackend {
             if let Some(window) = state.model.windows.first_mut() {
                 window.active_tab = tab_id;
             }
-            if let Some(id) = tab_id
-                && let Some(space_id) = state.model.tab(id).and_then(|tab| tab.space_id)
-                && let Some(space) = state.model.spaces.iter_mut().find(|s| s.id == space_id)
-            {
-                space.last_active_tab = Some(id);
+            if let Some(id) = tab_id {
+                state.vim.tab_recency.retain(|existing| *existing != id);
+                state.vim.tab_recency.push(id);
+                if let Some(space_id) = state.model.tab(id).and_then(|tab| tab.space_id)
+                    && let Some(space) = state.model.spaces.iter_mut().find(|s| s.id == space_id)
+                {
+                    space.last_active_tab = Some(id);
+                }
             }
         }
         self.bus.publish(Event::TabActivated { tab_id });
@@ -488,20 +501,62 @@ impl StubBackend {
         self.cycle_sample_input_state_impl();
     }
 
+    /// The tab `delta` entries away in the sidebar's order, wrapping around. As in the old fork, the panes of a split
+    /// view are one entry, reached at the pane used last, and the tabs of a collapsed folder are not in the list (the
+    /// active one excepted).
     fn adjacent_tab_id(&self, delta: isize) -> Option<TabId> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let ordered = state.model.tabs_in_active_space_order();
-        let len = ordered.len();
-        if len < 2 {
+        let model = &state.model;
+        let active = model.active_tab;
+        let hidden = |id: TabId| {
+            Some(id) != active
+                && model
+                    .tab(id)
+                    .and_then(|tab| tab.folder_id)
+                    .and_then(|folder_id| model.folder(folder_id))
+                    .is_some_and(|folder| folder.collapsed)
+        };
+        let mut entries: Vec<Vec<TabId>> = Vec::new();
+        for id in model.tabs_in_active_space_order() {
+            if hidden(id) {
+                continue;
+            }
+            let group = model.split_group_for_tab(id).map(|group| group.tab_ids.clone());
+            match group {
+                Some(panes) => {
+                    if let Some(entry) = entries
+                        .iter_mut()
+                        .find(|entry| entry.iter().any(|tab| panes.contains(tab)))
+                    {
+                        entry.push(id);
+                    } else {
+                        entries.push(vec![id]);
+                    }
+                }
+                None => entries.push(vec![id]),
+            }
+        }
+        let index = active.and_then(|active| entries.iter().position(|entry| entry.contains(&active)));
+        if entries.is_empty() || (entries.len() < 2 && index.is_some()) {
             return None;
         }
-        let current = state
-            .model
-            .active_tab
-            .and_then(|active_id| ordered.iter().position(|id| *id == active_id))
-            .unwrap_or(0);
-        let next = (current as isize + delta).rem_euclid(len as isize) as usize;
-        Some(ordered[next])
+        // From no tab (an empty space), the next is the first and the previous the last.
+        let from = match index {
+            Some(index) => index as isize,
+            None if delta < 0 => 0,
+            None => -1,
+        };
+        let len = entries.len() as isize;
+        let next = &entries[(from + delta).rem_euclid(len) as usize];
+        let last_used = state
+            .vim
+            .tab_recency
+            .iter()
+            .rev()
+            .find(|id| next.contains(id))
+            .copied()
+            .unwrap_or(next[0]);
+        Some(last_used)
     }
 
     /// Updates a child service's reported health state.
@@ -572,6 +627,8 @@ impl StubBackend {
             let should_activate = activate || state.model.active_tab.is_none();
             let activated = if should_activate {
                 state.model.active_tab = Some(id);
+                state.vim.tab_recency.retain(|existing| *existing != id);
+                state.vim.tab_recency.push(id);
                 if let Some(window) = state.model.windows.first_mut() {
                     window.active_tab = Some(id);
                 }
@@ -2884,6 +2941,8 @@ impl StubBackend {
         if !enabled {
             self.clear_focus_on_vim_disabled();
             self.on_vim_mode_disabled();
+            self.reset_vim_page_mode();
+            self.clear_page_hints_on_vim_disabled();
         }
         Ok(())
     }
@@ -2998,6 +3057,7 @@ impl BrowserCore for StubBackend {
                     state.model.active_tab().map(|tab| tab.url.clone()).unwrap_or_default()
                 };
                 if !url.is_empty() {
+                    self.record_yank(&url);
                     self.bus.publish(Event::ClipboardCopyRequested { text: url });
                     self.show_toast(crate::toasts::messages::COPIED_CURRENT_URL.to_string(), None, None);
                 }
@@ -3293,6 +3353,7 @@ impl BrowserCore for StubBackend {
                     state.model.tab(target).map(|tab| tab.url.clone()).unwrap_or_default()
                 };
                 if !url.is_empty() {
+                    self.record_yank(&url);
                     self.bus.publish(Event::ClipboardCopyRequested { text: url });
                 }
                 Ok(())
@@ -3551,6 +3612,12 @@ impl BrowserCore for StubBackend {
             | Command::WhichKeyBack
             | Command::WhichKeyHide) => self.handle_input_state_command(command),
             Command::VimSetEnabled { enabled } => self.handle_vim_set_enabled(enabled),
+            Command::Vim(command) => self.handle_vim_command(command),
+            Command::Tabs(action) => self.handle_tab_actions(action),
+            Command::Splits(action) => self.handle_split_actions(action),
+            Command::Chrome(action) => self.handle_chrome_actions(action),
+            Command::YankWebChat(action) => self.handle_yank_webchat_actions(action),
+            Command::Page(action) => self.handle_page_actions(action),
             Command::ZoomIn { tab_id } => {
                 if let Some(source) = tab_source {
                     let target = self.resolve_target_tab(tab_id, &name)?;
@@ -4917,6 +4984,10 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         pinned_urls,
         unloaded_tabs: std::collections::BTreeSet::new(),
         folder_parents: BTreeMap::new(),
+        page_hints: None,
+        visual_caret: None,
+        page_flash: None,
+        page_find: crate::model::PageFind::default(),
     }
 }
 

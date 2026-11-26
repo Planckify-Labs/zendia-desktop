@@ -12,12 +12,14 @@ use hub_protocol::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use zendia_automation::{AutomationRequest, AutomationResponse};
 use zendia_browser_core::BrowserCore;
 use zendia_browser_core::address_bar::SearchEngine;
-use zendia_browser_core::commands::{CommandError, CommandResult, MediaAction};
+use zendia_browser_core::commands::{Command, CommandError, CommandResult, MediaAction};
 use zendia_browser_core::model::{Tab, TabId, TabKind};
 use zendia_browser_core::stub::StubBackend;
 use zendia_browser_core::tab_source::{TabSource, TabUpdate};
+use zendia_browser_core::vim_keys::{FieldEdit, VimCommand};
 
 /// Per-view capability flags cached from `Hub::ViewState` for building context menus.
 #[derive(Clone, Copy, Debug, Default)]
@@ -42,6 +44,8 @@ pub struct HubTabAdapter {
     auxiliary_views: Mutex<HashSet<u64>>,
     auxiliary_loading: Mutex<HashMap<u64, bool>>,
     next_request_id: AtomicU64,
+    /// Automation World requests sent without the runtime, kept until answered in case the page has none yet.
+    automation_requests: Mutex<HashMap<u64, (u64, AutomationRequest)>>,
 }
 
 impl HubTabAdapter {
@@ -60,6 +64,7 @@ impl HubTabAdapter {
             auxiliary_views: Mutex::new(HashSet::new()),
             auxiliary_loading: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
+            automation_requests: Mutex::new(HashMap::new()),
         }
     }
 
@@ -107,6 +112,58 @@ impl HubTabAdapter {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .contains(&view_id)
+    }
+
+    /// Takes an Automation World reply from the Hub's embedder channel. A document that has no runtime yet gets the
+    /// request again with it; any other answer goes to the core.
+    pub fn on_embedder_reply(&self, view_id: u64, request_id: u64, result_json: &str) {
+        let request = self
+            .automation_requests
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&request_id);
+        let response = match zendia_automation::parse_response(result_json) {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("zendia: unreadable automation reply: {error}");
+                return;
+            }
+        };
+        if response == AutomationResponse::NeedRuntime {
+            if let Some((view_id, request)) = request {
+                self.post_automation(view_id, request, true);
+            }
+            return;
+        }
+        self.core.feed_automation_response(TabId(view_id), response);
+    }
+
+    /// The page counted find in page's matches, or moved to one.
+    pub fn on_find_in_page(&self, view_id: u64, current: usize, total: Option<usize>) {
+        self.core.feed_find_result(TabId(view_id), current, total);
+    }
+
+    fn post_automation(&self, view_id: u64, request: AutomationRequest, with_runtime: bool) {
+        let script = match zendia_automation::build_eval_script(&request, with_runtime) {
+            Ok(script) => script,
+            Err(error) => {
+                eprintln!("zendia: failed to build automation script: {error}");
+                return;
+            }
+        };
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        if !with_runtime {
+            self.automation_requests
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(request_id, (view_id, request));
+        }
+        hub::connection().post_or_log(server::ViewEmbedderMessage {
+            view_id,
+            request_id,
+            world: libipc_rust::wire::Utf8String::from(zendia_automation::AUTOMATION_WORLD_NAME),
+            script: libipc_rust::wire::Utf8String::from(script),
+        });
     }
 
     /// Creates a persistent non-tab Hub view (used by Web chat sites) and navigates it to `url`.
@@ -363,6 +420,14 @@ impl HubTabAdapter {
                 ..TabUpdate::default()
             },
         );
+        // NB: The page turns its input method on while a field has the focus, which is when vim mode types into it.
+        let editing = state.input_method_state.is_enabled;
+        if self.core.page_is_editing(TabId(view_id)) != editing {
+            let _ = self.core.invoke(Command::Vim(VimCommand::EditableFocusChanged {
+                tab_id: Some(TabId(view_id)),
+                editing,
+            }));
+        }
     }
 
     pub fn on_title_changed(&self, view_id: u64, title: String) {
@@ -415,7 +480,151 @@ fn load_in_hub(view_id: u64, url: URL_URL) {
     });
 }
 
+/// A press of the primary button at `position`, as a user's click would make it.
+fn click_event(r#type: Web_MouseEvent_Type, position: Web_DevicePixelPoint, held: bool) -> Web_MouseEvent {
+    Web_MouseEvent {
+        r#type,
+        position: position.clone(),
+        screen_position: position,
+        button: if r#type == Web_MouseEvent_Type::MouseMove {
+            Web_UIEvents_MouseButton::None
+        } else {
+            Web_UIEvents_MouseButton::Primary
+        },
+        buttons: if held {
+            Web_UIEvents_MouseButton::Primary
+        } else {
+            Web_UIEvents_MouseButton::None
+        },
+        modifiers: Web_UIEvents_KeyModifier::Mod_None,
+        wheel_delta_x: 0.0,
+        wheel_delta_y: 0.0,
+        wheel_tick_120ths_x: 0.0,
+        wheel_tick_120ths_y: 0.0,
+        wheel_delta_precision: Web_WheelDeltaPrecision::Discrete,
+        scroll_gesture_phase: Web_ScrollGesturePhase::None,
+        click_count: if r#type == Web_MouseEvent_Type::MouseMove { 0 } else { 1 },
+        async_scroll_performed_default_action: false,
+        id: 0,
+        scrollbar_dragged_by_compositor: None,
+        pointer_data: Web_PointerInputData { properties: None },
+        wheel_gesture_mark: None,
+    }
+}
+
+/// A Backspace press that runs `commands` in the page's focused field, as a platform's editing key binding would.
+fn editing_key_event(
+    is_down: bool,
+    modifiers: Web_UIEvents_KeyModifier,
+    commands: Vec<Web_TextEditingCommand>,
+) -> Web_KeyEvent {
+    Web_KeyEvent {
+        r#type: if is_down {
+            Web_KeyEvent_Type::KeyDown
+        } else {
+            Web_KeyEvent_Type::KeyUp
+        },
+        key: Web_UIEvents_KeyCode::Key_Backspace,
+        modifiers,
+        code_point: 0x08,
+        repeat: false,
+        should_insert_text: false,
+        async_scroll_performed_default_action: false,
+        user_input_scroll_count_with_nothing_to_scroll: None,
+        id: 0,
+        native_editing_binding_resolved: is_down,
+        editing_commands: if is_down { commands } else { Vec::new() },
+    }
+}
+
 impl TabSource for HubTabAdapter {
+    fn click_at(&self, tab_id: TabId, x: f64, y: f64) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "click")?;
+        let (_, device_pixel_ratio) = self.viewport();
+        let position = Web_DevicePixelPoint {
+            x: (x * device_pixel_ratio).round() as i32,
+            y: (y * device_pixel_ratio).round() as i32,
+        };
+        for (r#type, held) in [
+            (Web_MouseEvent_Type::MouseMove, false),
+            (Web_MouseEvent_Type::MouseDown, true),
+            (Web_MouseEvent_Type::MouseUp, false),
+        ] {
+            hub::connection().post_or_log(server::ViewEnqueueMouseEvent {
+                view_id,
+                input_id: 0,
+                event: click_event(r#type, position.clone(), held),
+            });
+        }
+        Ok(())
+    }
+
+    fn edit_field(&self, tab_id: TabId, edit: FieldEdit) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, edit.name())?;
+        let command = |r#type, extend_selection| Web_TextEditingCommand {
+            r#type,
+            extend_selection,
+        };
+        let (modifiers, commands) = match edit {
+            FieldEdit::DeleteWordBackward => (
+                Web_UIEvents_KeyModifier::Mod_Ctrl,
+                vec![command(Web_TextEditingCommand_Type::DeleteWordBackward, false)],
+            ),
+            FieldEdit::DeleteToLineStart => (
+                Web_UIEvents_KeyModifier::Mod_None,
+                vec![
+                    command(Web_TextEditingCommand_Type::MoveToBeginningOfLine, true),
+                    command(Web_TextEditingCommand_Type::DeleteBackward, false),
+                ],
+            ),
+            FieldEdit::DeleteCharBackward => (
+                Web_UIEvents_KeyModifier::Mod_None,
+                vec![command(Web_TextEditingCommand_Type::DeleteBackward, false)],
+            ),
+        };
+        for is_down in [true, false] {
+            hub::connection().post_or_log(server::ViewEnqueueKeyEvent {
+                view_id,
+                input_id: 0,
+                event: editing_key_event(is_down, modifiers, commands.clone()),
+            });
+        }
+        Ok(())
+    }
+
+    fn run_automation(&self, tab_id: TabId, request: AutomationRequest) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "automation")?;
+        self.post_automation(view_id, request, false);
+        Ok(())
+    }
+
+    fn find_in_page(&self, tab_id: TabId, query: &str) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.find")?;
+        hub::connection().post_or_log(server::ViewFindInPage {
+            view_id,
+            query: libipc_rust::wire::Utf16String::from(query),
+            case_sensitivity: AK_CaseSensitivity::CaseInsensitive,
+            highlight_all_matches: true,
+        });
+        Ok(())
+    }
+
+    fn find_in_page_step(&self, tab_id: TabId, backwards: bool) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "search.step")?;
+        if backwards {
+            hub::connection().post_or_log(server::ViewFindInPagePreviousMatch { view_id });
+        } else {
+            hub::connection().post_or_log(server::ViewFindInPageNextMatch { view_id });
+        }
+        Ok(())
+    }
+
+    fn find_in_page_end(&self, tab_id: TabId) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "page.find_end")?;
+        hub::connection().post_or_log(server::ViewFindInPageEnd { view_id });
+        Ok(())
+    }
+
     fn new_tab(&self, url: Option<&str>, after: Option<TabId>, activate: bool) -> CommandResult {
         let parsed = url.and_then(|input| location::url_for_location(input, &startup().settings.search_url));
         self.open_url_tab(parsed, after, activate)

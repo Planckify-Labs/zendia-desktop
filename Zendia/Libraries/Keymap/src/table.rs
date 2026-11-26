@@ -8,7 +8,7 @@
 
 use crate::notation::{KeyCode, KeyModifiers, KeySequence, KeyStroke, NotationError};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 
@@ -255,11 +255,69 @@ impl Profile {
         Self::from_toml(STANDARD_PROFILE_TOML).expect("embedded standard.toml must be valid")
     }
 
-    /// Loads the embedded default vim keyboard profile.
+    /// Loads the embedded default vim keyboard profile, with the leader keys of normal mode also reaching the
+    /// browser's own surfaces ([`CHROME_MODES`]).
     pub fn vim() -> Self {
-        Self::from_toml(VIM_PROFILE_TOML).expect("embedded vim.toml must be valid")
+        let mut profile = Self::from_toml(VIM_PROFILE_TOML).expect("embedded vim.toml must be valid");
+        profile.inherit_leader_keys("n", &CHROME_MODES);
+        profile
+    }
+
+    /// Copies every binding and group of mode `from` that starts with the leader into each mode of `to` that does not
+    /// map the same keys itself, so `<leader>` works the same while the explorer, the toolbar, the library or window
+    /// mode is open.
+    pub fn inherit_leader_keys(&mut self, from: &str, to: &[&str]) {
+        let leader = self.leader;
+        let starts_with_leader = |keys: &KeySequence| keys.strokes().first() == Some(&leader);
+        for &mode in to {
+            let own_bindings: BTreeSet<KeySequence> = self
+                .bindings
+                .iter()
+                .filter(|binding| binding.mode.as_deref() == Some(mode))
+                .map(|binding| binding.keys.clone())
+                .collect();
+            let inherited: Vec<Binding> = self
+                .bindings
+                .iter()
+                .filter(|binding| {
+                    binding.mode.as_deref() == Some(from)
+                        && starts_with_leader(&binding.keys)
+                        && !own_bindings.contains(&binding.keys)
+                })
+                .map(|binding| Binding {
+                    mode: Some(mode.to_string()),
+                    ..binding.clone()
+                })
+                .collect();
+            self.bindings.extend(inherited);
+
+            let own_groups: BTreeSet<KeySequence> = self
+                .groups
+                .iter()
+                .filter(|group| group.mode.as_deref() == Some(mode))
+                .map(|group| group.keys.clone())
+                .collect();
+            let inherited: Vec<GroupSpec> = self
+                .groups
+                .iter()
+                .filter(|group| {
+                    group.mode.as_deref() == Some(from)
+                        && starts_with_leader(&group.keys)
+                        && !own_groups.contains(&group.keys)
+                })
+                .map(|group| GroupSpec {
+                    mode: Some(mode.to_string()),
+                    ..group.clone()
+                })
+                .collect();
+            self.groups.extend(inherited);
+        }
     }
 }
+
+/// The vim scheme's modes for the browser's own surfaces: the explorer (`e`), the toolbar (`t`), the library (`l`)
+/// and window mode (`w`). They take counts and leave unmapped keys alone, and they inherit normal mode's leader keys.
+pub const CHROME_MODES: [&str; 4] = ["e", "t", "l", "w"];
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TrieNode {
@@ -268,15 +326,13 @@ pub(crate) struct TrieNode {
 }
 
 impl TrieNode {
+    /// A key sequence can be a mapping and a prefix of longer ones at once (`g` and `gg`), as in vim. The key engine
+    /// settles such a sequence with `timeoutlen`. A later binding of the same sequence replaces the earlier one.
     fn insert(&mut self, strokes: &[KeyStroke], binding: Binding) {
         let Some((first, rest)) = strokes.split_first() else {
-            // Installing a leaf at this prefix replaces any longer conflicting descendants.
-            self.children.clear();
             self.binding = Some(binding);
             return;
         };
-        // Extending past a previously bound prefix replaces the shorter binding so resolution stays prefix-free.
-        self.binding = None;
         self.children.entry(*first).or_default().insert(rest, binding);
     }
 

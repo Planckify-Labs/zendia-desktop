@@ -258,7 +258,15 @@ impl App for GalleryApp {
                     ViewRequest::ShareConfirmClose => {
                         share_state.close();
                     }
-                    ViewRequest::SettingsOpen { .. } | ViewRequest::SettingsClose => {}
+                    ViewRequest::SettingsOpen { .. }
+                    | ViewRequest::SettingsClose
+                    | ViewRequest::TabMenu { .. }
+                    | ViewRequest::UrlPaste { .. }
+                    | ViewRequest::PageFind
+                    | ViewRequest::WindowMinimize
+                    | ViewRequest::WindowToggleMaximize
+                    | ViewRequest::WindowClose
+                    | ViewRequest::LibraryVimAction { .. } => {}
                 },
                 _ => {}
             }

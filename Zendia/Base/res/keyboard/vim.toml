@@ -1217,13 +1217,13 @@ description = "Keymaps (which-key)"
 
 [[bindings]]
 mode = "v"
-keys = ["aw", "ap", "a(", "a)", "a[", "a]", "a{", "a}", "a\"", "a'", "a`", "a<lt>", "a>"]
+keys = ["a(", "a)", "ab", "a[", "a]", "a{", "a}", "aB", "a<lt>", "a>", "a\"", "a'", "a`", "aq", "aw", "aW", "ae", "ad", "as", "ap", "at", "ag", "a_", "a.", "a,", "a;", "a:", "a+", "a-", "a=", "a~", "a<Bar>", "a/", "a<Bslash>", "a&", "a$", "a#"]
 command = "visual.object"
 description = "Select Around Text Object"
 
 [[bindings]]
 mode = "v"
-keys = ["iw", "ip", "i(", "i)", "i[", "i]", "i{", "i}", "i\"", "i'", "i`", "i<lt>", "i>"]
+keys = ["i(", "i)", "ib", "i[", "i]", "i{", "i}", "iB", "i<lt>", "i>", "i\"", "i'", "i`", "iq", "iw", "iW", "ie", "id", "is", "ip", "it", "ig", "i_", "i.", "i,", "i;", "i:", "i+", "i-", "i=", "i~", "i<Bar>", "i/", "i<Bslash>", "i&", "i$", "i#"]
 command = "visual.object"
 description = "Select Inside Text Object"
 

@@ -15,6 +15,7 @@
 
 pub mod address_bar;
 pub mod agent;
+pub mod chrome_actions;
 pub mod commands;
 pub mod downloads;
 pub mod events;
@@ -29,6 +30,7 @@ pub mod menus;
 pub mod model;
 pub mod modules;
 pub mod onboarding;
+pub mod page_actions;
 pub mod picker;
 pub mod region;
 pub mod settings;
@@ -38,10 +40,14 @@ pub mod site_info;
 pub mod space_appearance;
 pub mod space_routing;
 pub mod split;
+pub mod split_actions;
 pub mod stub;
+pub mod tab_actions;
 pub mod tab_source;
 pub mod toasts;
+pub mod vim_keys;
 pub mod webchat;
+pub mod yank_webchat_actions;
 
 pub use zendia_module_api::contributions;
 pub use zendia_module_api::ui;

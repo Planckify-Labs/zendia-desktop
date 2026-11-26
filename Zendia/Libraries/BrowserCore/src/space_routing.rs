@@ -607,9 +607,12 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
             name: find_arg(args, "name").map(str::to_string),
             icon: find_arg(args, "icon").map(str::to_string),
         },
-        "space.rename" => Command::SpaceRename {
-            space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
-            name: parse_required_string(name, args, "name")?,
+        "space.rename" => match (find_arg(args, "space_id"), find_arg(args, "name")) {
+            (None, None) => Command::Tabs(crate::tab_actions::TabAction::SpaceRenameActive),
+            _ => Command::SpaceRename {
+                space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
+                name: parse_required_string(name, args, "name")?,
+            },
         },
         "space.start_rename" => Command::SpaceStartRename {
             space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
@@ -618,21 +621,33 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
             space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
             icon: find_arg(args, "icon").unwrap_or_default().to_string(),
         },
-        "space.start_icon_picker" | "space.icon" => Command::SpaceStartIconPicker {
-            space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
+        "space.start_icon_picker" | "space.icon" => match find_arg(args, "space_id") {
+            None => Command::Tabs(crate::tab_actions::TabAction::SpaceIconActive),
+            Some(_) => Command::SpaceStartIconPicker {
+                space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
+            },
         },
-        "space.open_theme_picker" | "space.theme" => Command::SpaceOpenThemePicker {
-            space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
+        "space.open_theme_picker" | "space.theme" => match find_arg(args, "space_id") {
+            None => Command::Tabs(crate::tab_actions::TabAction::SpaceThemeActive),
+            Some(_) => Command::SpaceOpenThemePicker {
+                space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
+            },
         },
         "space.reorder" => Command::SpaceReorder {
             space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
             index: parse_required_u64(name, args, "index")? as usize,
         },
-        "space.delete" | "space.close" => Command::SpaceDelete {
-            space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
+        "space.delete" | "space.close" => match find_arg(args, "space_id") {
+            None => Command::Tabs(crate::tab_actions::TabAction::SpaceCloseActive),
+            Some(_) => Command::SpaceDelete {
+                space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
+            },
         },
-        "space.unload" => Command::SpaceUnload {
-            space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
+        "space.unload" => match find_arg(args, "space_id") {
+            None => Command::Tabs(crate::tab_actions::TabAction::SpaceUnloadActive),
+            Some(_) => Command::SpaceUnload {
+                space_id: SpaceId(parse_required_u64(name, args, "space_id")?),
+            },
         },
         "space.unload_others" => Command::SpaceUnloadOthers {
             space_id: SpaceId(parse_required_u64(name, args, "space_id")?),

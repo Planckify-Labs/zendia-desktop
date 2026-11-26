@@ -8,6 +8,7 @@
 
 use crate::commands::{CommandError, CommandResult, MediaAction};
 use crate::model::TabId;
+use crate::vim_keys::FieldEdit;
 
 /// Receives tab and navigation commands from the core and forwards them to the engine.
 pub trait TabSource: Send + Sync {
@@ -20,6 +21,30 @@ pub trait TabSource: Send + Sync {
     fn stop_loading(&self, tab_id: TabId) -> CommandResult;
     fn load_url(&self, tab_id: TabId, input: &str) -> CommandResult;
 
+    /// Clicks the page at a point of its viewport, in CSS pixels, as the user's mouse would: a jump label's pick.
+    fn click_at(&self, _tab_id: TabId, _x: f64, _y: f64) -> CommandResult {
+        Err(CommandError::BackendUnavailable("click_at".to_string()))
+    }
+    /// Edits the page's focused field for an insert mode key (`<C-w>`, `<C-u>`, `<C-h>`).
+    fn edit_field(&self, _tab_id: TabId, _edit: FieldEdit) -> CommandResult {
+        Err(CommandError::BackendUnavailable("edit_field".to_string()))
+    }
+    /// Runs a request inside the page's Automation World over the generic embedder channel.
+    fn run_automation(&self, _tab_id: TabId, _request: zendia_automation::AutomationRequest) -> CommandResult {
+        Ok(())
+    }
+    /// Starts or updates find-in-page on `tab_id`.
+    fn find_in_page(&self, _tab_id: TabId, _query: &str) -> CommandResult {
+        Ok(())
+    }
+    /// Steps to the next or previous find-in-page match (`n` / `N`).
+    fn find_in_page_step(&self, _tab_id: TabId, _backwards: bool) -> CommandResult {
+        Ok(())
+    }
+    /// Ends find-in-page highlighting on `tab_id`.
+    fn find_in_page_end(&self, _tab_id: TabId) -> CommandResult {
+        Ok(())
+    }
     // Context menu, select dropdown, and zoom actions routed to the engine when supported.
     fn inspect_element(&self, _tab_id: TabId) -> CommandResult {
         Err(CommandError::BackendUnavailable("inspect_element".to_string()))

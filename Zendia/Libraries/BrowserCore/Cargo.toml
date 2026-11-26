@@ -12,5 +12,6 @@ description = "The browser core: the command registry, the browser model, the ev
 [dependencies]
 async-channel = "2.3"
 regex = "1"
+zendia-automation = { workspace = true }
 zendia-keymap = { workspace = true }
 zendia-module-api = { workspace = true }

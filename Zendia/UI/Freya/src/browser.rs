@@ -41,10 +41,12 @@ use hub_protocol::ipc_types::hub_server::messages as server;
 use hub_protocol::*;
 use std::sync::Arc;
 use zendia_browser_core::BrowserCore;
+use zendia_browser_core::commands::Command;
 use zendia_browser_core::events::{Event as CoreEvent, ViewRequest};
 use zendia_browser_core::model::TabId;
 use zendia_browser_core::stub::StubBackend;
 use zendia_browser_core::tab_source::TabSource;
+use zendia_browser_core::vim_keys::VimCommand;
 
 fn cursor_icon(cursor: &Gfx_Cursor) -> CursorIcon {
     let Gfx_Cursor::Standard(cursor) = cursor else {
@@ -305,6 +307,23 @@ fn handle_message(
                 }
             }
         }
+        HubMessage::ViewFindInPage(client::ViewFindInPage {
+            view_id,
+            current_match_index,
+            total_match_count,
+        }) => {
+            adapter.on_find_in_page(view_id, current_match_index, total_match_count);
+        }
+        HubMessage::ViewEmbedderReply(client::ViewEmbedderReply {
+            view_id,
+            request_id,
+            result_json,
+            ..
+        }) => {
+            if let Ok(json) = result_json.as_str() {
+                adapter.on_embedder_reply(view_id, request_id, json);
+            }
+        }
     }
 }
 
@@ -345,6 +364,7 @@ pub fn app() -> impl IntoElement {
     let media_preview_state = use_provide_media_preview_state();
     let space_editing_state = use_provide_space_editing_state();
     let share_state = use_provide_share_state();
+    let find_bar = crate::ui::page::find_bar::use_provide_find_bar();
     let webchat_views = use_provide_webchat_views(Some(Arc::clone(&hub_adapter)));
     let onboarding_state = use_provide_onboarding_state(false);
     use_hook({
@@ -360,6 +380,7 @@ pub fn app() -> impl IntoElement {
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
         let page_ctx = page_ctx.clone();
+        let keymap = keymap.clone();
         move |event| match event {
             CoreEvent::TabClosed { tab_id } => {
                 page_ctx.remove_closed_view(tab_id.0);
@@ -379,10 +400,15 @@ pub fn app() -> impl IntoElement {
                 let start = (*last_click_pos.peek()).unwrap_or((size.width / 2.0, size.height / 2.0));
                 download_arc.launch(start, (24.0, size.height - 24.0));
             }
+            CoreEvent::TabActivated { .. } => {
+                // NB: The vim mode follows whether a field of the newly active tab has the focus.
+                let _ = stub_core.invoke(Command::Vim(VimCommand::SyncPageMode));
+            }
             CoreEvent::RegionCaptured { .. } => {
                 region_picker_state.stop();
             }
             CoreEvent::VimModeChanged { enabled: false } => {
+                keymap.reset_vim();
                 vim_statusline_state.close_all_keymaps();
                 vim_picker_state.close();
                 region_picker_state.stop();
@@ -587,6 +613,86 @@ pub fn app() -> impl IntoElement {
                 ViewRequest::SettingsClose => {
                     settings_host.close_os_window();
                 }
+                ViewRequest::TabMenu { tab_id } => {
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    share_state.close();
+                    crate::ui::chrome::menus::open_tab_context_menu(
+                        &menu_state,
+                        &stub_core.model(),
+                        *tab_id,
+                        (240.0, 96.0),
+                    );
+                }
+                ViewRequest::UrlPaste { new_tab } => {
+                    if let Ok(raw) = freya::clipboard::Clipboard::get() {
+                        let text = raw.trim();
+                        if !text.is_empty() && !text.contains('\n') {
+                            if *new_tab {
+                                let _ = stub_core.invoke(Command::TabNew {
+                                    url: Some(text.to_string()),
+                                    after: None,
+                                    activate: true,
+                                });
+                            } else {
+                                let _ = stub_core.invoke(Command::NavigationLoadUrl {
+                                    tab_id: None,
+                                    input: text.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                ViewRequest::PageFind => {
+                    find_bar.open(&stub_core.model().page_find.query);
+                }
+                ViewRequest::WindowMinimize => {
+                    Platform::get().with_window(Platform::window_id(), |window| {
+                        window.set_minimized(true);
+                    });
+                }
+                ViewRequest::WindowToggleMaximize => {
+                    Platform::get().with_window(Platform::window_id(), |window| {
+                        window.set_maximized(!window.is_maximized());
+                    });
+                }
+                ViewRequest::WindowClose => {
+                    Platform::get().exit();
+                }
+                ViewRequest::LibraryVimAction { action } => {
+                    use crate::ui::library::nav::NavMove;
+                    use zendia_browser_core::chrome_actions::LibraryVimAction;
+                    use zendia_browser_core::library::LibrarySection;
+                    match action {
+                        LibraryVimAction::Down => library_state.nav.move_cursor(NavMove::Down),
+                        LibraryVimAction::Up => library_state.nav.move_cursor(NavMove::Up),
+                        LibraryVimAction::Left => library_state.nav.move_cursor(NavMove::Left),
+                        LibraryVimAction::Right => library_state.nav.move_cursor(NavMove::Right),
+                        LibraryVimAction::First => library_state.nav.move_cursor(NavMove::First),
+                        LibraryVimAction::Last => library_state.nav.move_cursor(NavMove::Last),
+                        LibraryVimAction::HalfPageDown => library_state.nav.move_cursor(NavMove::HalfPageDown),
+                        LibraryVimAction::HalfPageUp => library_state.nav.move_cursor(NavMove::HalfPageUp),
+                        LibraryVimAction::Search => {
+                            let _ = library_state.nav.focus_search();
+                        }
+                        LibraryVimAction::Filter => {
+                            let _ = library_state.nav.open_filter_panel();
+                        }
+                        LibraryVimAction::NextSection | LibraryVimAction::PrevSection => {
+                            let sections = LibrarySection::ALL;
+                            let current = *library_state.section.peek();
+                            let idx = sections.iter().position(|s| *s == current).unwrap_or(0);
+                            let delta: isize = if matches!(action, LibraryVimAction::NextSection) {
+                                1
+                            } else {
+                                -1
+                            };
+                            let next = sections[(idx as isize + delta).rem_euclid(sections.len() as isize) as usize];
+                            library_state.handle_view_request(&ViewRequest::LibraryOpen { section: Some(next) });
+                        }
+                        _ => {}
+                    }
+                }
             },
             _ => {}
         }
@@ -709,7 +815,9 @@ pub fn app() -> impl IntoElement {
             {
                 return;
             }
-            let _ = keymap.handle_global_key_down(&e, &core);
+            if !keymap.handle_global_key_down(&e, &core) {
+                crate::ui::vim::leave_window_mode_on_unused_key(&e, &core);
+            }
         }
     };
 
@@ -746,7 +854,8 @@ pub fn app() -> impl IntoElement {
     let page_stage = PageStage::new()
         .on_sized(on_stage_sized)
         .page(page_content)
-        .overlay(VimOverlayLayer::new());
+        .overlay(VimOverlayLayer::new())
+        .overlay(crate::ui::page::find_bar::FindBar::default());
 
     rect()
         .width(Size::fill())

@@ -1010,6 +1010,18 @@ pub enum Command {
     ServiceRestart {
         service: ServiceId,
     },
+    /// The vim key engine's own commands: modes, pending keys, scrolling and field edits.
+    Vim(crate::vim_keys::VimCommand),
+    /// Tab, space and page actions of the vim profile.
+    Tabs(crate::tab_actions::TabAction),
+    /// Split view and window mode actions of the vim profile.
+    Splits(crate::split_actions::SplitAction),
+    /// Explorer, toolbar and library chrome-mode actions of the vim profile.
+    Chrome(crate::chrome_actions::ChromeAction),
+    /// Yank ring and WebChat vim actions.
+    YankWebChat(crate::yank_webchat_actions::YankWebChatAction),
+    /// Page-DOM vim actions routed through the Automation World (visual, hints, inputs, CAPTCHA).
+    Page(crate::page_actions::PageAction),
     /// Extension point for commands registered by modules or not yet promoted to a typed variant.
     Custom {
         name: String,
@@ -1377,6 +1389,12 @@ impl Command {
             Self::ServiceSetState { .. } => "service.set_state",
             Self::ServiceCycleState { .. } => "service.cycle_state",
             Self::ServiceRestart { .. } => "service.restart",
+            Self::Vim(command) => command.name(),
+            Self::Tabs(action) => action.name(),
+            Self::Splits(action) => action.name(),
+            Self::Chrome(action) => action.name(),
+            Self::YankWebChat(action) => action.name(),
+            Self::Page(action) => action.name(),
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -1807,10 +1825,15 @@ impl Command {
                 listening: find_arg(args, "listening")
                     .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")),
             }),
-            "webchat.ask" => Ok(Self::WebChatAsk {
-                site_id: ChatSiteId::new(parse_required_string_arg(name, args, "site_id")?),
-                prompt: parse_required_string_arg(name, args, "prompt")?,
-            }),
+            "webchat.ask" => match (find_arg(args, "site_id"), find_arg(args, "prompt")) {
+                (None, None) => Ok(Self::YankWebChat(
+                    crate::yank_webchat_actions::YankWebChatAction::WebChatAskPrompt,
+                )),
+                _ => Ok(Self::WebChatAsk {
+                    site_id: ChatSiteId::new(parse_required_string_arg(name, args, "site_id")?),
+                    prompt: parse_required_string_arg(name, args, "prompt")?,
+                }),
+            },
             "theme.set" => {
                 let scheme = match find_arg(args, "scheme") {
                     None => None,
@@ -2017,9 +2040,10 @@ impl Command {
                     zone,
                 })
             }
-            "split.remove_tab" => Ok(Self::SplitRemoveTab {
-                tab_id: TabId(parse_required_u64_arg(name, args, "tab_id")?),
-            }),
+            "split.remove_tab" => match parse_optional_u64_arg(name, args, "tab_id")? {
+                Some(id) => Ok(Self::SplitRemoveTab { tab_id: TabId(id) }),
+                None => Ok(Self::Splits(crate::split_actions::SplitAction::RemoveActiveTab)),
+            },
             "split.unsplit" => Ok(Self::SplitUnsplit {
                 group_id: parse_optional_u64_arg(name, args, "group_id")?.map(SplitGroupId),
             }),
@@ -2376,6 +2400,24 @@ impl Command {
                     return Ok(cmd);
                 }
                 if let Some(cmd) = crate::space_appearance::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                if let Some(cmd) = crate::vim_keys::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                if let Some(cmd) = crate::tab_actions::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                if let Some(cmd) = crate::split_actions::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                if let Some(cmd) = crate::chrome_actions::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                if let Some(cmd) = crate::yank_webchat_actions::parse_command(name, args)? {
+                    return Ok(cmd);
+                }
+                if let Some(cmd) = crate::page_actions::parse_command(name, args)? {
                     return Ok(cmd);
                 }
                 if let Some(cmd) = crate::share::parse_command(name, args)? {
@@ -4469,6 +4511,12 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
     descriptors.extend(crate::space_appearance::command_descriptors());
     descriptors.extend(crate::share::command_descriptors());
     descriptors.extend(crate::stub::settings_modules::command_descriptors());
+    descriptors.extend(crate::vim_keys::descriptors());
+    descriptors.extend(crate::tab_actions::descriptors());
+    descriptors.extend(crate::split_actions::descriptors());
+    descriptors.extend(crate::chrome_actions::descriptors());
+    descriptors.extend(crate::yank_webchat_actions::descriptors());
+    descriptors.extend(crate::page_actions::descriptors());
     descriptors
 }
 

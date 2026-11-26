@@ -7,6 +7,7 @@
 //! Page surfaces, multi-view split layouts, overlay layers, Glance previews, compact mode, and media controls.
 
 pub mod download_arc;
+pub mod find_bar;
 pub mod glance;
 pub mod keymap_context;
 pub mod overlay;

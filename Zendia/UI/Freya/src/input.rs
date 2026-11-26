@@ -20,17 +20,29 @@ use zendia_keymap::{KeyCode as MapKeyCode, KeyModifiers as MapModifiers, KeyStro
 /// Pure modifier presses (Shift, Control, Alt, Meta, lock keys) return `None`.
 pub fn key_stroke_from_event(key: &Key, code: Code, modifiers: Modifiers) -> Option<KeyStroke> {
     let mut map_modifiers = MapModifiers::NONE;
-    if modifiers.contains(Modifiers::CONTROL) {
+    // NB: AltGr reports Ctrl+Alt on some platforms; the character it produced is what the user typed.
+    let alt_graph = modifiers.contains(Modifiers::ALT_GRAPH);
+    if modifiers.contains(Modifiers::CONTROL) && !alt_graph {
         map_modifiers |= MapModifiers::CTRL;
     }
     if modifiers.contains(Modifiers::SHIFT) {
         map_modifiers |= MapModifiers::SHIFT;
     }
-    if modifiers.contains(Modifiers::ALT) {
+    if modifiers.contains(Modifiers::ALT) && !alt_graph {
         map_modifiers |= MapModifiers::ALT;
     }
     if modifiers.contains(Modifiers::META) {
         map_modifiers |= MapModifiers::SUPER;
+    }
+
+    // NB: Alt and Ctrl change the character on some layouts (Option+j is "∆" on macOS), so a chorded character key is
+    //     the physical key: <A-j> means the j key.
+    if map_modifiers.has_non_shift()
+        && let Key::Character(text) = key
+        && text.chars().count() == 1
+        && let Some(ch) = physical_character(code)
+    {
+        return Some(KeyStroke::new(map_modifiers, MapKeyCode::Char(ch)));
     }
 
     // On X11/XKB, Ctrl+M/J/I/H/[ produce ASCII control characters that winit maps to NamedKey::Enter/Tab/Backspace/
@@ -124,6 +136,50 @@ pub fn key_stroke_from_event(key: &Key, code: Code, modifiers: Modifiers) -> Opt
     };
 
     Some(KeyStroke::new(map_modifiers, map_key))
+}
+
+/// The letter or digit printed on a physical key, if it is one.
+fn physical_character(code: Code) -> Option<char> {
+    let ch = match code {
+        Code::KeyA => 'a',
+        Code::KeyB => 'b',
+        Code::KeyC => 'c',
+        Code::KeyD => 'd',
+        Code::KeyE => 'e',
+        Code::KeyF => 'f',
+        Code::KeyG => 'g',
+        Code::KeyH => 'h',
+        Code::KeyI => 'i',
+        Code::KeyJ => 'j',
+        Code::KeyK => 'k',
+        Code::KeyL => 'l',
+        Code::KeyM => 'm',
+        Code::KeyN => 'n',
+        Code::KeyO => 'o',
+        Code::KeyP => 'p',
+        Code::KeyQ => 'q',
+        Code::KeyR => 'r',
+        Code::KeyS => 's',
+        Code::KeyT => 't',
+        Code::KeyU => 'u',
+        Code::KeyV => 'v',
+        Code::KeyW => 'w',
+        Code::KeyX => 'x',
+        Code::KeyY => 'y',
+        Code::KeyZ => 'z',
+        Code::Digit0 => '0',
+        Code::Digit1 => '1',
+        Code::Digit2 => '2',
+        Code::Digit3 => '3',
+        Code::Digit4 => '4',
+        Code::Digit5 => '5',
+        Code::Digit6 => '6',
+        Code::Digit7 => '7',
+        Code::Digit8 => '8',
+        Code::Digit9 => '9',
+        _ => return None,
+    };
+    Some(ch)
 }
 
 /// The modifiers held once a key event is done. A modifier key's own release still reports that modifier as held, which

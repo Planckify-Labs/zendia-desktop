@@ -197,18 +197,20 @@ impl fmt::Display for KeyStroke {
             return write!(f, "{c}");
         }
 
+        // NB: Modifiers go in the order C, A, D, S, as in the old fork's tokens (`<C-S-d>`, `<C-A-m>`), so the keys
+        //     shown while typing read the same.
         write!(f, "<")?;
         if self.modifiers.contains(KeyModifiers::CTRL) {
             write!(f, "C-")?;
-        }
-        if self.modifiers.contains(KeyModifiers::SHIFT) {
-            write!(f, "S-")?;
         }
         if self.modifiers.contains(KeyModifiers::ALT) {
             write!(f, "A-")?;
         }
         if self.modifiers.contains(KeyModifiers::SUPER) {
             write!(f, "D-")?;
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            write!(f, "S-")?;
         }
         if let Some(name) = self.key.angle_name() {
             write!(f, "{name}")?;

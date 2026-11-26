@@ -276,6 +276,22 @@ pub enum Event {
     RegionCaptured {
         capture: RegionCapture,
     },
+    /// Active native page-DOM hint overlay session changed (`None` when closed).
+    PageHintsChanged {
+        hints: Option<crate::page_actions::PageHintSession>,
+    },
+    /// Visual-mode caret rectangle reported by the Automation World changed.
+    VisualCaretChanged {
+        caret: Option<zendia_automation::ViewportRect>,
+    },
+    /// Find in page searched, moved or counted its matches.
+    PageFindChanged {
+        find: crate::model::PageFind,
+    },
+    /// A yank or a put took part of a page, which the UI flashes for a moment.
+    PageFlashed {
+        flash: crate::model::PageFlash,
+    },
     /// Signals subscribers to reload a fresh snapshot from `BrowserCore::model`.
     ModelReplaced,
     /// A command asked one window's view to do something that only changes view state, such as opening a panel or
@@ -376,6 +392,22 @@ pub enum ViewRequest {
     SettingsOpen { group: Option<SettingsGroupId> },
     /// Close Zendia's native settings window.
     SettingsClose,
+    /// Open the context menu for `tab_id` (`tab.menu`).
+    TabMenu { tab_id: TabId },
+    /// Read the clipboard and open its URL or search in the current tab (`p`) or a new tab (`P`).
+    UrlPaste { new_tab: bool },
+    /// Open find in page (`/`).
+    PageFind,
+    /// Minimize the current browser window (`<leader>qm`).
+    WindowMinimize,
+    /// Toggle maximize/restore on the current browser window (`<leader>qM`).
+    WindowToggleMaximize,
+    /// Close the current browser window (`<leader>qw`).
+    WindowClose,
+    /// Keyboard navigation or action inside the open library panel.
+    LibraryVimAction {
+        action: crate::chrome_actions::LibraryVimAction,
+    },
 }
 
 /// Returned when the core's event bus has been dropped.
