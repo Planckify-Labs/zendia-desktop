@@ -179,7 +179,7 @@ impl HubTabAdapter {
                 maximum_frames_per_second: 60.0,
                 display_id: None,
                 screen_shows_high_dynamic_range: false,
-                system_theme: Core_AnonymousBuffer::default(),
+                system_theme: crate::page_style::system_theme(),
                 screen_rects: None,
                 owner_view_id: None,
                 websites_prefer_dark: false,
@@ -301,6 +301,10 @@ impl HubTabAdapter {
             view_id,
             hosts_remote_layer: false,
         });
+        hub.post_or_log(server::ViewSetUserStyle {
+            view_id,
+            source: libipc_rust::wire::Utf8String::from(crate::page_style::PAGE_USER_STYLE),
+        });
         if viewport.0 > 0 && viewport.1 > 0 {
             hub.post_or_log(server::ViewSetViewport {
                 view_id,
@@ -374,7 +378,7 @@ impl HubTabAdapter {
                     maximum_frames_per_second: 60.0,
                     display_id: None,
                     screen_shows_high_dynamic_range: false,
-                    system_theme: Core_AnonymousBuffer::default(),
+                    system_theme: crate::page_style::system_theme(),
                     screen_rects: None,
                     owner_view_id: None,
                     websites_prefer_dark: false,

@@ -22,6 +22,7 @@ view_enqueue_mouse_event
 view_load
 view_set_window_size
 view_set_system_visibility_state
+view_set_user_style
 view_set_current_tab_of_window
 view_set_presents_from_cpu_memory
 view_set_hosts_remote_layer

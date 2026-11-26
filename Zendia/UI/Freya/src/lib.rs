@@ -13,5 +13,6 @@ pub mod gallery;
 pub mod hub;
 pub mod hub_adapter;
 pub mod input;
+pub mod page_style;
 pub mod settings;
 pub mod ui;
