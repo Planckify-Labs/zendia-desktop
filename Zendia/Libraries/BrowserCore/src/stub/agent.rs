@@ -397,6 +397,11 @@ impl StubBackend {
                 }
                 step.streaming = false;
             }
+            // Drop undelivered queued/steering prompts on stop so the UI can restore them into the composer (AP-14).
+            conv.steps.retain(|step| {
+                !(step.kind == StepKind::UserPrompt
+                    && matches!(step.steer, Some(SteerStatus::Queued | SteerStatus::Steering)))
+            });
             conv.status = ConversationStatus::Stopped;
             conv.clone()
         };
@@ -1158,5 +1163,49 @@ mod tests {
         let conv = view.conversations.iter().find(|c| c.id == ConversationId(1)).unwrap();
         assert_eq!(conv.status, ConversationStatus::Finished);
         assert_eq!(view, core.model());
+    }
+
+    #[test]
+    fn stop_clears_undelivered_steer_prompts() {
+        let core = StubBackend::new();
+        // Conversation 2 in the default sample model starts in Working status, or start a fresh working one.
+        let mut model = core.model();
+        if let Some(conv) = model.conversations.first_mut() {
+            conv.status = ConversationStatus::Working;
+        }
+        core.replace_model(model);
+        let conv_id = core.model().conversations[0].id;
+        core.invoke(Command::AgentSendWithFiles {
+            conversation_id: Some(conv_id),
+            agent_id: None,
+            prompt: "Actually check dark mode too".to_string(),
+            files: Vec::new(),
+        })
+        .unwrap();
+        let before = core.model();
+        let queued = before
+            .conversations
+            .iter()
+            .find(|c| c.id == conv_id)
+            .unwrap()
+            .steps
+            .iter()
+            .filter(|s| matches!(s.steer, Some(SteerStatus::Queued | SteerStatus::Steering)))
+            .count();
+        assert_eq!(queued, 1);
+
+        core.invoke(Command::AgentStop {
+            conversation_id: Some(conv_id),
+        })
+        .unwrap();
+        let after = core.model();
+        let conv = after.conversations.iter().find(|c| c.id == conv_id).unwrap();
+        assert_eq!(conv.status, ConversationStatus::Stopped);
+        assert!(
+            !conv
+                .steps
+                .iter()
+                .any(|s| matches!(s.steer, Some(SteerStatus::Queued | SteerStatus::Steering)))
+        );
     }
 }

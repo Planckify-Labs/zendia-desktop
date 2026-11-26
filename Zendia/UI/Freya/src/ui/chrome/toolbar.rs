@@ -21,6 +21,8 @@ use crate::ui::theme::{ResolvedScheme, ThemeRole, motion, use_theme};
 use crate::ui::vim::explorer::is_explorer_active;
 use crate::ui::vim::hints::hint_badge_for_corner;
 use crate::ui::vim::toolbar_focus::{apply_toolbar_cursor_bg, apply_toolbar_cursor_border, is_toolbar_cursor};
+use crate::ui::webchat::logos::parse_hex_color;
+use crate::ui::webchat::views::try_use_webchat_views;
 use freya::animation::*;
 use freya::prelude::*;
 use std::time::Duration;
@@ -48,6 +50,8 @@ pub struct ToolbarItemView {
     pub compact_urlbar: bool,
     pub dense: bool,
     pub tight: bool,
+    /// Collapses the `"Chat"` pill text label when the top bar is narrower than `720 px` (`TB-01`).
+    pub hide_chat_label: bool,
     key: DiffKey,
 }
 
@@ -66,6 +70,7 @@ impl ToolbarItemView {
             compact_urlbar: false,
             dense: false,
             tight: false,
+            hide_chat_label: false,
             key: DiffKey::None,
         }
     }
@@ -82,6 +87,11 @@ impl ToolbarItemView {
 
     pub fn tight(mut self, tight: bool) -> Self {
         self.tight = tight;
+        self
+    }
+
+    pub fn hide_chat_label(mut self, hide: bool) -> Self {
+        self.hide_chat_label = hide;
         self
     }
 }
@@ -228,6 +238,7 @@ impl Component for ToolbarItemView {
         let menu_state = try_use_menu_state();
         let download_arc = try_use_download_arc();
         let dock_state = try_use_dock_state();
+        let webchat_views = try_use_webchat_views();
         let key_table = use_hook(KeyTable::standard);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
@@ -251,7 +262,42 @@ impl Component for ToolbarItemView {
             1.0
         };
 
-        let (active_tab_id, can_back, can_forward, is_loading, sidebar_side, chat_status_dot, extension_paused) = {
+        let is_create_new = self.item.id.as_str() == CREATE_NEW_ITEM_ID;
+        let create_new_open = is_create_new && menu_state.is_some_and(|state| *state.create_new_open.read());
+        let create_rotate = use_animation_with_dependencies(&create_new_open, move |conf, open| {
+            conf.on_creation(OnCreation::Finish);
+            conf.on_change(OnChange::Rerun);
+            let (from, to) = if *open { (0.0, 45.0) } else { (45.0, 0.0) };
+            AnimNum::new(from, to)
+                .duration(motion::CREATE_NEW_ROTATE)
+                .ease(Ease::Out)
+                .function(motion::ease_out_fn())
+        });
+        let create_angle = if is_create_new {
+            create_rotate.get().value()
+        } else {
+            0.0
+        };
+
+        let is_chat_button = self.item.id.as_str() == "zendia.chat";
+        let is_agents_button = self.item.id.as_str() == "zendia.agents";
+        let is_webchat_button = self.item.id.as_str() == "zendia.webchat";
+        let agent_open = dock_state.is_some_and(|ds| ds.is_agent_open());
+        let agents_open = dock_state.is_some_and(|ds| ds.is_agents_open());
+        let webchat_open = dock_state.is_some_and(|ds| ds.is_webchat_open());
+        let static_snapshot = dock_state.is_some_and(|ds| ds.pinned_ring_phase.read().is_some());
+
+        let (
+            active_tab_id,
+            can_back,
+            can_forward,
+            is_loading,
+            sidebar_side,
+            chat_status_dot,
+            webchat_status_dot,
+            dynamic_tooltip,
+            extension_paused,
+        ) = {
             let model = core.model().read();
             let active = model.active_tab();
             let is_extension_item = matches!(self.item.source, ContributionSource::Extension { .. });
@@ -260,25 +306,75 @@ impl Component for ToolbarItemView {
                     service_status_in(&model.services, ServiceId::ExtensionServer),
                     ServiceStatus::Running
                 );
-            let chat_dot = if self.item.id.as_str() == "zendia.chat" {
-                let is_open = dock_state.is_some_and(|ds| ds.is_agent_open());
-                let server_running = model.services.iter().any(|s| {
-                    s.service == zendia_browser_core::model::ServiceId::AgentServer
-                        && matches!(s.status, zendia_browser_core::model::ServiceStatus::Running)
+
+            // TB-01: Scope Chat status dot strictly to the active tab's conversation while closed.
+            let (chat_dot, chat_tip) = if is_chat_button {
+                let server_running = model
+                    .services
+                    .iter()
+                    .any(|s| s.service == ServiceId::AgentServer && matches!(s.status, ServiceStatus::Running));
+                let tab_conv = active.and_then(|t| model.active_conversation_for_tab(t.id));
+                let running = tab_conv.is_some_and(|c| {
+                    matches!(
+                        c.status,
+                        ConversationStatus::Working | ConversationStatus::WaitingForUser
+                    )
                 });
-                if is_open || !server_running {
+                let unseen = tab_conv.is_some_and(|c| c.unseen);
+                let agent_name = tab_conv
+                    .and_then(|c| model.agent(&c.agent_id).map(|a| a.name.clone()))
+                    .or_else(|| model.default_agent().map(|a| a.name.clone()))
+                    .unwrap_or_else(|| "Your agent".to_string());
+                let dot = if agent_open || !server_running || (!running && !unseen) {
                     None
                 } else {
-                    let has_activity = model.conversations.iter().any(|c| {
-                        c.status == ConversationStatus::Working
-                            || c.status == ConversationStatus::WaitingForUser
-                            || c.unseen
-                    });
-                    has_activity.then(|| active_agent_accent(&model, &theme))
-                }
+                    Some((active_agent_accent(&model, &theme), running))
+                };
+                let tip = if agent_open {
+                    "Close chat".to_string()
+                } else if running {
+                    format!("{agent_name} is working. Open chat")
+                } else if unseen {
+                    format!("{agent_name} finished. Open chat")
+                } else {
+                    "Chat with your agent about this tab".to_string()
+                };
+                (dot, Some(tip))
             } else {
-                None
+                (None, None)
             };
+
+            // TB-02: Dynamic Agents tooltip.
+            let agents_tip =
+                is_agents_button.then(|| zendia_browser_core::agent::agents_button_tooltip(&model, agents_open));
+
+            // TB-03: Site-colored Web chat status dot & dynamic tooltip while closed.
+            let (wc_dot, wc_tip) = if is_webchat_button {
+                let site = model.active_chat_site();
+                let site_color = site
+                    .map(|s| parse_hex_color(&s.accent_hex, theme.color(ThemeRole::Accent)))
+                    .unwrap_or_else(|| theme.color(ThemeRole::Accent));
+                let wc_loading = site.is_some_and(|s| {
+                    webchat_views.is_some_and(|reg| reg.view_for_site(&s.id).is_some() && reg.is_loading(&s.id))
+                });
+                let wc_pending = model.webchat_pending_prompt.is_some();
+                let dot = if webchat_open || (!wc_loading && !wc_pending) {
+                    None
+                } else {
+                    Some((site_color, wc_loading || wc_pending))
+                };
+                let tip = if webchat_open {
+                    "Close web chat".to_string()
+                } else if let Some(s) = site {
+                    format!("Chat with {} on the web", s.name)
+                } else {
+                    "Chat with ChatGPT, Claude, Gemini and more on the web".to_string()
+                };
+                (dot, Some(tip))
+            } else {
+                (None, None)
+            };
+
             (
                 active.map(|tab| tab.id),
                 active.is_some_and(|tab| tab.can_navigate_back),
@@ -286,6 +382,8 @@ impl Component for ToolbarItemView {
                 active.is_some_and(|tab| tab.is_loading),
                 model.layout.sidebar_side,
                 chat_dot,
+                wc_dot,
+                chat_tip.or(agents_tip).or(wc_tip),
                 ext_paused,
             )
         };
@@ -323,31 +421,13 @@ impl Component for ToolbarItemView {
 
         let is_app_menu = self.item.kind == ToolbarItemKind::AppMenu;
         let is_extensions_menu = self.item.id.as_str() == EXTENSIONS_ITEM_ID;
-        let is_create_new = self.item.id.as_str() == CREATE_NEW_ITEM_ID;
-        let is_chat_button = self.item.id.as_str() == "zendia.chat";
-        let is_agents_button = self.item.id.as_str() == "zendia.agents";
-        let is_webchat_button = self.item.id.as_str() == "zendia.webchat";
-        let create_new_open = is_create_new && menu_state.is_some_and(|state| *state.create_new_open.read());
-        let create_rotate = use_animation_with_dependencies(&create_new_open, move |conf, open| {
-            conf.on_creation(OnCreation::Finish);
-            conf.on_change(OnChange::Rerun);
-            let (from, to) = if *open { (0.0, 45.0) } else { (45.0, 0.0) };
-            AnimNum::new(from, to)
-                .duration(motion::CREATE_NEW_ROTATE)
-                .ease(Ease::Out)
-                .function(motion::ease_out_fn())
-        });
-        let create_angle = if is_create_new {
-            create_rotate.get().value()
-        } else {
-            0.0
-        };
-        let is_pressed = (is_app_menu && menu_state.is_some_and(|state| *state.app_menu_open.read()))
+        let popup_open = (is_app_menu && menu_state.is_some_and(|state| *state.app_menu_open.read()))
             || (is_extensions_menu && menu_state.is_some_and(|state| *state.extensions_menu_open.read()))
-            || create_new_open
-            || (is_chat_button && dock_state.is_some_and(|ds| ds.is_agent_open()))
-            || (is_agents_button && dock_state.is_some_and(|ds| ds.is_agents_open()))
-            || (is_webchat_button && dock_state.is_some_and(|ds| ds.is_webchat_open()));
+            || create_new_open;
+        let is_pressed = popup_open
+            || (is_chat_button && agent_open)
+            || (is_agents_button && agents_open)
+            || (is_webchat_button && webchat_open);
         let is_zendia_capsule = self.item.id.as_str().starts_with("zendia.");
 
         let item = self.item.clone();
@@ -400,12 +480,16 @@ impl Component for ToolbarItemView {
             (final_border, is_ex_foot, hint)
         };
 
-        let a11y_label = self.item.tooltip.clone().unwrap_or_else(|| self.item.title.clone());
+        let a11y_label = dynamic_tooltip
+            .or_else(|| self.item.tooltip.clone())
+            .unwrap_or_else(|| self.item.title.clone());
         let tooltip_shortcut = key_table
             .shortcut_for_command(&self.item.command)
             .map(|seq| seq.display_human());
-        let tooltip_enabled = effective_enabled && !is_pressed;
-        let active_press_fill = theme.rgba(ThemeRole::Text).with_alpha(0.24).to_color();
+        // Side-panel toggle buttons keep their dynamic "Close ..." tooltip while pressed, matching the fork;
+        // popup-menu buttons hide their tooltip while the popup is open.
+        let tooltip_enabled = effective_enabled && !popup_open;
+        let active_press_fill = theme.rgba(ThemeRole::Text).with_alpha(0.26).to_color();
 
         if self.item.kind == ToolbarItemKind::PillButton {
             let (rest_bg, hover_bg) = if explorer_footer_focused {
@@ -419,7 +503,10 @@ impl Component for ToolbarItemView {
             let base_bg = feedback.background(rest_bg, hover_bg, active_press_fill);
             let bg = apply_toolbar_cursor_bg(base_bg, &core.model().read(), self.item.id.as_str(), &theme);
             let pill_h = if self.tight { 24.0 } else { 26.0 };
-            let pill_pad = if self.tight {
+            let hide_label = is_chat_button && self.hide_chat_label;
+            let pill_pad = if hide_label {
+                Gaps::new(0.0, 6.0, 0.0, 6.0)
+            } else if self.tight {
                 Gaps::new(0.0, 7.0, 0.0, 6.0)
             } else {
                 Gaps::new(0.0, 11.0, 0.0, 8.0)
@@ -434,7 +521,13 @@ impl Component for ToolbarItemView {
                 .direction(Direction::Horizontal)
                 .cross_align(Alignment::center())
                 .main_align(Alignment::center())
-                .spacing(if self.tight { 3.5 } else { 6.0 })
+                .spacing(if hide_label {
+                    0.0
+                } else if self.tight {
+                    3.5
+                } else {
+                    6.0
+                })
                 .corner_radius(CornerRadius::new_all(999.0))
                 .background(bg)
                 .border(focus_border)
@@ -455,16 +548,16 @@ impl Component for ToolbarItemView {
                         .size(if self.tight { 12.5 } else { 14.0 })
                         .role(ThemeRole::Text),
                 )
-                .child(
+                .maybe_child((!hide_label).then(|| {
                     label()
                         .text(self.item.title.clone())
                         .font_size(if self.tight { 11.0 } else { 12.0 })
                         .font_weight(FontWeight::SEMI_BOLD)
                         .color(palette.text)
-                        .max_lines(1),
-                )
+                        .max_lines(1)
+                }))
                 .maybe_child(footer_hint_badge);
-            let pill_with_dot: Element = if let Some(dot_col) = chat_status_dot {
+            let pill_with_dot: Element = if let Some((dot_col, pulsing)) = chat_status_dot {
                 // Anchor the 8px status dot at `top: -1px, right: -1px` of the pill via a 0-width trailing box so
                 // Torin resolves its offset from the pill's own right edge rather than the toolbar row's width.
                 rect()
@@ -477,15 +570,12 @@ impl Component for ToolbarItemView {
                             .width(Size::px(0.0))
                             .height(Size::px(pill_h))
                             .interactive(Interactive::No)
-                            .child(
-                                rect()
-                                    .position(Position::new_absolute().top(-1.0).left(-7.0))
-                                    .width(Size::px(8.0))
-                                    .height(Size::px(8.0))
-                                    .corner_radius(CornerRadius::new_all(999.0))
-                                    .background(dot_col)
-                                    .interactive(Interactive::No),
-                            ),
+                            .child(ToolbarPulseDot {
+                                color: dot_col,
+                                pulsing: pulsing && !static_snapshot,
+                                left_offset: Some(-7.0),
+                                key: DiffKey::from(&"chat-status-dot"),
+                            }),
                     )
                     .into_element()
             } else {
@@ -549,12 +639,7 @@ impl Component for ToolbarItemView {
         };
 
         let effective_badge = if is_agents_button {
-            if is_pressed {
-                None
-            } else {
-                zendia_browser_core::agent::agents_button_badge(&core.model().read())
-                    .or_else(|| self.item.badge.clone())
-            }
+            zendia_browser_core::agent::agents_button_badge_for_state(&core.model().read(), agents_open)
         } else if extension_paused {
             Some(ToolbarBadge {
                 text: "II".to_string(),
@@ -571,22 +656,20 @@ impl Component for ToolbarItemView {
                 BadgeTone::Warning => (theme.color(ThemeRole::Warning), theme.color(ThemeRole::Ink)),
                 BadgeTone::Error => (theme.color(ThemeRole::Danger), Color::WHITE),
             };
-            rect()
-                .position(Position::new_absolute().top(-4.0).right(-4.0))
-                .min_width(Size::px(15.0))
-                .height(Size::px(15.0))
-                .padding(Gaps::new(0.0, 4.0, 0.0, 4.0))
-                .corner_radius(CornerRadius::new_all(999.0))
-                .background(badge_bg)
-                .shadow(Shadow::new().y(1.0).blur(2.0).color(Color::from_argb(64, 0, 0, 0)))
-                .center()
-                .child(
-                    label()
-                        .text(badge.text)
-                        .font_size(9.0)
-                        .font_weight(FontWeight::BOLD)
-                        .color(badge_fg),
-                )
+            ToolbarPulseBadge {
+                text: badge.text,
+                bg: badge_bg,
+                fg: badge_fg,
+                pulsing: is_agents_button && badge.tone == BadgeTone::Warning && !static_snapshot,
+                key: DiffKey::from(&format!("tb-badge-{}", self.item.id.as_str())),
+            }
+        });
+
+        let icon_status_dot = webchat_status_dot.map(|(dot_col, pulsing)| ToolbarPulseDot {
+            color: dot_col,
+            pulsing: pulsing && !static_snapshot,
+            left_offset: None,
+            key: DiffKey::from(&"webchat-status-dot"),
         });
 
         let ext_ctx_id = match &self.item.source {
@@ -655,6 +738,7 @@ impl Component for ToolbarItemView {
                     }),
             )
             .maybe_child(badge)
+            .maybe_child(icon_status_dot)
             .maybe_child(footer_hint_badge);
 
         let wrapped = if is_app_menu {
@@ -1143,13 +1227,16 @@ pub struct TopToolbar {
 impl Component for TopToolbar {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
+        let mut bar_width = use_state(|| 1200.0f32);
         let layout = core.model().read().layout.clone();
         let show_controls = show_window_controls_in_top_bar(&layout);
         let location = self.location;
         let location_a11y_id = self.location_a11y_id;
+        let narrow_top_bar = *bar_width.read() < 720.0;
 
         let render_item = move |item: zendia_browser_core::contributions::ToolbarItem| {
             ToolbarItemView::new(item.clone(), location, location_a11y_id)
+                .hide_chat_label(narrow_top_bar)
                 .key(item.id.as_str().to_string())
                 .into_element()
         };
@@ -1189,6 +1276,12 @@ impl Component for TopToolbar {
         let bar = rect()
             .width(Size::fill())
             .height(Size::px(TOP_TOOLBAR_HEIGHT))
+            .on_sized(move |e: Event<SizedEventData>| {
+                let w = e.area.size.width;
+                if w > 0.0 && (w - *bar_width.peek()).abs() > 1.0 {
+                    bar_width.set(w);
+                }
+            })
             .padding(Gaps::new(0.0, 8.0, 0.0, 0.0))
             .spacing(8.0)
             .direction(Direction::Horizontal)
@@ -1291,6 +1384,122 @@ impl Component for CompactTopBar {
         } else {
             bar
         }
+    }
+}
+
+/// Top-right `8×8` status dot for Chat (`TB-01`) and Web chat (`TB-03`) buttons (`1.2 s` pulse while working/loading).
+#[derive(Clone, PartialEq)]
+struct ToolbarPulseDot {
+    color: Color,
+    pulsing: bool,
+    left_offset: Option<f32>,
+    key: DiffKey,
+}
+
+impl KeyExt for ToolbarPulseDot {
+    fn key_mut(&mut self) -> &mut DiffKey {
+        &mut self.key
+    }
+}
+
+impl Component for ToolbarPulseDot {
+    fn render(&self) -> impl IntoElement {
+        let pulse = use_animation_with_dependencies(&self.pulsing, |conf, active| {
+            if *active {
+                conf.on_creation(OnCreation::Run);
+                conf.on_change(OnChange::Rerun);
+                conf.on_finish(OnFinish::reverse());
+            } else {
+                conf.on_creation(OnCreation::Finish);
+            }
+            AnimNum::new(0.38, 1.0)
+                .duration(motion::TOOLBAR_DOT_PULSE)
+                .ease(Ease::InOut)
+                .function(Function::Sine)
+        });
+        let alpha = if self.pulsing {
+            pulse.get().value().clamp(0.38, 1.0)
+        } else {
+            1.0
+        };
+        let pos = match self.left_offset {
+            Some(left) => Position::new_absolute().top(-1.0).left(left),
+            None => Position::new_absolute().top(-1.0).right(-1.0),
+        };
+        rect()
+            .position(pos)
+            .width(Size::px(8.0))
+            .height(Size::px(8.0))
+            .corner_radius(CornerRadius::new_all(999.0))
+            .opacity(alpha)
+            .background(self.color)
+            .interactive(Interactive::No)
+    }
+
+    fn render_key(&self) -> DiffKey {
+        self.key.clone().or(self.default_key())
+    }
+}
+
+/// Top-right `15 px` count badge for the Agents button (`TB-02`), pulsing (`1.4 s`) when amber (`Warning`).
+#[derive(Clone, PartialEq)]
+struct ToolbarPulseBadge {
+    text: String,
+    bg: Color,
+    fg: Color,
+    pulsing: bool,
+    key: DiffKey,
+}
+
+impl KeyExt for ToolbarPulseBadge {
+    fn key_mut(&mut self) -> &mut DiffKey {
+        &mut self.key
+    }
+}
+
+impl Component for ToolbarPulseBadge {
+    fn render(&self) -> impl IntoElement {
+        let pulse = use_animation_with_dependencies(&self.pulsing, |conf, active| {
+            if *active {
+                conf.on_creation(OnCreation::Run);
+                conf.on_change(OnChange::Rerun);
+                conf.on_finish(OnFinish::reverse());
+            } else {
+                conf.on_creation(OnCreation::Finish);
+            }
+            AnimNum::new(0.45, 1.0)
+                .duration(motion::AGENTS_ATTENTION_PULSE)
+                .ease(Ease::InOut)
+                .function(Function::Sine)
+        });
+        let alpha = if self.pulsing {
+            pulse.get().value().clamp(0.45, 1.0)
+        } else {
+            1.0
+        };
+        rect()
+            .position(Position::new_absolute().top(-4.0).right(-4.0))
+            .min_width(Size::px(15.0))
+            .height(Size::px(15.0))
+            .padding(Gaps::new(0.0, 4.0, 0.0, 4.0))
+            .corner_radius(CornerRadius::new_all(999.0))
+            .opacity(alpha)
+            .background(self.bg)
+            .shadow(Shadow::new().y(1.0).blur(2.0).color(Color::from_argb(64, 0, 0, 0)))
+            .center()
+            .interactive(Interactive::No)
+            .child(
+                label()
+                    .text(self.text.clone())
+                    .font_size(9.0)
+                    .font_weight(FontWeight::BOLD)
+                    .font_family("monospace")
+                    .color(self.fg),
+            )
+    }
+
+    fn render_key(&self) -> DiffKey {
+        self.key.clone().or(self.default_key())
     }
 }
 

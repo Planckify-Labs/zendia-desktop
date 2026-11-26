@@ -285,6 +285,58 @@ pub struct AgentSelection {
     pub context_id: Option<String>,
 }
 
+/// Distance from each end of the effort slider rail to the thumb's center (`20 px`, matching `ZendiaAgentModelCard.sys.mjs`).
+pub const EFFORT_THUMB_INSET: f32 = 20.0;
+
+/// Maps a local horizontal pointer coordinate `x` along an effort slider rail of `width` pixels to `[0.0, 1.0]`.
+pub fn effort_rail_fraction(x: f32, width: f32) -> f32 {
+    let run = width - 2.0 * EFFORT_THUMB_INSET;
+    if run > 0.0 && x.is_finite() {
+        ((x - EFFORT_THUMB_INSET) / run).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Snaps a normalized slider fraction `[0.0, 1.0]` to the nearest stop index in `0..count`.
+pub fn effort_stop_index(fraction: f32, count: usize) -> usize {
+    if count <= 1 {
+        return 0;
+    }
+    (fraction.clamp(0.0, 1.0) * (count - 1) as f32).round() as usize
+}
+
+/// Capability tag shown beside a model row in the model list (`(label, is_good)`), matching `ZendiaAgentDock.sys.mjs`.
+pub fn model_media_tag(model: &ModelInfo, staged_kinds: &[AttachmentKind]) -> Option<(String, bool)> {
+    let media_kinds: Vec<AttachmentKind> = staged_kinds
+        .iter()
+        .copied()
+        .filter(|k| matches!(k, AttachmentKind::Image | AttachmentKind::Video | AttachmentKind::Pdf))
+        .collect();
+    if !media_kinds.is_empty() {
+        let mut unsupported: Vec<&'static str> = Vec::new();
+        for kind in media_kinds {
+            let (supported, name) = match kind {
+                AttachmentKind::Image => (model.supports_images, "images"),
+                AttachmentKind::Video => (model.supports_video, "video"),
+                AttachmentKind::Pdf => (model.supports_pdf, "PDFs"),
+                AttachmentKind::Document => (true, "files"),
+            };
+            if !supported && !unsupported.contains(&name) {
+                unsupported.push(name);
+            }
+        }
+        if unsupported.is_empty() {
+            return Some(("reads it".to_string(), true));
+        }
+        return Some((format!("cannot read {}", unsupported.join(", ")), false));
+    }
+    if !model.supports_images && !model.supports_video && !model.supports_pdf {
+        return Some(("text only".to_string(), false));
+    }
+    None
+}
+
 /// Formats a token count as people read it (`200K`, `1M`).
 pub fn format_tokens(tokens: u32) -> String {
     if tokens >= 1_000_000 {
@@ -530,6 +582,57 @@ pub fn is_number_column(table: &AgentTable, column: usize) -> bool {
     saw_value
 }
 
+/// Natural case-insensitive string comparison (`"item2"` < `"item10"`), matching JS `localeCompare(..., { numeric: true })`.
+pub fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(ac), Some(bc)) if ac.is_ascii_digit() && bc.is_ascii_digit() => {
+                let mut an = String::new();
+                while let Some(&c) = ai.peek() {
+                    if c.is_ascii_digit() {
+                        an.push(c);
+                        ai.next();
+                    } else {
+                        break;
+                    }
+                }
+                let mut bn = String::new();
+                while let Some(&c) = bi.peek() {
+                    if c.is_ascii_digit() {
+                        bn.push(c);
+                        bi.next();
+                    } else {
+                        break;
+                    }
+                }
+                let at = an.trim_start_matches('0');
+                let bt = bn.trim_start_matches('0');
+                let ord = at
+                    .len()
+                    .cmp(&bt.len())
+                    .then_with(|| at.cmp(bt))
+                    .then_with(|| an.len().cmp(&bn.len()));
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            (Some(ac), Some(bc)) => {
+                ai.next();
+                bi.next();
+                let ord = ac.to_ascii_lowercase().cmp(&bc.to_ascii_lowercase());
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+}
+
 /// Filters `table` rows by substring query and applies optional column sorting (keeping empty cells last).
 pub fn filter_and_sort_rows<'a>(
     table: &'a AgentTable,
@@ -563,7 +666,7 @@ pub fn filter_and_sort_rows<'a>(
                 let b = parse_numeric_cell(cell_b).unwrap_or(0.0);
                 a.partial_cmp(&b).unwrap_or(Ordering::Equal)
             } else {
-                cell_a.to_ascii_lowercase().cmp(&cell_b.to_ascii_lowercase())
+                natural_cmp(cell_a, cell_b)
             };
             let directed = if sort.descending { ord.reverse() } else { ord };
             directed.then_with(|| idx_a.cmp(idx_b))
@@ -818,6 +921,130 @@ pub fn veil_speed(active_chunks: usize) -> f32 {
     }
 }
 
+/// One newly streamed text range currently fading in via the streaming veil (`AM-02`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VeilChunk {
+    pub start_char: usize,
+    pub end_char: usize,
+    pub duration_ms: f32,
+    pub elapsed_ms: f32,
+}
+
+impl VeilChunk {
+    pub fn alpha(&self) -> f32 {
+        if self.duration_ms <= 0.0 {
+            return 1.0;
+        }
+        veil_alpha((self.elapsed_ms / self.duration_ms).clamp(0.0, 1.0))
+    }
+}
+
+/// Pure per-message streaming veil tracker matching `ZendiaAgentMotion.sys.mjs`'s `Veil`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VeilTracker {
+    text: String,
+    pub chunks: Vec<VeilChunk>,
+    pub ema_ms: f32,
+    pub speed: f32,
+    last_chunk_ms: Option<f32>,
+    last_sync_ms: f32,
+    initialized: bool,
+}
+
+impl Default for VeilTracker {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            chunks: Vec::new(),
+            ema_ms: 80.0,
+            speed: 1.0,
+            last_chunk_ms: None,
+            last_sync_ms: 0.0,
+            initialized: false,
+        }
+    }
+}
+
+impl VeilTracker {
+    /// Records the current streamed text at `now_ms`, creating a fading chunk for any newly appended range.
+    /// If `baseline` is true (or on first observation), existing text is recorded at full opacity without dissolving.
+    pub fn update(&mut self, text: &str, now_ms: f32, baseline: bool) {
+        if !self.initialized || baseline {
+            self.text = text.to_string();
+            self.chunks.clear();
+            self.ema_ms = 80.0;
+            self.speed = 1.0;
+            self.last_chunk_ms = None;
+            self.last_sync_ms = now_ms;
+            self.initialized = true;
+            return;
+        }
+
+        let dt = (now_ms - self.last_sync_ms).max(0.0);
+        let common = self.text.chars().zip(text.chars()).take_while(|(a, b)| a == b).count();
+        let new_len = text.chars().count();
+
+        let mut kept = Vec::with_capacity(self.chunks.len() + 1);
+        for mut chunk in self.chunks.drain(..) {
+            chunk.elapsed_ms += dt * self.speed;
+            if chunk.start_char < common && chunk.elapsed_ms < chunk.duration_ms {
+                chunk.end_char = chunk.end_char.min(common);
+                if chunk.start_char < chunk.end_char {
+                    kept.push(chunk);
+                }
+            }
+        }
+
+        if new_len > common {
+            if let Some(prev) = self.last_chunk_ms {
+                self.ema_ms = next_ema_ms(self.ema_ms, (now_ms - prev).max(0.0));
+            }
+            self.last_chunk_ms = Some(now_ms);
+            kept.push(VeilChunk {
+                start_char: common,
+                end_char: new_len,
+                duration_ms: chunk_duration_ms(self.ema_ms),
+                elapsed_ms: 0.0,
+            });
+        }
+
+        self.text = text.to_string();
+        self.chunks = kept;
+        self.speed = veil_speed(self.chunks.len());
+        self.last_sync_ms = now_ms;
+    }
+
+    /// Advances active chunk fade timers to `now_ms` and prunes completed chunks.
+    pub fn tick(&mut self, now_ms: f32) {
+        if self.chunks.is_empty() {
+            self.last_sync_ms = now_ms;
+            return;
+        }
+        let dt = (now_ms - self.last_sync_ms).max(0.0);
+        let speed = self.speed;
+        self.chunks.retain_mut(|chunk| {
+            chunk.elapsed_ms += dt * speed;
+            chunk.elapsed_ms < chunk.duration_ms
+        });
+        self.speed = veil_speed(self.chunks.len());
+        self.last_sync_ms = now_ms;
+    }
+
+    pub fn has_active_chunks(&self) -> bool {
+        !self.chunks.is_empty()
+    }
+
+    /// Returns the veil opacity (`0.0..=1.0`) for a character offset `char_idx` inside the tracked text.
+    pub fn alpha_at(&self, char_idx: usize) -> f32 {
+        for chunk in &self.chunks {
+            if char_idx >= chunk.start_char && char_idx < chunk.end_char {
+                return chunk.alpha();
+            }
+        }
+        1.0
+    }
+}
+
 /// Formats a duration in seconds for the working row and folded step group (`1s`, `1m 14s`).
 pub fn format_duration_secs(secs: u64) -> String {
     let clamped = secs.max(1);
@@ -866,21 +1093,319 @@ impl RosterGroup {
     }
 }
 
-/// Classifies a conversation into its Agents panel roster bucket.
-pub fn classify_roster_group(conv: &crate::model::Conversation) -> RosterGroup {
-    let has_pending_confirm = conv
+/// Detailed 12-state roster classification matching `ZendiaAgentRoster.sys.mjs` (`AG-04`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RosterKind {
+    Confirm,
+    Captcha,
+    Blocked,
+    Paused,
+    Error,
+    Stopping,
+    CaptchaSolving,
+    Working,
+    Starting,
+    Done,
+    Stopped,
+    Idle,
+}
+
+/// Derived roster presentation state for one conversation row (`AG-04`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RosterEntryState {
+    pub group: RosterGroup,
+    pub kind: RosterKind,
+    pub label: String,
+    pub detail: String,
+}
+
+/// Strips basic Markdown formatting and collapses whitespace into a single clamped line (`ZendiaAgentRoster.oneLine`).
+pub fn strip_one_line(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut prev_space = true;
+    for ch in text.chars() {
+        let mapped = match ch {
+            '\n' | '\r' | '\t' => ' ',
+            '*' | '`' | '~' => continue,
+            c => c,
+        };
+        if mapped.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(mapped);
+            prev_space = false;
+        }
+    }
+    let trimmed = out.trim();
+    let count = trimmed.chars().count();
+    if count > max_chars && max_chars > 1 {
+        let mut cut: String = trimmed.chars().take(max_chars - 1).collect();
+        cut = cut.trim_end().to_string();
+        cut.push('…');
+        cut
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn last_answer_line(steps: &[crate::model::ConversationStep]) -> String {
+    for step in steps.iter().rev() {
+        match &step.kind {
+            crate::model::StepKind::UserPrompt => return String::new(),
+            crate::model::StepKind::Response if !step.summary.trim().is_empty() => {
+                return strip_one_line(&step.summary, 140);
+            }
+            _ => {}
+        }
+    }
+    String::new()
+}
+
+/// Derives the rich 12-state roster status for `conv` (`AG-04`).
+pub fn derive_roster_state(conv: &crate::model::Conversation, captcha_holds: bool) -> RosterEntryState {
+    if let Some(prompt) = conv.steps.iter().rev().find_map(|step| match &step.kind {
+        crate::model::StepKind::Confirmation { resolved: None, prompt } => Some(prompt.as_str()),
+        _ => None,
+    }) {
+        return RosterEntryState {
+            group: RosterGroup::NeedsYou,
+            kind: RosterKind::Confirm,
+            label: "Asks permission".to_string(),
+            detail: strip_one_line(prompt, 140),
+        };
+    }
+
+    if conv.status == crate::model::ConversationStatus::Working {
+        let running_step = conv
+            .steps
+            .iter()
+            .rev()
+            .take_while(|s| !matches!(s.kind, crate::model::StepKind::UserPrompt))
+            .find(|s| s.status == crate::model::StepStatus::Running);
+        let has_activity = conv
+            .steps
+            .iter()
+            .rev()
+            .take_while(|s| !matches!(s.kind, crate::model::StepKind::UserPrompt))
+            .next()
+            .is_some();
+        let detail = running_step
+            .map(|s| strip_one_line(&s.summary, 140))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let ans = last_answer_line(&conv.steps);
+                if ans.is_empty() {
+                    conv.steps
+                        .iter()
+                        .rev()
+                        .find(|s| !matches!(s.kind, crate::model::StepKind::UserPrompt))
+                        .map(|s| strip_one_line(&s.summary, 140))
+                        .unwrap_or_default()
+                } else {
+                    ans
+                }
+            });
+        let starting = !has_activity && conv.elapsed_secs == 0;
+        return RosterEntryState {
+            group: RosterGroup::Working,
+            kind: if starting {
+                RosterKind::Starting
+            } else {
+                RosterKind::Working
+            },
+            label: if starting { "Starting" } else { "Working" }.to_string(),
+            detail,
+        };
+    }
+
+    if captcha_holds {
+        return RosterEntryState {
+            group: RosterGroup::NeedsYou,
+            kind: RosterKind::Captcha,
+            label: "CAPTCHA to solve".to_string(),
+            detail: "It carries on once the CAPTCHA is solved".to_string(),
+        };
+    }
+
+    // Check for an error step since the latest user prompt (when not stopped manually without error).
+    if let Some(err_step) = conv
         .steps
         .iter()
-        .any(|step| matches!(step.kind, crate::model::StepKind::Confirmation { resolved: None, .. }));
-    if conv.status == crate::model::ConversationStatus::WaitingForUser || has_pending_confirm {
-        RosterGroup::NeedsYou
-    } else if conv.status == crate::model::ConversationStatus::Working {
-        RosterGroup::Working
-    } else if conv.status == crate::model::ConversationStatus::Finished && conv.unseen {
-        RosterGroup::Finished
-    } else {
-        RosterGroup::Idle
+        .rev()
+        .take_while(|s| !matches!(s.kind, crate::model::StepKind::UserPrompt))
+        .find(|s| matches!(s.kind, crate::model::StepKind::Error))
+    {
+        return RosterEntryState {
+            group: RosterGroup::NeedsYou,
+            kind: RosterKind::Error,
+            label: "Stopped with an error".to_string(),
+            detail: strip_one_line(&err_step.summary, 140),
+        };
     }
+
+    if conv.status == crate::model::ConversationStatus::WaitingForUser {
+        return RosterEntryState {
+            group: RosterGroup::NeedsYou,
+            kind: RosterKind::Blocked,
+            label: "Blocked on you".to_string(),
+            detail: last_answer_line(&conv.steps),
+        };
+    }
+
+    if conv.status == crate::model::ConversationStatus::Stopped {
+        return RosterEntryState {
+            group: RosterGroup::Idle,
+            kind: RosterKind::Stopped,
+            label: "Stopped".to_string(),
+            detail: last_answer_line(&conv.steps),
+        };
+    }
+
+    let answer = last_answer_line(&conv.steps);
+    if conv.status == crate::model::ConversationStatus::Finished && conv.unseen {
+        return RosterEntryState {
+            group: RosterGroup::Finished,
+            kind: RosterKind::Done,
+            label: "Finished".to_string(),
+            detail: answer,
+        };
+    }
+
+    RosterEntryState {
+        group: RosterGroup::Idle,
+        kind: RosterKind::Idle,
+        label: "Idle".to_string(),
+        detail: answer,
+    }
+}
+
+/// Classifies a conversation into its Agents panel roster bucket.
+pub fn classify_roster_group(conv: &crate::model::Conversation) -> RosterGroup {
+    derive_roster_state(conv, false).group
+}
+
+/// Kind of entry shown inside a conversation's Agents panel peek drawer (`AG-07`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RosterActivityKind {
+    Step,
+    Agent,
+    Note,
+    Error,
+}
+
+/// One activity entry rendered in the Agents panel peek drawer (up to 6 items, `AG-07`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RosterActivityItem {
+    pub kind: RosterActivityKind,
+    pub status: crate::model::StepStatus,
+    pub text: String,
+}
+
+/// Extracts the last `max_items` mixed activity entries after the latest user prompt (`ZendiaAgentRoster.recentActivity`).
+pub fn recent_roster_activity(steps: &[crate::model::ConversationStep], max_items: usize) -> Vec<RosterActivityItem> {
+    let start = steps
+        .iter()
+        .rposition(|s| matches!(s.kind, crate::model::StepKind::UserPrompt))
+        .map_or(0, |i| i + 1);
+    let mut items = Vec::new();
+    for step in &steps[start..] {
+        match &step.kind {
+            crate::model::StepKind::ToolCall { .. } | crate::model::StepKind::Thinking => {
+                items.push(RosterActivityItem {
+                    kind: RosterActivityKind::Step,
+                    status: step.status,
+                    text: strip_one_line(&step.summary, 100),
+                });
+            }
+            crate::model::StepKind::Response => {
+                if !step.summary.trim().is_empty() {
+                    items.push(RosterActivityItem {
+                        kind: RosterActivityKind::Agent,
+                        status: step.status,
+                        text: strip_one_line(&step.summary, 220),
+                    });
+                }
+            }
+            crate::model::StepKind::AgentTable(table) => {
+                items.push(RosterActivityItem {
+                    kind: RosterActivityKind::Note,
+                    status: step.status,
+                    text: strip_one_line(&table.title, 100),
+                });
+            }
+            crate::model::StepKind::DeclaredPage(page) => {
+                items.push(RosterActivityItem {
+                    kind: RosterActivityKind::Note,
+                    status: step.status,
+                    text: strip_one_line(&page.title, 100),
+                });
+            }
+            crate::model::StepKind::Note => {
+                if !step.summary.trim().is_empty() {
+                    items.push(RosterActivityItem {
+                        kind: RosterActivityKind::Note,
+                        status: step.status,
+                        text: strip_one_line(&step.summary, 140),
+                    });
+                }
+            }
+            crate::model::StepKind::Error => {
+                items.push(RosterActivityItem {
+                    kind: RosterActivityKind::Error,
+                    status: crate::model::StepStatus::Failed,
+                    text: strip_one_line(&step.summary, 140),
+                });
+            }
+            crate::model::StepKind::Confirmation { prompt, .. } => {
+                items.push(RosterActivityItem {
+                    kind: RosterActivityKind::Note,
+                    status: step.status,
+                    text: strip_one_line(prompt, 140),
+                });
+            }
+            crate::model::StepKind::UserPrompt => {}
+        }
+    }
+    if items.len() > max_items {
+        items.drain(..items.len() - max_items);
+    }
+    items
+}
+
+/// Segmented work-list progress counts (`done`, `other`/failed, `total`) for the `3 px` Agents roster bar (`AG-06`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkListProgress {
+    pub done: usize,
+    pub other: usize,
+    pub total: usize,
+}
+
+/// Computes segmented step progress for the latest turn when at least two tool/thinking steps exist (`AG-06`).
+pub fn work_list_progress(steps: &[crate::model::ConversationStep]) -> Option<WorkListProgress> {
+    let start = steps
+        .iter()
+        .rposition(|s| matches!(s.kind, crate::model::StepKind::UserPrompt))
+        .map_or(0, |i| i + 1);
+    let mut done = 0usize;
+    let mut other = 0usize;
+    let mut total = 0usize;
+    for step in &steps[start..] {
+        if matches!(
+            step.kind,
+            crate::model::StepKind::ToolCall { .. } | crate::model::StepKind::Thinking
+        ) {
+            total += 1;
+            match step.status {
+                crate::model::StepStatus::Completed => done += 1,
+                crate::model::StepStatus::Failed => other += 1,
+                _ => {}
+            }
+        }
+    }
+    (total >= 2).then_some(WorkListProgress { done, other, total })
 }
 
 /// Aggregate counts of conversations across the four Agents panel buckets.
@@ -911,8 +1436,15 @@ impl RosterCounts {
     }
 }
 
-/// Computes the count badge shown on the Agents toolbar button (`Warning` amber when any agent waits on the user).
-pub fn agents_button_badge(model: &crate::model::BrowserModel) -> Option<crate::contributions::ToolbarBadge> {
+/// Computes the count badge shown on the Agents toolbar button (`TB-02`): hidden while the Agents panel is open,
+/// amber (`Warning`) when any agent waits on the user, accent when agents are working, capped at `"9+"`.
+pub fn agents_button_badge_for_state(
+    model: &crate::model::BrowserModel,
+    agents_panel_open: bool,
+) -> Option<crate::contributions::ToolbarBadge> {
+    if agents_panel_open {
+        return None;
+    }
     let server_running = model.services.iter().any(|s| {
         s.service == crate::model::ServiceId::AgentServer && matches!(s.status, crate::model::ServiceStatus::Running)
     });
@@ -920,21 +1452,62 @@ pub fn agents_button_badge(model: &crate::model::BrowserModel) -> Option<crate::
         return None;
     }
     let counts = RosterCounts::from_conversations(&model.conversations);
-    let format_count = |n: usize| {
-        if n > 9 { "9+".to_string() } else { n.to_string() }
-    };
+    let format_count = |n: usize| if n > 9 { "9+".to_string() } else { n.to_string() };
     if counts.needs_you > 0 {
         Some(crate::contributions::ToolbarBadge {
             text: format_count(counts.needs_you),
             tone: crate::contributions::BadgeTone::Warning,
         })
-    } else if counts.working + counts.finished > 0 {
+    } else if counts.working > 0 {
         Some(crate::contributions::ToolbarBadge {
-            text: format_count(counts.working + counts.finished),
+            text: format_count(counts.working),
             tone: crate::contributions::BadgeTone::Accent,
         })
     } else {
         None
+    }
+}
+
+/// Computes the count badge shown on the Agents toolbar button assuming the panel is closed.
+pub fn agents_button_badge(model: &crate::model::BrowserModel) -> Option<crate::contributions::ToolbarBadge> {
+    agents_button_badge_for_state(model, false)
+}
+
+/// Dynamic tooltip for the Agents toolbar button matching `ZendiaAgentsButton.sys.mjs:64-79` (`TB-02`).
+pub fn agents_button_tooltip(model: &crate::model::BrowserModel, agents_panel_open: bool) -> String {
+    if agents_panel_open {
+        return "Close agents".to_string();
+    }
+    let mut waiting = Vec::new();
+    let mut working = 0usize;
+    for conv in &model.conversations {
+        let captcha = conv
+            .tab_id
+            .is_some_and(|tid| model.tab_captcha_findings.contains_key(&tid));
+        let st = derive_roster_state(conv, captcha);
+        match st.group {
+            RosterGroup::NeedsYou => {
+                let name = model
+                    .agent(&conv.agent_id)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| "An agent".to_string());
+                waiting.push((name, st.label));
+            }
+            RosterGroup::Working => working += 1,
+            _ => {}
+        }
+    }
+    if waiting.len() == 1 {
+        let (name, lbl) = &waiting[0];
+        format!("{name}: {}. Open agents", lbl.to_ascii_lowercase())
+    } else if !waiting.is_empty() {
+        format!("{} agents need you. Open agents", waiting.len())
+    } else if working == 1 {
+        "1 agent working. Open agents".to_string()
+    } else if working > 1 {
+        format!("{working} agents working. Open agents")
+    } else {
+        "All your agents".to_string()
     }
 }
 
@@ -1241,5 +1814,171 @@ mod tests {
         assert_eq!(format_tokens(1_000_000), "1M");
         assert_eq!(format_duration_secs(74), "1m 14s");
         assert_eq!(format_elapsed_clock(65), "1:05");
+    }
+
+    #[test]
+    fn effort_rail_fraction_and_media_tags_match_fork() {
+        // Rail width 232px => thumb inset 20px, run = 192px.
+        assert_eq!(effort_rail_fraction(0.0, 232.0), 0.0);
+        assert_eq!(effort_rail_fraction(20.0, 232.0), 0.0);
+        assert!((effort_rail_fraction(116.0, 232.0) - 0.5).abs() < 1e-4);
+        assert_eq!(effort_rail_fraction(212.0, 232.0), 1.0);
+        assert_eq!(effort_rail_fraction(260.0, 232.0), 1.0);
+        assert_eq!(effort_stop_index(0.0, 4), 0);
+        assert_eq!(effort_stop_index(0.34, 4), 1);
+        assert_eq!(effort_stop_index(0.67, 4), 2);
+        assert_eq!(effort_stop_index(1.0, 4), 3);
+
+        let text_only = ModelInfo {
+            supports_images: false,
+            supports_video: false,
+            supports_pdf: false,
+            ..ModelInfo::simple(
+                ModelId::new("haiku"),
+                "Claude Haiku",
+                "Anthropic",
+                200_000,
+                ModelEffort::Low,
+            )
+        };
+        assert_eq!(model_media_tag(&text_only, &[]), Some(("text only".to_string(), false)));
+        assert_eq!(
+            model_media_tag(&text_only, &[AttachmentKind::Image]),
+            Some(("cannot read images".to_string(), false))
+        );
+        let vision = ModelInfo {
+            supports_images: true,
+            ..text_only
+        };
+        assert_eq!(model_media_tag(&vision, &[]), None);
+        assert_eq!(
+            model_media_tag(&vision, &[AttachmentKind::Image]),
+            Some(("reads it".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn natural_cmp_orders_embedded_numbers_numerically() {
+        assert_eq!(natural_cmp("item2", "item10"), Ordering::Less);
+        assert_eq!(natural_cmp("Phase 10", "Phase 2"), Ordering::Greater);
+        assert_eq!(natural_cmp("alpha", "ALPHA"), Ordering::Equal);
+    }
+
+    #[test]
+    fn veil_tracker_fades_only_newly_appended_ranges() {
+        let mut tracker = VeilTracker::default();
+        tracker.update("Hello", 0.0, false);
+        assert!(!tracker.has_active_chunks());
+        assert_eq!(tracker.alpha_at(0), 1.0);
+
+        tracker.update("Hello world", 50.0, false);
+        assert!(tracker.has_active_chunks());
+        assert_eq!(tracker.alpha_at(0), 1.0);
+        assert_eq!(tracker.alpha_at(4), 1.0);
+        assert!(tracker.alpha_at(6) < 0.05);
+
+        tracker.tick(170.0);
+        assert!(tracker.alpha_at(6) > 0.3);
+
+        tracker.tick(600.0);
+        assert!(!tracker.has_active_chunks());
+        assert_eq!(tracker.alpha_at(6), 1.0);
+    }
+
+    #[test]
+    fn roster_state_progress_activity_and_badge_match_fork() {
+        use crate::model::{
+            AgentId, Conversation, ConversationId, ConversationStatus, ConversationStep, StepId, StepKind, StepStatus,
+        };
+
+        assert_eq!(AGENTS_PANEL_MIN_WIDTH, 280.0);
+        assert_eq!(SidePanelPrefs::min_width_for(AGENTS_PANEL_ID), 280.0);
+        assert_eq!(SidePanelPrefs::default_width_for(AGENTS_PANEL_ID), 340.0);
+
+        let err_conv = Conversation {
+            id: ConversationId(1),
+            agent_id: AgentId::new("claude-code"),
+            tab_id: None,
+            title: "Broken run".to_string(),
+            model_id: ModelId::new("claude-sonnet-4"),
+            status: ConversationStatus::Stopped,
+            steps: vec![
+                ConversationStep::simple(StepId(1), StepKind::UserPrompt, "Fix bug", StepStatus::Completed),
+                ConversationStep::simple(StepId(2), StepKind::Error, "Network timeout", StepStatus::Failed),
+            ],
+            unseen: false,
+            elapsed_secs: 4,
+        };
+        let st = derive_roster_state(&err_conv, false);
+        assert_eq!(st.group, RosterGroup::NeedsYou);
+        assert_eq!(st.kind, RosterKind::Error);
+        assert_eq!(st.label, "Stopped with an error");
+
+        let captcha_conv = Conversation {
+            status: ConversationStatus::Idle,
+            steps: vec![ConversationStep::simple(
+                StepId(1),
+                StepKind::UserPrompt,
+                "Check",
+                StepStatus::Completed,
+            )],
+            ..err_conv.clone()
+        };
+        let cap_st = derive_roster_state(&captcha_conv, true);
+        assert_eq!(cap_st.group, RosterGroup::NeedsYou);
+        assert_eq!(cap_st.kind, RosterKind::Captcha);
+
+        let starting_conv = Conversation {
+            status: ConversationStatus::Working,
+            elapsed_secs: 0,
+            ..captcha_conv.clone()
+        };
+        assert_eq!(derive_roster_state(&starting_conv, false).kind, RosterKind::Starting);
+
+        let multi_step = vec![
+            ConversationStep::simple(StepId(1), StepKind::UserPrompt, "Go", StepStatus::Completed),
+            ConversationStep::simple(
+                StepId(2),
+                StepKind::ToolCall { tool: "a".into() },
+                "Step 1",
+                StepStatus::Completed,
+            ),
+            ConversationStep::simple(
+                StepId(3),
+                StepKind::ToolCall { tool: "b".into() },
+                "Step 2",
+                StepStatus::Failed,
+            ),
+            ConversationStep::simple(
+                StepId(4),
+                StepKind::ToolCall { tool: "c".into() },
+                "Step 3",
+                StepStatus::Running,
+            ),
+        ];
+        assert_eq!(
+            work_list_progress(&multi_step),
+            Some(WorkListProgress {
+                done: 1,
+                other: 1,
+                total: 3
+            })
+        );
+        assert_eq!(recent_roster_activity(&multi_step, 6).len(), 3);
+
+        // Badge hides when open and caps >9 at "9+".
+        let mut model = crate::stub::sample_model(true);
+        model.conversations.clear();
+        for i in 0..12u64 {
+            model.conversations.push(Conversation {
+                id: ConversationId(100 + i),
+                status: ConversationStatus::Working,
+                elapsed_secs: 3,
+                ..captcha_conv.clone()
+            });
+        }
+        assert_eq!(agents_button_badge_for_state(&model, true), None);
+        let badge = agents_button_badge_for_state(&model, false).expect("badge expected when closed");
+        assert_eq!(badge.text, "9+");
     }
 }

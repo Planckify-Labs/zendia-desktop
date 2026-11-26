@@ -291,11 +291,11 @@ fn build_fixture_model(state_id: &str) -> BrowserModel {
         _ => {
             // conversation-float, split-layout, model-card, model-card-list, instructions-empty, service-down
             let conv = build_rich_sample_conversation(ConversationId(1), 10, Some(TabId(6)));
-            // Also include a second background chat so the header's other-chats stack is visible.
+            // Also include a second background chat on the same tab so the header's other-chats stack is visible.
             let second = Conversation {
                 id: ConversationId(2),
                 agent_id: AgentId::new("codex"),
-                tab_id: Some(TabId(7)),
+                tab_id: Some(TabId(6)),
                 title: "Token audit".to_string(),
                 model_id: ModelId::new("gpt-5"),
                 status: ConversationStatus::Finished,

@@ -65,6 +65,21 @@ pub fn paperclip_icon(size: f32, color: Color) -> Element {
     inline_svg_icon("zendia-agent-paperclip", PAPERCLIP_SVG, size, color)
 }
 
+/// Renders an embedded Zen icon tinted to an explicit [`Color`] (for example white over a dark media tile badge).
+pub fn colored_zen_icon(name: &'static str, size: f32, color: Color) -> Element {
+    if let Some(raw) = crate::ui::kit::icon_raw_bytes(name) {
+        let prepared = crate::ui::kit::prepare_svg_for_rendering(raw);
+        SvgViewer::new((("zendia-agent-icon", name), Bytes::from(prepared)))
+            .width(Size::px(size))
+            .height(Size::px(size))
+            .color(color)
+            .show_loader(false)
+            .into_element()
+    } else {
+        Icon::new(name).size(size).role(ThemeRole::Text).into_element()
+    }
+}
+
 /// Builds Zendia-themed colors for Freya [`Input`] controls inside the agent panel so dark and light themes never
 /// fall back to Freya's bright white default box.
 pub fn agent_input_colors(theme: &ResolvedTheme, transparent: bool) -> InputColorsThemePartial {
@@ -135,6 +150,23 @@ pub fn agent_logo_element(agent_id: &str, size: f32, dimmed: bool) -> Element {
 
 /// Renders an agent emblem centered inside a crisp white badge (circular or squircle) matching Zendia's chrome.
 pub fn agent_badge_emblem(agent_id: &str, badge_size: f32, logo_size: f32, radius: f32, glow: bool) -> Element {
+    agent_badge_emblem_with_glow(
+        agent_id,
+        badge_size,
+        logo_size,
+        radius,
+        glow.then_some(Color::from_argb(46, 255, 220, 235)),
+    )
+}
+
+/// Renders an agent emblem centered inside a crisp white badge with an optional custom glow color.
+pub fn agent_badge_emblem_with_glow(
+    agent_id: &str,
+    badge_size: f32,
+    logo_size: f32,
+    radius: f32,
+    glow_color: Option<Color>,
+) -> Element {
     let mut badge = rect()
         .width(Size::px(badge_size))
         .height(Size::px(badge_size))
@@ -142,15 +174,62 @@ pub fn agent_badge_emblem(agent_id: &str, badge_size: f32, logo_size: f32, radiu
         .background(Color::WHITE)
         .center()
         .child(agent_logo_element(agent_id, logo_size, false));
-    if glow {
+    if let Some(gc) = glow_color {
+        badge = badge.shadow(Shadow::new().y(4.0).blur(12.0).color(gc));
+    } else {
         badge = badge.shadow(
             Shadow::new()
-                .y(2.0)
-                .blur(16.0)
-                .color(Color::from_argb(46, 255, 220, 235)),
+                .y(0.0)
+                .blur(0.0)
+                .spread(0.5)
+                .color(Color::from_argb(36, 0, 0, 0)),
         );
-    } else {
-        badge = badge.shadow(Shadow::new().y(1.0).blur(3.0).color(Color::from_argb(30, 0, 0, 0)));
     }
     badge.into_element()
+}
+
+/// Paints a dashed rounded-rectangle border with an optional fill, matching CSS `border: W dashed C`.
+pub fn dashed_rounded_box_fill(
+    bg: Color,
+    stroke: Color,
+    stroke_width: f32,
+    radius: f32,
+    dash_on: f32,
+    dash_off: f32,
+) -> Fill {
+    use freya::engine::prelude::{Paint, PaintStyle, PathEffect, RRect, Rect, SkColor};
+    let sk_bg = SkColor::from_argb(bg.a(), bg.r(), bg.g(), bg.b());
+    let sk_stroke = SkColor::from_argb(stroke.a(), stroke.r(), stroke.g(), stroke.b());
+    Fill::Callback(RenderCallback::new(move |ctx| {
+        if let RenderTarget::Background { canvas, .. } = &mut ctx.target {
+            let w = ctx.size.width;
+            let h = ctx.size.height;
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            let inset = stroke_width * 0.5;
+            let r = (radius - inset).max(0.0);
+            let rrect = RRect::new_rect_xy(
+                Rect::from_xywh(inset, inset, (w - stroke_width).max(0.0), (h - stroke_width).max(0.0)),
+                r,
+                r,
+            );
+            if bg.a() > 0 {
+                let mut fill_paint = Paint::default();
+                fill_paint.set_anti_alias(true);
+                fill_paint.set_style(PaintStyle::Fill);
+                fill_paint.set_color(sk_bg);
+                canvas.draw_rrect(rrect, &fill_paint);
+            }
+            let mut stroke_paint = Paint::default();
+            stroke_paint.set_anti_alias(true);
+            stroke_paint.set_style(PaintStyle::Stroke);
+            stroke_paint.set_stroke_width(stroke_width);
+            stroke_paint.set_color(sk_stroke);
+            if let Some(effect) = PathEffect::dash(&[dash_on, dash_off], 0.0) {
+                stroke_paint.set_path_effect(effect);
+            }
+            canvas.draw_rrect(rrect, &stroke_paint);
+        }
+    }))
 }

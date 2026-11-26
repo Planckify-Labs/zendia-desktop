@@ -25,7 +25,10 @@ use freya::animation::*;
 use freya::prelude::*;
 use hub_protocol::{Web_DevicePixelPoint, Web_UIEvents_MouseButton as WebMouseButton};
 use zendia_browser_core::contributions::MenuEntryKind;
-use zendia_browser_core::menus::{ResolvedMenuItem, ask_site_pick, retarget_ask_menu};
+use zendia_browser_core::menus::{
+    ASK_ALL_SITE_ID, ResolvedMenuItem, ask_language_pick, ask_site_pick, relabel_ask_language, retarget_ask_menu,
+    retarget_ask_menu_all,
+};
 use zendia_browser_core::model::ChatSiteId;
 
 pub(crate) const CTX_MENU_MIN_WIDTH: f32 = 216.0;
@@ -277,6 +280,13 @@ impl Component for ContextMenuOverlay {
                     .capture_global_keys(true)
                     .on_close(move |_| menu_state.close_context_menu())
                     .on_pick_site(move |site_id: ChatSiteId| {
+                        let mut context_menu = menu_state.context_menu;
+                        if site_id.0 == ASK_ALL_SITE_ID {
+                            if let Some(open) = context_menu.write().as_mut() {
+                                retarget_ask_menu_all(&mut open.items);
+                            }
+                            return;
+                        }
                         let site = core
                             .model()
                             .peek()
@@ -284,11 +294,16 @@ impl Component for ContextMenuOverlay {
                             .iter()
                             .find(|site| site.id == site_id)
                             .cloned();
-                        let mut context_menu = menu_state.context_menu;
                         if let Some(site) = site
                             && let Some(open) = context_menu.write().as_mut()
                         {
                             retarget_ask_menu(&mut open.items, &site);
+                        }
+                    })
+                    .on_pick_language(move |lang_name: String| {
+                        let mut context_menu = menu_state.context_menu;
+                        if let Some(open) = context_menu.write().as_mut() {
+                            relabel_ask_language(&mut open.items, &lang_name);
                         }
                     });
                 if let Some(submenu) = open.open_submenu {
@@ -310,6 +325,7 @@ pub struct ContextMenuCard {
     capture_global_keys: bool,
     on_close: Option<EventHandler<()>>,
     on_pick_site: Option<EventHandler<ChatSiteId>>,
+    on_pick_language: Option<EventHandler<String>>,
     key: DiffKey,
 }
 
@@ -329,6 +345,7 @@ impl ContextMenuCard {
             capture_global_keys: false,
             on_close: None,
             on_pick_site: None,
+            on_pick_language: None,
             key: DiffKey::None,
         }
     }
@@ -363,6 +380,11 @@ impl ContextMenuCard {
         self.on_pick_site = Some(handler.into());
         self
     }
+
+    pub fn on_pick_language(mut self, handler: impl Into<EventHandler<String>>) -> Self {
+        self.on_pick_language = Some(handler.into());
+        self
+    }
 }
 
 impl Component for ContextMenuCard {
@@ -390,6 +412,7 @@ impl Component for ContextMenuCard {
         let core_for_keys = core.clone();
         let on_close_keys = self.on_close.clone();
         let on_pick_keys = self.on_pick_site.clone();
+        let on_lang_keys = self.on_pick_language.clone();
         let capture = self.capture_global_keys;
 
         let handle_key = move |e: Event<KeyboardEventData>| {
@@ -465,6 +488,12 @@ impl Component for ContextMenuCard {
                         if let Some(site_id) = ask_site_pick(item) {
                             if let Some(pick) = &on_pick_keys {
                                 pick.call(site_id);
+                            }
+                            return;
+                        }
+                        if let Some(lang) = ask_language_pick(item) {
+                            if let Some(pick_lang) = &on_lang_keys {
+                                pick_lang.call(lang.to_string());
                             }
                             return;
                         }
@@ -569,6 +598,7 @@ impl Component for ContextMenuCard {
                             active_stack,
                             on_close: self.on_close.clone(),
                             on_pick_site: self.on_pick_site.clone(),
+                            on_pick_language: self.on_pick_language.clone(),
                             key: DiffKey::from(&format!("ctx-level-{depth}")),
                         }),
                 );
@@ -594,6 +624,7 @@ impl Component for ContextMenuCard {
                         active_stack,
                         on_close: self.on_close.clone(),
                         on_pick_site: self.on_pick_site.clone(),
+                        on_pick_language: self.on_pick_language.clone(),
                         key: DiffKey::from(&format!("ctx-level-{depth}")),
                     };
                     if depth == 0 {
@@ -634,6 +665,7 @@ struct ContextMenuLevelCard {
     active_stack: State<Vec<Option<usize>>>,
     on_close: Option<EventHandler<()>>,
     on_pick_site: Option<EventHandler<ChatSiteId>>,
+    on_pick_language: Option<EventHandler<String>>,
     key: DiffKey,
 }
 
@@ -700,8 +732,10 @@ impl Component for ContextMenuLevelCard {
                 let item_args = item.command_args.clone();
                 let item_enabled = item.enabled;
                 let keeps_open = item.keeps_menu_open;
+                let lang_pick = ask_language_pick(item).map(str::to_string);
                 let core_press = core.clone();
                 let on_close_press = self.on_close.clone();
+                let on_lang_press = self.on_pick_language.clone();
 
                 context_menu_row(
                     &theme,
@@ -742,6 +776,10 @@ impl Component for ContextMenuLevelCard {
                             if !currently_open {
                                 path.push(idx);
                                 stack.push(None);
+                            }
+                        } else if let Some(lang) = &lang_pick {
+                            if let Some(pick_lang) = &on_lang_press {
+                                pick_lang.call(lang.clone());
                             }
                         } else {
                             invoke_menu_command(&core_press, &item_cmd, &item_args);
@@ -816,43 +854,55 @@ fn ask_site_row(
         } else {
             Color::TRANSPARENT
         };
-        let logo = chat_site_logo(
-            item.icon.as_deref().unwrap_or(site_id.0.as_str()),
-            15.0,
-            theme.color(ThemeRole::Text),
-        );
+        let is_all = site_id.0 == ASK_ALL_SITE_ID;
+        let content: Element = if is_all {
+            label()
+                .text("All")
+                .font_size(11.0)
+                .font_weight(FontWeight::MEDIUM)
+                .color(theme.color(ThemeRole::Text))
+                .into_element()
+        } else {
+            chat_site_logo(
+                item.icon.as_deref().unwrap_or(site_id.0.as_str()),
+                15.0,
+                theme.color(ThemeRole::Text),
+            )
+        };
         let on_pick = on_pick.clone();
-        Some(
-            rect()
-                .key(idx)
-                .a11y_role(AccessibilityRole::MenuItemRadio)
-                .a11y_alt(if checked {
-                    format!("{}, asked", item.label)
-                } else {
-                    item.label.clone()
-                })
-                .width(Size::px(ASK_SITE_BUTTON_STRIDE - 2.0))
-                .height(Size::px(ASK_SITE_BUTTON_STRIDE - 2.0))
-                .center()
-                .corner_radius(CornerRadius::new_all(5.0))
-                .background(background)
-                .border(Border::new().width(1.0).alignment(BorderAlignment::Inner).fill(border))
-                .cursor(CursorIcon::Pointer)
-                .on_pointer_enter(move |_| {
-                    let mut stack = active_stack.write();
-                    if stack.len() <= depth {
-                        stack.resize(depth + 1, None);
-                    }
-                    stack[depth] = Some(idx);
-                })
-                .on_press(move |_| {
-                    if let Some(pick) = &on_pick {
-                        pick.call(site_id.clone());
-                    }
-                })
-                .child(logo)
-                .into_element(),
-        )
+        let mut btn = rect()
+            .key(idx)
+            .a11y_role(AccessibilityRole::MenuItemRadio)
+            .a11y_alt(if checked {
+                format!("{}, asked", item.label)
+            } else {
+                item.label.clone()
+            })
+            .height(Size::px(ASK_SITE_BUTTON_STRIDE - 2.0))
+            .center()
+            .corner_radius(CornerRadius::new_all(5.0))
+            .background(background)
+            .border(Border::new().width(1.0).alignment(BorderAlignment::Inner).fill(border))
+            .cursor(CursorIcon::Pointer)
+            .on_pointer_enter(move |_| {
+                let mut stack = active_stack.write();
+                if stack.len() <= depth {
+                    stack.resize(depth + 1, None);
+                }
+                stack[depth] = Some(idx);
+            })
+            .on_press(move |_| {
+                if let Some(pick) = &on_pick {
+                    pick.call(site_id.clone());
+                }
+            })
+            .child(content);
+        if is_all {
+            btn = btn.padding(Gaps::new(0.0, 6.0, 0.0, 6.0));
+        } else {
+            btn = btn.width(Size::px(ASK_SITE_BUTTON_STRIDE - 2.0));
+        }
+        Some(btn.into_element())
     });
     rect()
         .key("ask-sites")

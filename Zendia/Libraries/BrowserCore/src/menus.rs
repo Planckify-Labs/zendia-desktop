@@ -845,11 +845,19 @@ pub fn builtin_app_menu_entries(vim_mode_enabled: bool) -> Vec<MenuEntry> {
 pub const TAB_ASK_MENU_ID: &str = "zendia.tab.ask";
 /// Id of the page context menu's Ask submenu.
 pub const PAGE_ASK_MENU_ID: &str = "zendia.page.ask";
+/// Synthetic site id representing "All" chat sites in the Ask submenu's site row.
+pub const ASK_ALL_SITE_ID: &str = "*";
+/// Id of the Language radio submenu inside the Page Ask menu.
+pub const ASK_LANGUAGE_MENU_ID: &str = "zendia.page.ask.language";
 /// Group of the row of chat sites at the top of an Ask submenu.
 const ASK_SITES_GROUP: &str = "ask_sites";
 
 fn tab_ask_label(chat_site_name: &str) -> String {
     format!("Ask {chat_site_name} About This Tab")
+}
+
+fn multi_tab_ask_label(chat_site_name: &str, count: usize) -> String {
+    format!("Ask {chat_site_name} About {count} Tabs")
 }
 
 fn page_ask_label(chat_site_name: &str) -> String {
@@ -868,7 +876,7 @@ fn ask_site_entries(
     if chat_sites.len() < 2 {
         return Vec::new();
     }
-    chat_sites
+    let mut entries: Vec<MenuEntry> = chat_sites
         .iter()
         .zip(0..)
         .map(|(site, order)| MenuEntry {
@@ -888,7 +896,28 @@ fn ask_site_entries(
                 order,
             )
         })
-        .collect()
+        .collect();
+    if ask_menu_id == PAGE_ASK_MENU_ID {
+        let order = entries.len() as i32;
+        entries.push(MenuEntry {
+            command_args: vec![("site_id".to_string(), ASK_ALL_SITE_ID.to_string())],
+            kind: MenuEntryKind::Checkable {
+                checked: active_site_id == ASK_ALL_SITE_ID,
+            },
+            keeps_menu_open: true,
+            ..child_entry(
+                &format!("{ask_menu_id}.site.all"),
+                ask_menu_id,
+                location,
+                "All",
+                None,
+                "",
+                ASK_SITES_GROUP,
+                order,
+            )
+        });
+    }
+    entries
 }
 
 /// Returns the chat site that `item` picks when it is in an Ask submenu's row of sites.
@@ -917,8 +946,33 @@ fn ask_site_icon_token(chat_sites: &[ChatSite], chat_site_id: &str) -> String {
     format!("chat-site:{icon}")
 }
 
-/// Points the Ask submenus among `items` at `site`: relabels them, checks `site` in their row of sites and sends their
-/// prompts to it.
+/// Returns the English display name of the language if `item` is a radio entry in the Ask language submenu.
+pub fn ask_language_pick(item: &ResolvedMenuItem) -> Option<&str> {
+    item.id
+        .as_str()
+        .strip_prefix(ASK_LANGUAGE_MENU_ID)
+        .filter(|rest| rest.starts_with('.'))?;
+    item.command_args
+        .iter()
+        .find(|(key, _)| key == "lang_name")
+        .map(|(_, value)| value.as_str())
+}
+
+fn set_site_id_recursive(items: &mut [ResolvedMenuItem], site_id: &str) {
+    for child in items {
+        if child.command == "webchat.ask" {
+            for (key, value) in &mut child.command_args {
+                if key == "site_id" {
+                    *value = site_id.to_string();
+                }
+            }
+        }
+        set_site_id_recursive(&mut child.children, site_id);
+    }
+}
+
+/// Points the Ask submenus among `items` at `site`: relabels them, updates their site icon, checks `site` in their
+/// row of sites and sends their prompts to it.
 pub fn retarget_ask_menu(items: &mut [ResolvedMenuItem], site: &ChatSite) {
     for item in items {
         item.label = match item.id.as_str() {
@@ -932,14 +986,62 @@ pub fn retarget_ask_menu(items: &mut [ResolvedMenuItem], site: &ChatSite) {
                 child.kind = MenuEntryKind::Checkable {
                     checked: picked == site.id,
                 };
-            } else if child.command == "webchat.ask" {
-                for (key, value) in &mut child.command_args {
-                    if key == "site_id" {
-                        *value = site.id.0.clone();
-                    }
+            }
+        }
+        set_site_id_recursive(&mut item.children, &site.id.0);
+    }
+}
+
+/// Points the Page Ask submenu among `items` at every chat site (`"*"`): updates the label to `"Ask Every Chat Site"`,
+/// checks the `"All"` site-row button, and updates prompt `site_id` args to `"*"`.
+pub fn retarget_ask_menu_all(items: &mut [ResolvedMenuItem]) {
+    for item in items {
+        if item.id.as_str() != PAGE_ASK_MENU_ID {
+            continue;
+        }
+        item.label = "Ask Every Chat Site".to_string();
+        item.icon = None;
+        for child in &mut item.children {
+            if let Some(picked) = ask_site_pick(child) {
+                child.kind = MenuEntryKind::Checkable {
+                    checked: picked.0 == ASK_ALL_SITE_ID,
+                };
+            }
+        }
+        set_site_id_recursive(&mut item.children, ASK_ALL_SITE_ID);
+    }
+}
+
+/// Relabels all language-aware Ask prompts and updates the `"Language: <lang>"` radio submenu in place (`AM-05`).
+pub fn relabel_ask_language(items: &mut [ResolvedMenuItem], lang_name: &str) {
+    for item in items {
+        if item.id.as_str() == ASK_LANGUAGE_MENU_ID {
+            item.label = format!("Language: {lang_name}");
+            for child in &mut item.children {
+                if let Some(name) = ask_language_pick(child) {
+                    child.kind = MenuEntryKind::Checkable {
+                        checked: name == lang_name,
+                    };
+                }
+            }
+            continue;
+        }
+        if let Some((_, template)) = item.command_args.iter().find(|(k, _)| k == "label_template").cloned() {
+            item.label = template.replace("{{lang}}", lang_name);
+        }
+        if let Some(prompt_template) = item
+            .command_args
+            .iter()
+            .find(|(k, _)| k == "prompt_template")
+            .map(|(_, v)| v.clone())
+        {
+            for (k, v) in &mut item.command_args {
+                if k == "prompt" {
+                    *v = prompt_template.replace("{{lang}}", lang_name);
                 }
             }
         }
+        relabel_ask_language(&mut item.children, lang_name);
     }
 }
 
@@ -1506,12 +1608,71 @@ pub fn build_tab_context_menu(
     tab_id: TabId,
     key_table: Option<&KeyTable>,
 ) -> Vec<ResolvedMenuItem> {
+    build_tab_context_menu_for_tabs(model, &[tab_id], key_table)
+}
+
+/// Resolves the tab context menu for one or more selected tabs (`AM-06`: multi-tab Ask prompts when `tab_ids.len() > 1`).
+pub fn build_tab_context_menu_for_tabs(
+    model: &BrowserModel,
+    tab_ids: &[TabId],
+    key_table: Option<&KeyTable>,
+) -> Vec<ResolvedMenuItem> {
+    let tab_id = tab_ids.first().copied().or(model.active_tab).unwrap_or(TabId(0));
     let mut items = resolve_contributed_menu(
         &model.contributions.menu_entries,
         MenuLocation::TabContext,
         key_table,
         TAB_CONTEXT_GROUPS,
     );
+    if tab_ids.len() > 1 {
+        let site_id = model.active_chat_site().map(|s| s.id.0.as_str()).unwrap_or("chatgpt");
+        let site_name = model.active_chat_site().map(|s| s.name.as_str()).unwrap_or("ChatGPT");
+        if let Some(ask) = items.iter_mut().find(|item| item.id.as_str() == TAB_ASK_MENU_ID) {
+            ask.label = multi_tab_ask_label(site_name, tab_ids.len());
+            let site_row: Vec<ResolvedMenuItem> = ask
+                .children
+                .iter()
+                .take_while(|child| ask_site_pick(child).is_some())
+                .cloned()
+                .collect();
+            let mut next_children = Vec::new();
+            if !site_row.is_empty() {
+                next_children.extend(site_row);
+                next_children.push(ResolvedMenuItem::separator("zendia.tab.ask.sites.sep"));
+            }
+            next_children.push(
+                ResolvedMenuItem::action(
+                    "zendia.tab.ask.summarize_each",
+                    "Summarize Each in English",
+                    "webchat.ask",
+                )
+                .with_arg("site_id", site_id)
+                .with_arg("prompt", "Summarize each of these pages in English"),
+            );
+            next_children.push(
+                ResolvedMenuItem::action("zendia.tab.ask.compare", "Compare in English", "webchat.ask")
+                    .with_arg("site_id", site_id)
+                    .with_arg("prompt", "Compare these pages in English"),
+            );
+            next_children.push(
+                ResolvedMenuItem::action("zendia.tab.ask.custom_multi", "Ask…", "webchat.ask")
+                    .with_arg("site_id", site_id)
+                    .with_arg("prompt", "Ask about these tabs"),
+            );
+            if model.chat_sites.len() > 1 {
+                next_children.push(ResolvedMenuItem::separator("zendia.tab.ask.every.sep"));
+                next_children.push(
+                    ResolvedMenuItem::action(
+                        "zendia.tab.ask.summarize_each.every",
+                        "Summarize Each in English: Every Site",
+                        "webchat.ask_all",
+                    )
+                    .with_arg("prompt", "Summarize each of these pages in English"),
+                );
+            }
+            ask.children = next_children;
+        }
+    }
     let tab = model.tab(tab_id);
     let essentials_count = model.essential_tabs().len();
     let tab_space = tab.and_then(|t| t.space_id).or(model.active_space);
@@ -2011,6 +2172,394 @@ fn add_copy_link_to_highlight_action(items: &mut Vec<ResolvedMenuItem>, request:
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AskTargetKind {
+    Editable,
+    Selection,
+    Video,
+    Image,
+    Link,
+    Page,
+}
+
+impl AskTargetKind {
+    fn submenu_label(self) -> &'static str {
+        match self {
+            Self::Editable | Self::Selection => "Selected Text",
+            Self::Video => "Video Frame",
+            Self::Image => "Image",
+            Self::Link => "Linked Page",
+            Self::Page => "This Page",
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Editable => "editable",
+            Self::Selection => "selection",
+            Self::Video => "video",
+            Self::Image => "image",
+            Self::Link => "link",
+            Self::Page => "page",
+        }
+    }
+}
+
+const ASK_LANGUAGES: &[(&str, &str, Option<&str>)] = &[
+    ("en", "English", None),
+    ("es", "Spanish", Some("Español")),
+    ("fr", "French", Some("Français")),
+    ("de", "German", Some("Deutsch")),
+    ("it", "Italian", Some("Italiano")),
+    ("pt", "Portuguese", Some("Português")),
+    ("nl", "Dutch", Some("Nederlands")),
+    ("ru", "Russian", Some("Русский")),
+    ("ja", "Japanese", Some("日本語")),
+    ("ko", "Korean", Some("한국어")),
+    ("zh-CN", "Chinese (Simplified)", Some("简体中文")),
+    ("zh-TW", "Chinese (Traditional)", Some("繁體中文")),
+    ("ar", "Arabic", Some("العربية")),
+    ("hi", "Hindi", Some("हिन्दी")),
+    ("tr", "Turkish", Some("Türkçe")),
+    ("pl", "Polish", Some("Polski")),
+    ("vi", "Vietnamese", Some("Tiếng Việt")),
+    ("id", "Indonesian", Some("Bahasa Indonesia")),
+];
+
+fn ask_kinds_for_request(request: &PageContextMenuRequest) -> Vec<AskTargetKind> {
+    let mut kinds = Vec::new();
+    let has_selection = request.selected_text.as_deref().is_some_and(|s| !s.trim().is_empty());
+    if has_selection {
+        kinds.push(if request.is_editable {
+            AskTargetKind::Editable
+        } else {
+            AskTargetKind::Selection
+        });
+    }
+    let is_video = request.media.as_ref().is_some_and(|m| m.is_video);
+    let is_image = request.kind == PageContextMenuKind::Image || request.has_image_bitmap;
+    if is_video {
+        kinds.push(AskTargetKind::Video);
+    } else if is_image {
+        kinds.push(AskTargetKind::Image);
+    }
+    if request
+        .link_url
+        .as_deref()
+        .is_some_and(|u| u.starts_with("http://") || u.starts_with("https://"))
+    {
+        kinds.push(AskTargetKind::Link);
+    }
+    if kinds.is_empty() || !request.is_editable {
+        kinds.push(AskTargetKind::Page);
+    }
+    // Media comes before non-editable selection when clicking directly on media (`ZendiaWebChatMenu.#kindsOf`).
+    if kinds.first() != Some(&AskTargetKind::Editable)
+        && (is_image || is_video)
+        && let Some(sel_pos) = kinds.iter().position(|k| *k == AskTargetKind::Selection)
+    {
+        kinds.remove(sel_pos);
+        kinds.insert(1.min(kinds.len()), AskTargetKind::Selection);
+    }
+    kinds
+}
+
+fn ask_prompt_item(
+    id: impl Into<String>,
+    label_template: &str,
+    prompt_template: &str,
+    site_id: &str,
+    lang: &str,
+) -> ResolvedMenuItem {
+    let mut item = ResolvedMenuItem::action(id, label_template.replace("{{lang}}", lang), "webchat.ask")
+        .with_arg("site_id", site_id)
+        .with_arg("prompt", prompt_template.replace("{{lang}}", lang));
+    if label_template.contains("{{lang}}") {
+        item = item
+            .with_arg("label_template", label_template)
+            .with_arg("prompt_template", prompt_template);
+    }
+    item
+}
+
+fn build_ask_kind_items(
+    prefix: &str,
+    kind: AskTargetKind,
+    site_id: &str,
+    selected_text: Option<&str>,
+    lang: &str,
+) -> Vec<ResolvedMenuItem> {
+    let mut out = Vec::new();
+    match kind {
+        AskTargetKind::Editable => {
+            out.push(ask_prompt_item(
+                format!("{prefix}.explain"),
+                "Explain in {{lang}}",
+                "Explain this in plain words in {{lang}}",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.translate"),
+                "Translate to {{lang}}",
+                "Translate this into {{lang}}",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.rewrite"),
+                "Rewrite",
+                "Rewrite this so it reads better",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.grammar"),
+                "Fix Spelling and Grammar",
+                "Fix the spelling and grammar of this",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.shorter"),
+                "Make Shorter",
+                "Make this shorter without losing anything that matters",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.longer"),
+                "Make Longer",
+                "Expand this with a little more detail",
+                site_id,
+                lang,
+            ));
+            let tones: Vec<ResolvedMenuItem> = ["Formal", "Friendly", "Confident", "Casual"]
+                .iter()
+                .map(|tone| {
+                    let lower = tone.to_ascii_lowercase();
+                    ask_prompt_item(
+                        format!("{prefix}.tone.{lower}"),
+                        tone,
+                        &format!("Rewrite this in a {lower} tone"),
+                        site_id,
+                        lang,
+                    )
+                })
+                .collect();
+            let mut tone_menu =
+                ResolvedMenuItem::action(format!("{prefix}.tone"), "Change Tone", "").with_kind(MenuEntryKind::Submenu);
+            tone_menu.children = tones;
+            out.push(tone_menu);
+        }
+        AskTargetKind::Selection => {
+            let word_count = selected_text.map(|t| t.split_whitespace().count()).unwrap_or(0);
+            out.push(ask_prompt_item(
+                format!("{prefix}.explain"),
+                "Explain in {{lang}}",
+                "Explain this in plain words in {{lang}}",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.summarize"),
+                "Summarize in {{lang}}",
+                "Summarize this in a few short bullet points in {{lang}}",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.translate"),
+                "Translate to {{lang}}",
+                "Translate this into {{lang}}",
+                site_id,
+                lang,
+            ));
+            if word_count > 0 && word_count <= 4 {
+                out.push(ask_prompt_item(
+                    format!("{prefix}.define"),
+                    "Define in {{lang}}",
+                    "Define this in two or three sentences in {{lang}}",
+                    site_id,
+                    lang,
+                ));
+            }
+            out.push(ask_prompt_item(
+                format!("{prefix}.factcheck"),
+                "Fact-Check in {{lang}}",
+                "Fact-check this with sources in {{lang}}",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.reply"),
+                "Draft a Reply",
+                "Draft a short, plain reply to this message",
+                site_id,
+                lang,
+            ));
+        }
+        AskTargetKind::Image | AskTargetKind::Video => {
+            out.push(ask_prompt_item(
+                format!("{prefix}.describe"),
+                "Describe in {{lang}}",
+                "Describe what this shows in {{lang}}",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.ocr"),
+                "Extract Text",
+                "Write out all the text in this image",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.translate_image"),
+                "Translate Text in Image to {{lang}}",
+                "Translate the text in this image into {{lang}}",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.explain_image"),
+                "Explain in {{lang}}",
+                "Explain what this is and what it means in {{lang}}",
+                site_id,
+                lang,
+            ));
+        }
+        AskTargetKind::Link => {
+            out.push(ask_prompt_item(
+                format!("{prefix}.summarize_link"),
+                "Summarize Linked Page in {{lang}}",
+                "Summarize this linked page in a few short bullet points in {{lang}}",
+                site_id,
+                lang,
+            ));
+        }
+        AskTargetKind::Page => {
+            out.push(ask_prompt_item(
+                format!("{prefix}.summarize_page"),
+                "Summarize Page in {{lang}}",
+                "Summarize this page in a few short bullet points in {{lang}}",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.key_points"),
+                "Key Points and Action Items in {{lang}}",
+                "List the key points and action items of this page in {{lang}}",
+                site_id,
+                lang,
+            ));
+            out.push(ask_prompt_item(
+                format!("{prefix}.translate_page"),
+                "Translate Page to {{lang}}",
+                "Translate this page into {{lang}}",
+                site_id,
+                lang,
+            ));
+        }
+    }
+    out.push(ask_prompt_item(
+        format!("{prefix}.custom"),
+        "Ask…",
+        &format!("Ask about this {}", kind.slug()),
+        site_id,
+        lang,
+    ));
+    out
+}
+
+fn build_ask_language_submenu(active_lang: &str) -> ResolvedMenuItem {
+    let mut menu = ResolvedMenuItem::action(ASK_LANGUAGE_MENU_ID, format!("Language: {active_lang}"), "")
+        .with_kind(MenuEntryKind::Submenu);
+    menu.children = ASK_LANGUAGES
+        .iter()
+        .map(|(code, name, native)| {
+            let label = match native {
+                Some(n) => format!("{name} \u{00b7} {n}"),
+                None => (*name).to_string(),
+            };
+            let mut item = ResolvedMenuItem::action(format!("{ASK_LANGUAGE_MENU_ID}.{code}"), label, "")
+                .with_kind(MenuEntryKind::Checkable {
+                    checked: *name == active_lang,
+                })
+                .with_arg("lang_code", *code)
+                .with_arg("lang_name", *name);
+            item.keeps_menu_open = true;
+            item
+        })
+        .collect();
+    menu
+}
+
+fn contextualize_page_ask_submenu(ask: &mut ResolvedMenuItem, request: &PageContextMenuRequest) {
+    let site_row: Vec<ResolvedMenuItem> = ask
+        .children
+        .iter()
+        .take_while(|child| ask_site_pick(child).is_some())
+        .cloned()
+        .collect();
+    let active_site_id = site_row
+        .iter()
+        .find(|child| matches!(child.kind, MenuEntryKind::Checkable { checked: true }))
+        .and_then(ask_site_pick)
+        .map(|id| id.0)
+        .or_else(|| ask.icon.clone())
+        .unwrap_or_else(|| "chatgpt".to_string());
+
+    let kinds = ask_kinds_for_request(request);
+    let lang = "English";
+    let mut children = Vec::new();
+    if !site_row.is_empty() {
+        children.extend(site_row);
+        children.push(ResolvedMenuItem::separator("zendia.page.ask.sites.sep"));
+    }
+
+    if let Some((&first, rest)) = kinds.split_first() {
+        children.extend(build_ask_kind_items(
+            &format!("zendia.page.ask.{}", first.slug()),
+            first,
+            &active_site_id,
+            request.selected_text.as_deref(),
+            lang,
+        ));
+        if !rest.is_empty() {
+            children.push(ResolvedMenuItem::separator("zendia.page.ask.secondary.sep"));
+            for &kind in rest {
+                let mut sub = ResolvedMenuItem::action(
+                    format!("zendia.page.ask.kind.{}", kind.slug()),
+                    kind.submenu_label(),
+                    "",
+                )
+                .with_kind(MenuEntryKind::Submenu);
+                sub.children = build_ask_kind_items(
+                    &format!("zendia.page.ask.kind.{}", kind.slug()),
+                    kind,
+                    &active_site_id,
+                    request.selected_text.as_deref(),
+                    lang,
+                );
+                children.push(sub);
+            }
+        }
+    }
+
+    children.push(ResolvedMenuItem::separator("zendia.page.ask.footer.sep"));
+    children.push(build_ask_language_submenu(lang));
+    let mut screen = ResolvedMenuItem::action("zendia.page.ask.region", "Ask About Part of the Screen…", "webchat.ask")
+        .with_arg("site_id", &active_site_id)
+        .with_arg("prompt", "Describe this part of the screen");
+    screen.icon = Some("screenshot".to_string());
+    children.push(screen);
+    children.push(
+        ResolvedMenuItem::action("zendia.page.ask.hint", "Shift-click to edit before sending", "").with_enabled(false),
+    );
+    ask.children = children;
+}
+
 fn add_contributed_page_entries(
     items: &mut Vec<ResolvedMenuItem>,
     request: &PageContextMenuRequest,
@@ -2022,13 +2571,17 @@ fn add_contributed_page_entries(
     if contributed.is_empty() {
         return;
     }
-    // Contextualize Zendia's split and Glance contributions: on a link they open the link; on the page itself, split
-    // view opens a new tab beside the page and Glance, which needs a link, is left out.
+    // Contextualize Zendia's Ask, split, and Glance contributions (`AM-05`).
     let link_url = request.link_url.as_deref();
     if link_url.is_none() {
         contributed.retain(|item| item.command != "glance.open");
     }
-    for item in &mut contributed {
+    let mut ask_idx = None;
+    for (idx, item) in contributed.iter_mut().enumerate() {
+        if item.id.as_str() == PAGE_ASK_MENU_ID {
+            contextualize_page_ask_submenu(item, request);
+            ask_idx = Some(idx);
+        }
         if item.command == "split.open_url" || item.command == "glance.open" {
             match link_url {
                 Some(url) => {
@@ -2046,6 +2599,17 @@ fn add_contributed_page_entries(
         {
             item.command_args.push(("tab_id".to_string(), tab_id.0.to_string()));
         }
+    }
+    if request.is_editable
+        && let Some(idx) = ask_idx
+    {
+        contributed.insert(
+            idx + 1,
+            with_optional_tab(
+                ResolvedMenuItem::action("zendia.page.put_back", "Put the Chat's Reply Here", "webchat.open"),
+                request.tab_id,
+            ),
+        );
     }
     items.push(ResolvedMenuItem::separator("ctx.contributions.sep"));
     items.extend(contributed);
@@ -2380,6 +2944,7 @@ mod tests {
         retarget_ask_menu(&mut items, claude);
         let ask = items.iter().find(|item| item.id.as_str() == TAB_ASK_MENU_ID).unwrap();
         assert_eq!(ask.label, "Ask Claude About This Tab");
+        assert_eq!(ask.icon.as_deref(), Some("chat-site:claude"));
         for child in &ask.children {
             if let Some(site_id) = ask_site_pick(child) {
                 assert_eq!(
@@ -2396,6 +2961,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn page_ask_menu_adapts_to_editable_selection_image_and_language() {
+        let model = crate::stub::sample_model(true);
+        let contribs = &model.contributions.menu_entries;
+
+        // Editable selection: Rewrite, Change Tone submenu, Put the Chat's Reply Here, All button, Language submenu.
+        let edit_req = PageContextMenuRequest {
+            kind: PageContextMenuKind::Page,
+            is_editable: true,
+            selected_text: Some("hello world".to_string()),
+            ..PageContextMenuRequest::default()
+        };
+        let mut edit_items = build_page_context_menu(&edit_req, contribs, None);
+        assert!(edit_items.iter().any(|i| i.label == "Put the Chat's Reply Here"));
+        let ask = edit_items.iter().find(|i| i.id.as_str() == PAGE_ASK_MENU_ID).unwrap();
+        assert_eq!(ask.icon.as_deref(), Some("chat-site:chatgpt"));
+        assert!(
+            ask.children
+                .iter()
+                .any(|c| ask_site_pick(c).is_some_and(|s| s.0 == ASK_ALL_SITE_ID))
+        );
+        assert!(ask.children.iter().any(|c| c.label == "Change Tone" && c.is_submenu()));
+        assert!(
+            ask.children
+                .iter()
+                .any(|c| c.label == "Language: English" && c.is_submenu())
+        );
+        assert!(ask.children.iter().any(|c| c.label == "Ask About Part of the Screen…"));
+        assert!(
+            ask.children
+                .iter()
+                .any(|c| c.label == "Shift-click to edit before sending" && !c.enabled)
+        );
+
+        // Retarget to All and relabel language to Japanese.
+        retarget_ask_menu_all(&mut edit_items);
+        relabel_ask_language(&mut edit_items, "Japanese");
+        let ask = edit_items.iter().find(|i| i.id.as_str() == PAGE_ASK_MENU_ID).unwrap();
+        assert_eq!(ask.label, "Ask Every Chat Site");
+        assert!(ask.children.iter().any(|c| c.label == "Language: Japanese"));
+        assert!(ask.children.iter().any(|c| c.label == "Translate to Japanese"));
+
+        // Short non-editable selection (<= 4 words) includes Define and This Page secondary submenu.
+        let sel_req = PageContextMenuRequest {
+            kind: PageContextMenuKind::Page,
+            selected_text: Some("ephemeral state".to_string()),
+            ..PageContextMenuRequest::default()
+        };
+        let sel_items = build_page_context_menu(&sel_req, contribs, None);
+        let sel_ask = sel_items.iter().find(|i| i.id.as_str() == PAGE_ASK_MENU_ID).unwrap();
+        assert!(sel_ask.children.iter().any(|c| c.label == "Define in English"));
+        assert!(
+            sel_ask
+                .children
+                .iter()
+                .any(|c| c.label == "This Page" && c.is_submenu())
+        );
+
+        // Multi-tab Ask menu (`AM-06`).
+        let multi = build_tab_context_menu_for_tabs(&model, &[model.tabs[0].id, model.tabs[1].id], None);
+        let tab_ask = multi.iter().find(|i| i.id.as_str() == TAB_ASK_MENU_ID).unwrap();
+        assert_eq!(tab_ask.label, "Ask ChatGPT About 2 Tabs");
+        assert!(tab_ask.children.iter().any(|c| c.label == "Summarize Each in English"));
+        assert!(tab_ask.children.iter().any(|c| c.label == "Compare in English"));
     }
 
     fn labels(items: &[ResolvedMenuItem]) -> Vec<&str> {

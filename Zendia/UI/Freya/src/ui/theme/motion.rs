@@ -60,6 +60,42 @@ pub const SWITCH_THUMB: Duration = Duration::from_millis(220);
 pub const SWITCH_BG: Duration = Duration::from_millis(160);
 /// Effort slider transition duration (`200 ms`).
 pub const EFFORT_SLIDE: Duration = Duration::from_millis(200);
+/// Model card entrance animation duration (`140 ms`, matching `zendia.css:2860`).
+pub const MODEL_CARD_IN: Duration = Duration::from_millis(140);
+/// Model card exit animation duration (`100 ms`, matching `zendia.css:2875`).
+pub const MODEL_CARD_OUT: Duration = Duration::from_millis(100);
+/// Model card page crossfade & height transition duration (`200 ms`, matching `ZendiaAgentModelCard.sys.mjs:47`).
+pub const MODEL_PAGE_FADE: Duration = Duration::from_millis(200);
+/// Model card context submenu hover linger before closing (`300 ms`, matching `ZendiaAgentModelCard.sys.mjs:46`).
+pub const MODEL_SUBMENU_LINGER: Duration = Duration::from_millis(300);
+/// Model card hover/chevron/unset-opacity transition duration (`150 ms`, matching `zendia.css:2908,2968,3046`).
+pub const MODEL_HOVER: Duration = Duration::from_millis(150);
+/// Instructions page slide-in duration (`300 ms`, matching `ZendiaAgentInstructionsView.sys.mjs:135`).
+pub const INSTRUCTIONS_IN: Duration = Duration::from_millis(300);
+/// Instructions page slide-out duration (`170 ms`, matching `ZendiaAgentInstructionsView.sys.mjs:135`).
+pub const INSTRUCTIONS_OUT: Duration = Duration::from_millis(170);
+/// Step group fold height & chevron rotation duration (`200 ms`, matching `zendia.css:3395,3405`).
+pub const STEP_FOLD: Duration = Duration::from_millis(200);
+/// Fresh step slide-in duration (`360 ms`, matching `zendia.css:3442`).
+pub const STEP_FRESH_IN: Duration = Duration::from_millis(360);
+/// Media warning horizontal nudge duration (`320 ms`, matching `zendia.css:3673`).
+pub const MEDIA_NUDGE: Duration = Duration::from_millis(320);
+/// Confirmation card shield breathing half-cycle (`900 ms`, matching `1.8 s` full cycle in `zendia.css:3578`).
+pub const CONFIRM_SHIELD_PULSE: Duration = Duration::from_millis(900);
+/// Dictation recording mic pulse cycle (`1600 ms`, matching `zendia.css:1912`).
+pub const MIC_PULSE: Duration = Duration::from_millis(1600);
+/// Dictation connecting mic breathing half-cycle (`1200 ms`, matching `zendia.css:1924`).
+pub const MIC_WAIT: Duration = Duration::from_millis(1200);
+/// Agents panel rotating working avatar ring full turn (`1100 ms`, matching `zendia.css:4750`).
+pub const AGENTS_RING_TURN: Duration = Duration::from_millis(1100);
+/// Agents panel attention dot & warning badge pulse half-cycle (`700 ms`, matching `1.4 s` full cycle in `zendia.css:4765`).
+pub const AGENTS_ATTENTION_PULSE: Duration = Duration::from_millis(700);
+/// Toolbar Chat / Web chat running status dot pulse half-cycle (`600 ms`, matching `1.2 s` full cycle in `zendia.css:200`).
+pub const TOOLBAR_DOT_PULSE: Duration = Duration::from_millis(600);
+/// Agents panel peek caret rotation duration (`150 ms`, matching `zendia.css:4947`).
+pub const PEEK_CARET_TURN: Duration = Duration::from_millis(150);
+/// Agents panel work-list progress bar width transition (`300 ms`, matching `zendia.css:4898`).
+pub const PROGRESS_BAR_WIDTH: Duration = Duration::from_millis(300);
 /// Statusline repositioning spring (`340 ms`).
 pub const STATUSLINE_MOVE: Duration = Duration::from_millis(340);
 /// Statusline pointer duck duration (`160 ms`).
@@ -388,6 +424,26 @@ pub fn zendia_switch_spring(progress: f32, _ease: Ease) -> f32 {
     cubic_bezier(0.34, 1.4, 0.64, 1.0, progress)
 }
 
+/// CSS default `ease` curve (`cubic-bezier(0.25, 0.1, 0.25, 1)`), used by model card open/close.
+pub fn css_ease_default(progress: f32, _ease: Ease) -> f32 {
+    cubic_bezier(0.25, 0.1, 0.25, 1.0, progress)
+}
+
+/// CSS `ease-out` curve (`cubic-bezier(0, 0, 0.58, 1)`), used by effort slider & model page fade.
+pub fn css_ease_out(progress: f32, _ease: Ease) -> f32 {
+    cubic_bezier(0.0, 0.0, 0.58, 1.0, progress)
+}
+
+/// Material/UI hover curve (`cubic-bezier(0.4, 0, 0.2, 1)`), used by model card rows & opacity transitions.
+pub fn css_ease_standard(progress: f32, _ease: Ease) -> f32 {
+    cubic_bezier(0.4, 0.0, 0.2, 1.0, progress)
+}
+
+/// Step-group fold & chevron curve (`cubic-bezier(0.25, 1, 0.5, 1)`), matching `zendia.css:3395,3405`.
+pub fn css_ease_step_fold(progress: f32, _ease: Ease) -> f32 {
+    cubic_bezier(0.25, 1.0, 0.5, 1.0, progress)
+}
+
 pub const fn spring_fn() -> Function {
     Function::Fn(zendia_spring)
 }
@@ -406,6 +462,22 @@ pub const fn ease_rise_fn() -> Function {
 
 pub const fn switch_spring_fn() -> Function {
     Function::Fn(zendia_switch_spring)
+}
+
+pub const fn css_ease_default_fn() -> Function {
+    Function::Fn(css_ease_default)
+}
+
+pub const fn css_ease_out_fn() -> Function {
+    Function::Fn(css_ease_out)
+}
+
+pub const fn css_ease_standard_fn() -> Function {
+    Function::Fn(css_ease_standard)
+}
+
+pub const fn css_ease_step_fold_fn() -> Function {
+    Function::Fn(css_ease_step_fold)
 }
 
 #[cfg(test)]

@@ -109,19 +109,47 @@ pub fn normalize_chat_site_url(raw: &str) -> Option<String> {
     Some(with_scheme)
 }
 
+/// Normalizes a user-typed custom chat site URL, requiring `https://` (prepending it when no scheme is given).
+///
+/// Rejects `http://` and other non-HTTPS schemes (`WC-03`, matching `ZendiaWebChats.sys.mjs:124-134`).
+pub fn normalize_https_chat_site_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return None;
+    }
+    if trimmed.contains("://") && !trimmed.starts_with("https://") {
+        return None;
+    }
+    let with_scheme = if trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    let rest = with_scheme.strip_prefix("https://")?;
+    let host = rest.split(['/', '?', '#', ':']).next().unwrap_or("");
+    if host.is_empty() || !host.contains('.') || host.starts_with('.') || host.ends_with('.') {
+        return None;
+    }
+    Some(with_scheme)
+}
+
 /// Derives a readable display name and stable identifier slug for a custom chat site URL.
 pub fn derive_custom_site_identity(url: &str, explicit_name: Option<&str>) -> (ChatSiteId, String) {
-    let host = url
+    let raw_host = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url)
         .split(['/', '?', '#', ':'])
         .next()
         .unwrap_or("custom")
-        .strip_prefix("www.")
-        .unwrap_or(url);
+        .to_ascii_lowercase();
+    let slug_host = raw_host.strip_prefix("www.").unwrap_or(&raw_host);
+    let trimmed_host = slug_host
+        .strip_prefix("chat.")
+        .or_else(|| slug_host.strip_prefix("app."))
+        .unwrap_or(slug_host);
 
-    let host_label = host.split('.').next().unwrap_or("custom");
+    let host_label = trimmed_host.split('.').next().unwrap_or("custom");
     let display_name = explicit_name
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -134,7 +162,7 @@ pub fn derive_custom_site_identity(url: &str, explicit_name: Option<&str>) -> (C
             }
         });
 
-    let slug: String = host
+    let slug: String = slug_host
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -181,7 +209,30 @@ mod tests {
         assert_eq!(id.0, "custom-poe-com");
         assert_eq!(name, "Poe");
 
+        let (mistral_id, mistral_name) = derive_custom_site_identity("https://chat.mistral.ai", None);
+        assert_eq!(mistral_id.0, "custom-chat-mistral-ai");
+        assert_eq!(mistral_name, "Mistral");
+
+        let (app_id, app_name) = derive_custom_site_identity("https://app.openrouter.ai/chat", None);
+        assert_eq!(app_id.0, "custom-app-openrouter-ai");
+        assert_eq!(app_name, "Openrouter");
+
         let (_, explicit) = derive_custom_site_identity("https://chat.local.dev", Some("Local LLM"));
         assert_eq!(explicit, "Local LLM");
+    }
+
+    #[test]
+    fn normalize_https_rejects_plain_http() {
+        assert_eq!(
+            normalize_https_chat_site_url("chat.mistral.ai").as_deref(),
+            Some("https://chat.mistral.ai")
+        );
+        assert_eq!(
+            normalize_https_chat_site_url("https://chat.mistral.ai/chat").as_deref(),
+            Some("https://chat.mistral.ai/chat")
+        );
+        assert_eq!(normalize_https_chat_site_url("http://chat.mistral.ai"), None);
+        assert_eq!(normalize_https_chat_site_url("ftp://example.com"), None);
+        assert_eq!(normalize_https_chat_site_url("not a url"), None);
     }
 }
