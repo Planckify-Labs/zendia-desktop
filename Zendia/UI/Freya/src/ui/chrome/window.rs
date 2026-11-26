@@ -53,6 +53,9 @@ const COMPACT_SLACK: f32 = 24.0;
 const COMPACT_RADIUS: f32 = 8.0;
 /// Backdrop blur for the acrylic floating compact sidebar (`zen-compact-mode.css:38`).
 const COMPACT_SIDEBAR_BLUR: f32 = 42.0;
+/// Opacity of the vim mode tint on the floating compact sidebar, as the acrylic surface's `0.80`, a little more so the
+/// mode's color holds over a busy page.
+const COMPACT_TINT_ALPHA: f32 = 0.88;
 /// Hover delay before revealing hidden top-edge window controls in Single + Left mode (`vertical-tabs-topbar.inc.css:19`).
 const TOP_WINDOW_CONTROLS_DELAY: Duration = Duration::from_millis(200);
 /// Overlay level for compact floating chrome: sits above dock panels (`DOCK_OVERLAY_LEVEL = 1`) and below popups
@@ -488,6 +491,17 @@ impl Component for WindowShell {
         } else {
             BackdropEndpoints::lerp(&from_endpoints.read(), &to_endpoints.read(), t).to_gradient_with_mid(mid_stop)
         };
+        // With vim mode on, the floating compact sidebar carries the mode's tint as the window does: in compact mode it is
+        // most of the chrome there is, so a plain acrylic card would read as vim mode being off.
+        let compact_card_tint = (vim_mode_enabled && !inactive_dim).then(|| {
+            let endpoints = BackdropEndpoints::lerp(&from_endpoints.read(), &to_endpoints.read(), t);
+            BackdropEndpoints {
+                start: endpoints.start.with_alpha(COMPACT_TINT_ALPHA),
+                end: endpoints.end.with_alpha(COMPACT_TINT_ALPHA),
+                ..endpoints
+            }
+            .to_gradient()
+        });
         let third_stop_overlay = (!inactive_dim).then_some(overlay_stop).flatten().map(|tint| {
             let grad = LinearGradient::new()
                 .angle(180.0)
@@ -774,19 +788,22 @@ impl Component for WindowShell {
                 ResolvedScheme::Dark => Color::from_argb(38, 255, 255, 255),
                 ResolvedScheme::Light => Color::from_argb(30, 0, 0, 0),
             };
-            let mut card = rect()
+            let card = rect()
                 .height(Size::fill())
                 .corner_radius(CornerRadius::new_all(COMPACT_RADIUS))
-                .overflow(Overflow::Clip)
-                .background(acrylic_bg)
-                .border(
-                    Border::new()
-                        .width(1.0)
-                        .alignment(BorderAlignment::Inner)
-                        .fill(compact_border),
-                )
-                .shadow(Shadow::new().y(3.0).blur(8.0).color(Color::from_argb(61, 0, 0, 0)))
-                .child(sidebar.clone());
+                .overflow(Overflow::Clip);
+            let mut card = match compact_card_tint.clone() {
+                Some(tint) => card.background(tint),
+                None => card.background(acrylic_bg),
+            }
+            .border(
+                Border::new()
+                    .width(1.0)
+                    .alignment(BorderAlignment::Inner)
+                    .fill(compact_border),
+            )
+            .shadow(Shadow::new().y(3.0).blur(8.0).color(Color::from_argb(61, 0, 0, 0)))
+            .child(sidebar.clone());
             if theme.glass.blur > 0.0 {
                 card = card.backdrop_blur(COMPACT_SIDEBAR_BLUR);
             }
