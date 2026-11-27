@@ -371,6 +371,11 @@ WebContentView::WebContentView(QWidget* window, Optional<u64> hub_view_id, WebCo
         select_dropdown_closed(selected_item_id);
     };
 
+    on_show_validation_message = [this](Gfx::IntPoint position, Utf16String const& message) {
+        if (isVisible() && this->window()->isActiveWindow())
+            show_tooltip(map_point_to_global_position(position), qstring_from_utf16_string(message), *this);
+    };
+
     on_request_select_dropdown = [this](Gfx::IntPoint content_position, i32 minimum_width, Vector<Web::HTML::SelectItem> items) {
         // NB: The view has a native window of its own, which Qt refuses as the transient parent of a popup. The
         //     dropdown opens from the top-level window instead, which can change when the tab moves to another one.
@@ -382,6 +387,11 @@ WebContentView::WebContentView(QWidget* window, Optional<u64> hub_view_id, WebCo
 
 WebContentView::~WebContentView()
 {
+#if defined(Q_OS_MACOS)
+    // An assistive technology can still hold elements of this view's accessibility tree, which goes away with it.
+    uninstall_accessibility(this);
+#endif
+
 #ifdef LADYBIRD_QT_USE_IOSURFACE_LAYER
     destroy_iosurface_layer();
 #elif defined(LADYBIRD_QT_USE_VULKAN_WINDOW)
@@ -809,6 +819,9 @@ static bool is_browser_reserved_shortcut(QKeyEvent const& event)
         return true;
 
     if (modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && (key == Qt::Key_BracketLeft || key == Qt::Key_BracketRight))
+        return true;
+#else
+    if (modifiers == Qt::ControlModifier && key == Qt::Key_F4)
         return true;
 #endif
 
@@ -2625,6 +2638,13 @@ bool WebContentView::event(QEvent* event)
     if (event->type() == QEvent::ShortcutOverride) {
         auto* key_event = static_cast<QKeyEvent*>(event);
         if (is_browser_reserved_shortcut(*key_event)) {
+            event->ignore();
+            return false;
+        }
+
+        // Qt has no shortcuts for keys it cannot map, so there is nothing to override. Accepting one anyway can keep the
+        // platform from handling the key press as a system shortcut.
+        if (key_event->key() == Qt::Key_unknown) {
             event->ignore();
             return false;
         }

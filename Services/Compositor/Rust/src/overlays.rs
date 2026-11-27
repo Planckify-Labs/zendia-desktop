@@ -13,8 +13,9 @@ use libcompositing_rust::display_list::commands::{
     FillPath, FillRect, FontResourceId, OptionalFloatRect, PathPaintKind, ReplayLayer, StrokePath,
 };
 use libcompositing_rust::display_list::ffi_bytes::FfiBytes;
-use libcompositing_rust::display_list::replay::{
-    ListReplay, RecordsContext, ReplayFrame, ReplayPainter, replay_records,
+use libcompositing_rust::display_list::replay::{RecordsContext, ReplayFrame, ReplayPainter, replay_records};
+use libcompositing_rust::ipc_types::{
+    Compositing_PausedDebuggerOverlayAction, Compositing_PictureInPictureControl, Compositing_UIOverlays,
 };
 use libcompositing_rust::overlays::{
     PausedDebuggerOverlayGeometry, paused_debugger_overlay_geometry, picture_in_picture_controls_geometry,
@@ -25,9 +26,10 @@ use libcompositing_rust::time::MonotonicTime;
 use libcompositing_rust::visual_context::{TransformData, TransformDataRole, VisualContextTree};
 use libgfx_rust::path::Path;
 use libgfx_rust::{
-    CapStyle, Color, CompositingAndBlendingOperator, FloatMatrix4x4, FloatPoint, FloatRect, IntRect, IntSize,
-    JoinStyle, Orientation, ShouldAntiAlias, WindingRule, enclosing_int_rect,
+    CapStyle, Color, CompositingAndBlendingOperator, FloatMatrix4x4, FloatPoint, FloatRect, GlyphRunOrientation,
+    IntRect, IntSize, JoinStyle, ShouldAntiAlias, WindingRule, enclosing_int_rect,
 };
+use libipc_rust::wire::Utf8String;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PausedDebuggerOverlayAction {
@@ -76,13 +78,37 @@ pub struct UIOverlays {
     pub compositor_layers: Option<CompositorLayersOverlayState>,
 }
 
-/// What a new set of overlays changes of the frames.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UIOverlaysChange {
-    Nothing,
-    /// The compositor layers overlay is drawn over tiles that stay as they are, so the frame rasters nothing for it.
-    OnlyCompositorLayers,
-    RepaintsEverything,
+impl From<Compositing_UIOverlays> for UIOverlays {
+    fn from(overlays: Compositing_UIOverlays) -> Self {
+        let font_family_of = |font_family: Option<Utf8String>| {
+            font_family.map(|font_family| String::from_utf8_lossy(font_family.as_bytes()).into_owned())
+        };
+        Self {
+            paused_debugger: overlays.paused_debugger.map(|state| PausedDebuggerOverlayState {
+                font_family: font_family_of(state.font_family),
+                hovered_action: state.hovered_action.map(|action| match action {
+                    Compositing_PausedDebuggerOverlayAction::StepOver => PausedDebuggerOverlayAction::StepOver,
+                    Compositing_PausedDebuggerOverlayAction::Continue => PausedDebuggerOverlayAction::Continue,
+                }),
+            }),
+            picture_in_picture_controls: overlays.picture_in_picture_controls.map(|state| {
+                PictureInPictureControlsState {
+                    shown: state.shown,
+                    hovered_control: state.hovered_control.map(|control| match control {
+                        Compositing_PictureInPictureControl::BackToTab => PictureInPictureControl::BackToTab,
+                        Compositing_PictureInPictureControl::Close => PictureInPictureControl::Close,
+                    }),
+                }
+            }),
+            compositor_layers: overlays.compositor_layers.map(|state| CompositorLayersOverlayState {
+                font_family: font_family_of(state.font_family),
+                hidden_layer_ids: state.hidden_layer_ids,
+                selected_layer_ids: state.selected_layer_ids,
+                hovered_layer_id: state.hovered_layer_id,
+                raster_count_reset_generation: state.raster_count_reset_generation,
+            }),
+        }
+    }
 }
 
 /// A label of an overlay as the host shapes it: the font it resolved, in the overlays' resources, and where each glyph
@@ -130,25 +156,20 @@ impl ContextOverlays {
         &self.ui_overlays
     }
 
-    pub fn set_ui_overlays(&mut self, ui_overlays: UIOverlays, now: MonotonicTime) -> UIOverlaysChange {
+    /// Answers whether the overlays changed. A frame finds what that repaints by comparing what the overlays draw over
+    /// it with what they drew over the frame before.
+    pub fn set_ui_overlays(&mut self, ui_overlays: UIOverlays, now: MonotonicTime) -> bool {
         if self.ui_overlays == ui_overlays {
-            return UIOverlaysChange::Nothing;
+            return false;
         }
-        let only_compositor_layers_changed = UIOverlays {
-            compositor_layers: self.ui_overlays.compositor_layers.clone(),
-            ..ui_overlays.clone()
-        } == self.ui_overlays;
         self.ui_overlays = ui_overlays;
-        if only_compositor_layers_changed {
-            return UIOverlaysChange::OnlyCompositorLayers;
-        }
         let shows_picture_in_picture_controls = self
             .ui_overlays
             .picture_in_picture_controls
             .is_some_and(|controls| controls.shown);
         self.picture_in_picture_controls_fade
             .fade_to(if shows_picture_in_picture_controls { 1.0 } else { 0.0 }, now);
-        UIOverlaysChange::RepaintsEverything
+        true
     }
 
     pub fn set_compositor_layers_overlay_needs_frames_until(&mut self, until: Option<MonotonicTime>) {
@@ -171,17 +192,9 @@ impl ContextOverlays {
         true
     }
 
-    /// Advances the fades to a frame, answering what of the viewport they repaint.
-    pub fn advance_fades(
-        &mut self,
-        frame_time: MonotonicTime,
-        viewport_size: IntSize,
-        device_pixel_ratio: f64,
-    ) -> Option<IntRect> {
-        if !self.picture_in_picture_controls_fade.advance_to(frame_time) {
-            return None;
-        }
-        Some(picture_in_picture_controls_geometry(viewport_size, device_pixel_ratio).buttons_bounds())
+    /// Advances the fades to a frame, answering whether any of them changed.
+    pub fn advance_fades(&mut self, frame_time: MonotonicTime) -> bool {
+        self.picture_in_picture_controls_fade.advance_to(frame_time)
     }
 
     /// What the overlays draw over a frame of the page.
@@ -335,10 +348,9 @@ impl OverlayRecords {
 
 fn replay_overlay_records(records: &AlignedRecords, painter: &mut impl ReplayPainter) {
     OVERLAY_TREE.with(|tree| {
-        let list = ListReplay::new(tree);
         let frame = ReplayFrame::unscrolled(0);
         let context = RecordsContext {
-            list_replay: &list,
+            tree,
             frame: &frame,
             to_root_matrix_of_inline_clip_space: &|_| None,
         };
@@ -350,19 +362,43 @@ impl OverlayPicture {
     /// Whether the overlays draw over a frame what `other` draws over its frame, but for the overlay of the compositor's
     /// layers.
     pub fn draws_same_as(&self, other: &OverlayPicture) -> bool {
-        let picture_in_picture_controls_draw_the_same =
-            match (&self.picture_in_picture_controls, &other.picture_in_picture_controls) {
-                (Some(controls), Some(other_controls)) => {
-                    controls.opacity == other_controls.opacity
-                        && controls.bounds == other_controls.bounds
-                        && controls.records.as_bytes() == other_controls.records.as_bytes()
-                }
-                (None, None) => true,
-                _ => false,
-            };
         self.bounds == other.bounds
-            && self.ui_overlay_records.as_bytes() == other.ui_overlay_records.as_bytes()
-            && picture_in_picture_controls_draw_the_same
+            && self.ui_overlay_records_draw_same_as(other)
+            && self.picture_in_picture_controls_draw_same_as(other)
+    }
+
+    /// What of the viewport the overlays draw otherwise than over the frame `latest`, but for the overlay of the
+    /// compositor's layers.
+    pub fn damage_since(&self, latest: &OverlayPicture) -> IntRect {
+        if !self.ui_overlay_records_draw_same_as(latest) {
+            return self.bounds.united(latest.bounds);
+        }
+        if self.picture_in_picture_controls_draw_same_as(latest) {
+            return IntRect::default();
+        }
+        let bounds_of_picture_in_picture_controls = |picture: &OverlayPicture| {
+            picture
+                .picture_in_picture_controls
+                .as_ref()
+                .map_or_else(IntRect::default, |controls| controls.bounds)
+        };
+        bounds_of_picture_in_picture_controls(self).united(bounds_of_picture_in_picture_controls(latest))
+    }
+
+    fn ui_overlay_records_draw_same_as(&self, other: &OverlayPicture) -> bool {
+        self.ui_overlay_records.as_bytes() == other.ui_overlay_records.as_bytes()
+    }
+
+    fn picture_in_picture_controls_draw_same_as(&self, other: &OverlayPicture) -> bool {
+        match (&self.picture_in_picture_controls, &other.picture_in_picture_controls) {
+            (Some(controls), Some(other_controls)) => {
+                controls.opacity == other_controls.opacity
+                    && controls.bounds == other_controls.bounds
+                    && controls.records.as_bytes() == other_controls.records.as_bytes()
+            }
+            (None, None) => true,
+            _ => false,
+        }
     }
 
     /// Paints the overlays over a frame.
@@ -552,7 +588,7 @@ impl OverlayRecorder<'_> {
                 translation: FloatPoint::default(),
                 scale,
                 color,
-                orientation: Orientation::Horizontal,
+                orientation: GlyphRunOrientation::Horizontal,
                 font_smoothing: 0,
             },
             &inline_data,

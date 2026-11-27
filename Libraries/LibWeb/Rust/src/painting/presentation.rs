@@ -37,6 +37,7 @@ use libgfx_rust::font::FontHandle;
 use libgfx_rust::image_frame::ImageFrameHandle;
 use libipc_rust::wire::{Decode, Decoder};
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// What presented a navigable's last frame: the recording of a frame a rendering update committed, or a tick of the
@@ -200,6 +201,7 @@ struct DisplayListUpdate {
     visual_context_tree: Arc<VisualContextTree>,
     resources: DrawnResources,
     scroll_state: ScrollStateSnapshot,
+    keyboard_scroll_state: Compositing_KeyboardScrollState,
 }
 
 struct VisualContextTreeUpdate {
@@ -210,6 +212,7 @@ struct VisualContextTreeUpdate {
 }
 
 struct ScrollStateUpdate {
+    visual_context_tree_structural_epoch: u64,
     scroll_state: ScrollStateSnapshot,
     keyboard_scroll_state: Compositing_KeyboardScrollState,
 }
@@ -217,7 +220,6 @@ struct ScrollStateUpdate {
 pub(crate) fn empty_keyboard_scroll_state() -> Compositing_KeyboardScrollState {
     Compositing_KeyboardScrollState {
         generation: 0,
-        visual_context_tree_structural_epoch: 0,
         target: None,
         page_scroll_distance: 0.0,
         arrow_scroll_distance: 0.0,
@@ -234,7 +236,6 @@ fn empty_async_scrolling_metadata() -> Compositing_AsyncScrollingMetadata {
         viewport_keeps_horizontal_scrolls: false,
         viewport_keeps_vertical_scrolls: false,
         device_pixels_per_css_pixel: 1.0,
-        keyboard_scroll_state: empty_keyboard_scroll_state(),
     }
 }
 
@@ -305,19 +306,10 @@ impl PresenterState {
     ) -> CompositorFrame {
         // Keyboard eligibility belongs to this publication, not to the cached paint commands. Refresh it even if recording
         // was skipped or repeated the display list, and send it with the corresponding scroll state.
-        let display_list_output = published
-            .or(self
-                .compositor_display_list
-                .as_ref()
-                .map(|display_list| &display_list.output))
-            .cloned();
         let mut keyboard_scroll_state = empty_keyboard_scroll_state();
         if let Some(sealed_state) = &seal.keyboard_scroll_state {
             keyboard_scroll_state = sealed_state.clone();
             self.last_keyboard_scroll_state_generation = Some(sealed_state.generation);
-            keyboard_scroll_state.visual_context_tree_structural_epoch = display_list_output
-                .as_ref()
-                .map_or(0, |output| output.recorded_structural_epoch);
         }
 
         self.last_frame_presented_by = Some(seal.presented_by);
@@ -343,17 +335,17 @@ impl PresenterState {
                 fonts: command_resources.fonts.values().cloned().collect(),
                 image_frames,
             };
-            let mut async_scrolling_metadata = output
+            let async_scrolling_metadata = output
                 .async_scrolling_metadata
                 .clone()
                 .unwrap_or_else(empty_async_scrolling_metadata);
-            async_scrolling_metadata.keyboard_scroll_state = keyboard_scroll_state;
             frame.display_list_update = Some(DisplayListUpdate {
                 properties: display_list_properties_of(&output),
                 async_scrolling_metadata,
                 visual_context_tree: visual_context_tree.clone(),
                 resources,
                 scroll_state: scroll_state.clone(),
+                keyboard_scroll_state,
                 output: output.clone(),
             });
             self.compositor_display_list = Some(CompositorDisplayList {
@@ -390,6 +382,7 @@ impl PresenterState {
             });
         } else {
             frame.scroll_state_update = Some(ScrollStateUpdate {
+                visual_context_tree_structural_epoch: visual_context_tree.structural_epoch,
                 scroll_state: scroll_state.clone(),
                 keyboard_scroll_state,
             });
@@ -799,7 +792,7 @@ fn layer_plan_made_from(display_list_id: u64, inputs: InputsOfLayerPlan) -> Laye
             display_list_id,
             viewport_rect: inputs.viewport_rect(),
             note_lines: planned.note_lines_for_layers_overlay(),
-            stack: planned.stack,
+            stack: planned.stack_on_wire,
         }),
         inputs,
     }
@@ -869,6 +862,7 @@ fn post_frame_through(
                     display_list,
                     visual_context_tree: update.visual_context_tree,
                     scroll_state: update.scroll_state,
+                    keyboard_scroll_state: update.keyboard_scroll_state,
                     layer_plan: layer_plan.as_ref().map(LayerPlanSent::on_wire),
                 };
                 if !poster.post(message) {
@@ -915,6 +909,7 @@ fn post_frame_through(
         let layer_plan = sent.layer_plan_for_scroll_state(&update.scroll_state, viewport_rect_of_frame);
         let message = UpdateScrollState {
             context_id,
+            visual_context_tree_structural_epoch: update.visual_context_tree_structural_epoch,
             scroll_state: update.scroll_state,
             keyboard_scroll_state: update.keyboard_scroll_state,
             layer_plan: layer_plan.as_ref().map(LayerPlanSent::on_wire),
@@ -954,14 +949,9 @@ pub extern "C" fn navigable_presenter_create() -> *const NavigablePresenter {
 }
 
 /// Gives up a reference to `presenter`.
-///
-/// # Safety
-///
-/// `presenter` must be a reference to a presenter the caller holds.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn navigable_presenter_release(presenter: *const NavigablePresenter) {
-    // SAFETY: Guaranteed by the caller.
-    drop(unsafe { Arc::from_raw(presenter) });
+pub extern "C" fn navigable_presenter_release(presenter: crate::css::ffi_support::OwnedArc<NavigablePresenter>) {
+    drop(presenter);
 }
 
 /// Writes the paint config of the display list the compositor context holds to `out`, and answers whether it holds one.
@@ -998,6 +988,39 @@ pub extern "C" fn navigable_presenter_forget_compositor_display_list(presenter: 
     let mut state = presenter.state();
     state.compositor_display_list_paint_config = None;
     state.compositor_display_list = None;
+}
+
+/// Writes the scroll positions the window of the display list the navigable's compositor context holds was placed at
+/// to `receiver` through `write`, for a test: one `(x, y)` in CSS pixels per scroller that was scrolled, in the order
+/// of their nodes, and nothing where the list has no window.
+///
+/// # Safety
+/// `write` must be safe to call with `receiver` and a pointer to `byte_count` bytes that live for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn navigable_presenter_display_list_window_scroll_positions_for_testing(
+    presenter: &NavigablePresenter,
+    receiver: *mut c_void,
+    write: unsafe extern "C" fn(*mut c_void, *const u8, usize),
+) {
+    let state = presenter.state();
+    let window = state
+        .compositor_display_list
+        .as_ref()
+        .and_then(|display_list| display_list.output.window.as_deref());
+    let positions: Vec<String> = window
+        .into_iter()
+        .flat_map(|window| {
+            let scale = window.device_pixels_per_css_pixel as f32;
+            window
+                .scroll_offsets
+                .iter()
+                .filter(|offset| offset.x != 0.0 || offset.y != 0.0)
+                .map(move |offset| format!("({}, {})", 0.0 - offset.x / scale, 0.0 - offset.y / scale))
+        })
+        .collect();
+    let positions = positions.join(" ");
+    // SAFETY: The caller keeps `write` callable with `receiver`, and the bytes live until it returns.
+    unsafe { write(receiver, positions.as_ptr(), positions.len()) };
 }
 
 /// What presented the navigable's last frame.

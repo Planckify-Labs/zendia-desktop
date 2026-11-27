@@ -40,6 +40,7 @@ public:
     [[nodiscard]] NonnullRefPtr<Request> request() const { return m_request; }
     void set_request(NonnullRefPtr<Request> request) { m_request = move(request); }
     [[nodiscard]] GC::Ref<FetchController> controller() const;
+    [[nodiscard]] FetchControllerToken controller_token() const { return m_controller_token; }
     [[nodiscard]] FetchControlBlock& control_block() const { return *m_control_block; }
     [[nodiscard]] NonnullRefPtr<FetchTimingInfo> timing_info() const { return m_timing_info; }
     [[nodiscard]] LoaderConfig const& loader_config() const { return m_loader_config->config; }
@@ -51,9 +52,6 @@ public:
     [[nodiscard]] PreloadedResponseCandidate& preloaded_response_candidate() { return m_preloaded_response_candidate; }
     [[nodiscard]] PreloadedResponseCandidate const& preloaded_response_candidate() const { return m_preloaded_response_candidate; }
     void set_preloaded_response_candidate(PreloadedResponseCandidate preloaded_response_candidate) { m_preloaded_response_candidate = move(preloaded_response_candidate); }
-
-    [[nodiscard]] bool preload_reports_timing() const { return m_preload_reports_timing; }
-    void set_preload_reports_timing(bool value) { m_preload_reports_timing = value; }
 
     [[nodiscard]] bool is_aborted() const;
     [[nodiscard]] bool is_canceled() const;
@@ -112,9 +110,6 @@ private:
     // preloaded response candidate (default null)
     //     Null, "pending", or a response.
     PreloadedResponseCandidate m_preloaded_response_candidate;
-
-    // AD-HOC: Whether the preload whose response this fetch consumes reports its own timing to Resource Timing.
-    bool m_preload_reports_timing { false };
 
     // Non-spec process integration: a navigation response is retained while the UI process selects its document host.
     bool m_has_response_body_transfer_lease { false };

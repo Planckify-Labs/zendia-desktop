@@ -16,7 +16,7 @@
 
 namespace Web {
 
-ErrorOr<String> load_error_page(URL::URL const& url, StringView error_message)
+ErrorOr<String> load_error_page(URL::URL const& url, StringView error_message, MentionCertificateSetting mention_certificate_setting)
 {
     // Generate HTML error page from error template file
     // FIXME: Use an actual templating engine (our own one when it's built, preferably with a way to check these usages at compile time)
@@ -32,6 +32,19 @@ ErrorOr<String> load_error_page(URL::URL const& url, StringView error_message)
         failed_host = ByteString::formatted("{}:{}", failed_host, *url.port());
     generator.set("failed_host", escape_html_entities(failed_host));
     generator.set("error_message", escape_html_entities(error_message));
+    auto certificate_setting_hint = ""sv;
+    switch (mention_certificate_setting) {
+    case MentionCertificateSetting::No:
+        break;
+    case MentionCertificateSetting::SelfSigned:
+        certificate_setting_hint = "Advanced user? Turn on “Offer to trust self-signed certificates” in Settings, under Advanced."sv;
+        break;
+    case MentionCertificateSetting::Invalid:
+        certificate_setting_hint = "To be asked about certificates like this one too, turn on “Offer to trust any certificate that fails verification” in Settings, under Advanced."sv;
+        break;
+    }
+    generator.set("certificate_setting_hint", certificate_setting_hint);
+    generator.set("certificate_setting_hidden", certificate_setting_hint.is_empty() ? "hidden"sv : ""sv);
     generator.append(template_file->data());
     return TRY(String::from_utf8(generator.as_string_view()));
 }

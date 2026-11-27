@@ -38,6 +38,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -443,6 +444,74 @@ TEST_CASE(gpu_policy_refuses_path_permission_changes_without_crashing)
     EXPECT_EQ(metadata.st_mode & 0777, 0600u);
     VERIFY(close(fd) == 0);
     VERIFY(unlink(path) == 0);
+}
+
+TEST_CASE(gpu_policy_refuses_device_node_creation_without_crashing)
+{
+    char directory[] = "/tmp/ladybird-mknod-XXXXXX";
+    VERIFY(mkdtemp(directory));
+    auto path = ByteString::formatted("{}/nvidiactl", directory);
+
+    auto status = run_with_policy(
+        [](auto& policy) {
+            policy.allow_filesystem_writes();
+            policy.allow_gpu_device_operations();
+        },
+        [&] {
+#ifdef __NR_mknod
+            VERIFY(syscall(__NR_mknod, path.characters(), S_IFCHR | 0666, makedev(195, 255)) == -1);
+            VERIFY(errno == EPERM);
+#endif
+#ifdef __NR_mknodat
+            VERIFY(syscall(__NR_mknodat, AT_FDCWD, path.characters(), S_IFCHR | 0666, makedev(195, 255)) == -1);
+            VERIFY(errno == EPERM);
+#endif
+        });
+
+    EXPECT(WIFEXITED(status));
+    if (WIFEXITED(status))
+        EXPECT_EQ(WEXITSTATUS(status), 0);
+
+    struct stat metadata {};
+    EXPECT_EQ(lstat(path.characters(), &metadata), -1);
+    VERIFY(rmdir(directory) == 0);
+}
+
+TEST_CASE(common_runtime_refuses_memory_locking_without_crashing)
+{
+    auto status = run_with_policy(
+        [](auto&) { },
+        [] {
+            // Like libgcrypt's secure memory pool.
+            auto size = 0x8000uz;
+            auto* pool = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            VERIFY(pool != MAP_FAILED);
+#ifdef __NR_mlock
+            VERIFY(syscall(__NR_mlock, pool, size) == -1);
+            VERIFY(errno == EPERM);
+#endif
+#ifdef __NR_mlock2
+            VERIFY(syscall(__NR_mlock2, pool, size, 0) == -1);
+            VERIFY(errno == EPERM);
+#endif
+#ifdef __NR_mlockall
+            VERIFY(syscall(__NR_mlockall, MCL_CURRENT) == -1);
+            VERIFY(errno == EPERM);
+#endif
+#ifdef __NR_munlock
+            VERIFY(syscall(__NR_munlock, pool, size) == -1);
+            VERIFY(errno == EPERM);
+#endif
+#ifdef __NR_munlockall
+            VERIFY(syscall(__NR_munlockall) == -1);
+            VERIFY(errno == EPERM);
+#endif
+            VERIFY(munmap(pool, size) == 0);
+        });
+
+    EXPECT(WIFEXITED(status));
+    if (WIFEXITED(status))
+        EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
 TEST_CASE(readonly_open_policy_accepts_the_flags_opendir_and_libpulse_use)

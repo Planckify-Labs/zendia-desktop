@@ -99,6 +99,9 @@ pub struct IsolatedGroup {
 pub struct TileRaster {
     pub key: u64,
     pub size: IntSize,
+    /// How many raster pixels the tile has for each pixel of `size`: a power of two, at which the raster has a pixel
+    /// for each pixel of the canvas that shows it.
+    pub raster_scale: i32,
     pub cacheable: bool,
 }
 
@@ -110,6 +113,9 @@ pub struct VectorImagePlacement {
     pub vector_image_id: u64,
     pub rect: FloatRect,
     pub recorded_size: IntSize,
+    /// How many raster pixels a raster of the records has for each pixel of `recorded_size`: a power of two, at which
+    /// the raster has a pixel for each pixel of the canvas that shows it.
+    pub raster_scale: i32,
 }
 
 /// How the painter takes the records of an SVG image.
@@ -133,6 +139,7 @@ pub struct FfiRasterPainter {
     pub canvas_matrix: unsafe extern "C" fn(*mut c_void) -> FloatMatrix4x4,
     pub set_matrix: unsafe extern "C" fn(*mut c_void, *const FloatMatrix4x4),
     pub would_be_fully_clipped_by_painter: unsafe extern "C" fn(*mut c_void, IntRect) -> bool,
+    pub device_clip_bounds: unsafe extern "C" fn(*mut c_void) -> IntRect,
     pub push_clip: unsafe extern "C" fn(*mut c_void, *const ReplayClip),
     /// Takes the contours of the path, the identity of the path, and the fill rule.
     pub push_clip_path: unsafe extern "C" fn(*mut c_void, *const PathGeometryData, u64, WindingRule),
@@ -181,6 +188,11 @@ impl ReplayPainter for FfiRasterPainter {
     fn would_be_fully_clipped_by_painter(&mut self, rect: IntRect) -> bool {
         // SAFETY: The C++ painter answers synchronously.
         unsafe { (self.would_be_fully_clipped_by_painter)(self.context, rect) }
+    }
+
+    fn device_clip_bounds(&mut self) -> IntRect {
+        // SAFETY: The C++ painter answers synchronously.
+        unsafe { (self.device_clip_bounds)(self.context) }
     }
 
     fn push_clip(&mut self, clip: &ReplayClip) {

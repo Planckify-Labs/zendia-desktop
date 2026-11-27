@@ -70,6 +70,7 @@ function createRow(variable) {
     row.classList.add("config-row");
     row.classList.add("inline-container");
     row.classList.add("control-row");
+    row.classList.toggle("dependent", !!variable.dependsOn);
     row.dataset.filterText = `${variable.title} ${variable.description}`.toLowerCase();
 
     const title = document.createElement("p");
@@ -106,6 +107,10 @@ function loadConfigVariables(settings) {
         if (variable.name === "ui.toolbar.show_feedback_button") {
             return;
         }
+        // This one has its own switch on the Appearance tab.
+        if (variable.name === "ui.window.use_client_side_decorations") {
+            return;
+        }
 
         const previous = CONFIG_VARIABLES.get(variable.name);
         if (previous && JSON.stringify(previous.value) === JSON.stringify(variable.value)) {
@@ -120,6 +125,12 @@ function loadConfigVariables(settings) {
             existing.replaceWith(row);
         } else {
             configList.append(row);
+        }
+    });
+
+    CONFIG_VARIABLES.forEach(variable => {
+        if (variable.dependsOn) {
+            document.getElementById(variable.name).disabled = !CONFIG_VARIABLES.get(variable.dependsOn)?.value;
         }
     });
 

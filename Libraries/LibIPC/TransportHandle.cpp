@@ -57,7 +57,7 @@ ErrorOr<NonnullOwnPtr<Transport>> TransportHandle::create_transport() const
 {
     VERIFY(MACH_PORT_VALID(m_receive_right.port()));
     VERIFY(m_send_right.port() != MACH_PORT_NULL);
-    return make<Transport>(move(m_receive_right), move(m_send_right));
+    return Transport::create(move(m_receive_right), move(m_send_right));
 }
 
 ErrorOr<TransportHandlePair> TransportHandle::create_pair()
@@ -68,8 +68,8 @@ ErrorOr<TransportHandlePair> TransportHandle::create_pair()
     auto port_b_send_right = TRY(port_b_receive_right.insert_right(Core::MachPort::MessageRight::MakeSend));
 
     // Either end may be written to before the other has constructed its transport.
-    TransportMachPort::raise_receive_queue_limit(port_a_receive_right);
-    TransportMachPort::raise_receive_queue_limit(port_b_receive_right);
+    Transport::raise_receive_queue_limit(port_a_receive_right);
+    Transport::raise_receive_queue_limit(port_b_receive_right);
 
     return TransportHandlePair {
         TransportHandle { move(port_a_receive_right), move(port_b_send_right) },

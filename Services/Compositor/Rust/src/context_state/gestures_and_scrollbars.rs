@@ -33,6 +33,7 @@ impl ContextState {
         nested_context_regions: NestedContextRegions,
         scroll_chain: &[AsyncScrollNodeStableID],
     ) -> WheelHitTestResult {
+        self.prepare_wheel_hit_test_targets();
         let in_flight_destination_for = |state: &Self, stable_node_id| {
             if wheel_delta_precision == WheelDeltaPrecision::Discrete {
                 return state.in_flight_wheel_destination(stable_node_id);
@@ -41,16 +42,18 @@ impl ContextState {
         };
         for &stable_node_id in scroll_chain {
             if let Some(scroll_node_index) = self.async_scroll_tree.scroll_node_index_for_stable_id(stable_node_id) {
-                return self
-                    .async_scroll_tree
-                    .hit_test_result_for_scroll_node(scroll_node_index, delta, &|id| {
-                        in_flight_destination_for(self, id)
-                    });
+                return self.async_scroll_tree.hit_test_result_for_scroll_node(
+                    scroll_node_index,
+                    delta,
+                    &self.scroll_state_snapshot,
+                    &|id| in_flight_destination_for(self, id),
+                );
             }
         }
         let visual_context_tree = self.scene.visual_context_tree_for_compositing().clone();
         self.async_scroll_tree.hit_test_scroll_node_for_wheel(
             &visual_context_tree,
+            &self.scroll_state_snapshot,
             position,
             delta,
             &|id| in_flight_destination_for(self, id),
@@ -222,6 +225,7 @@ impl ContextState {
             state.boxes_in_user_scroll_gesture.push(id);
         }
         state.wheel_latched_scroller = self.wheel_gesture_routing.latched_scroller();
+        state.context_user_input_scroll_count = self.context_user_input_scroll_count;
         state
     }
 
@@ -283,7 +287,7 @@ impl ContextState {
             is_absolute_scroll,
         );
         self.scrollbar_press_scroll_operation = Some(operation_id);
-        Some(PendingFrame::repainting_changes(self.async_scrolling_viewport_rect))
+        Some(PendingFrame::within(self.async_scrolling_viewport_rect))
     }
 
     // https://source.chromium.org/chromium/chromium/src/+/main:cc/input/scroll_utils.cc
@@ -362,7 +366,7 @@ impl ContextState {
                 ScrollAnimationKind::SmoothScroll,
                 false,
             );
-            return Some(PendingFrame::repainting_changes(self.async_scrolling_viewport_rect));
+            return Some(PendingFrame::within(self.async_scrolling_viewport_rect));
         }
         self.cancel_smooth_scroll_taken_over_by_user_input(scrollbar.scroll_node_index);
         self.start_scrollbar_press_scroll(&node, old_scroll_offset, destination, false, now)
@@ -421,7 +425,7 @@ impl ContextState {
                 ScrollAnimationKind::SmoothScroll,
                 true,
             );
-            return Some(PendingFrame::repainting_changes(self.async_scrolling_viewport_rect));
+            return Some(PendingFrame::within(self.async_scrolling_viewport_rect));
         }
         if destination == old_scroll_offset {
             return None;
@@ -430,34 +434,20 @@ impl ContextState {
         if drag.is_press_beside_thumb {
             return self.start_scrollbar_press_scroll(&node, old_scroll_offset, destination, true, now);
         }
-        let new_scroll_offset = self.async_scroll_tree.set_scroll_offset(
+        self.move_scroller(
             scroll_node_index,
             dragged_to.scroll_offset,
-            self.scene.current_visual_context_tree(),
-            &mut self.scroll_state_snapshot,
-        );
-        self.note_user_input_scrolled(node.stable_node_id);
-        assert!(new_scroll_offset.is_some());
-        self.rebuild_wheel_hit_test_targets();
-        let mut scroll_offsets = Vec::new();
-        let new_scroll_offset = new_scroll_offset.unwrap();
-        scroll_offsets.push(AsyncScrollOffset {
-            stable_node_id: node.stable_node_id,
-            compositor_scroll_offset: new_scroll_offset,
-            unadopted_scroll_delta: new_scroll_offset - old_scroll_offset,
-            last_relative_scroll_delta: Default::default(),
-            visual_viewport_scale: None,
-            applied_scroll_request_id: 0,
-            user_input_scroll_count: 0,
-            context_user_input_scroll_count: 0,
-        });
-        self.store_pending_async_scroll_offsets(&scroll_offsets, None);
-        if !node.is_viewport {
-            return Some(PendingFrame::repainting_changes(self.async_scrolling_viewport_rect));
+            ScrollerMoveCause::ScrollbarThumbDrag,
+        )?;
+        self.resolve_stale_sticky_offsets();
+        Some(PendingFrame::within(self.async_scrolling_viewport_rect))
+    }
+
+    pub(super) fn prepare_wheel_hit_test_targets(&mut self) {
+        assert!(!self.sticky_offsets_are_stale);
+        if self.async_scroll_tree.cached_viewport_rects_are_stale() && self.scene.display_list().is_some() {
+            self.rebuild_wheel_hit_test_targets();
         }
-        self.async_scrolling_viewport_rect.x = new_scroll_offset.x as i32;
-        self.async_scrolling_viewport_rect.y = new_scroll_offset.y as i32;
-        Some(PendingFrame::repainting_everything(self.async_scrolling_viewport_rect))
     }
 
     pub(super) fn rebuild_wheel_hit_test_targets(&mut self) {
@@ -470,7 +460,7 @@ impl ContextState {
         );
     }
 
-    pub fn visual_animations_need_frame(&mut self, now: MonotonicTime) -> bool {
+    pub fn visual_animations_need_frame(&self, now: MonotonicTime) -> bool {
         self.scene
             .visual_animations_need_frame(&self.scroll_state_snapshot, self.viewport_size, now)
     }

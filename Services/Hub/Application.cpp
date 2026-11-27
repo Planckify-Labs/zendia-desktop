@@ -71,11 +71,14 @@ bool Application::ui_has_translator() const
 void Application::set_ui_info(Hub::UIInfo info)
 {
     auto scrollbar_track_press_jumps_changed = !m_ui_info.has_value() || m_ui_info->scrollbar_track_press_jumps != info.scrollbar_track_press_jumps;
+    auto scrollbars_always_shown_changed = !m_ui_info.has_value() || m_ui_info->scrollbars_always_shown != info.scrollbars_always_shown;
     auto prefers_reduced_motion_changed = !m_ui_info.has_value() || m_ui_info->prefers_reduced_motion != info.prefers_reduced_motion;
     auto prefers_more_contrast_changed = !m_ui_info.has_value() || m_ui_info->prefers_more_contrast != info.prefers_more_contrast;
     m_ui_info = move(info);
     if (scrollbar_track_press_jumps_changed)
         platform_scrollbar_track_press_behavior_changed();
+    if (scrollbars_always_shown_changed)
+        platform_scrollbar_visibility_changed();
     if (prefers_reduced_motion_changed)
         platform_motion_preference_changed();
     if (prefers_more_contrast_changed)
@@ -108,6 +111,8 @@ void Application::ui_did_start()
     for (auto const& handle : m_webdriver_windows_awaiting_ui)
         WebView::Application::notify_webdriver_window_created(handle);
     m_webdriver_windows_awaiting_ui.clear();
+    if (m_openssl_mismatch_awaiting_ui.has_value())
+        display_openssl_mismatch(m_openssl_mismatch_awaiting_ui.release_value());
 }
 
 void Application::set_active_view(Optional<u64> view_id)
@@ -245,6 +250,18 @@ void Application::display_error_dialog(StringView error_message) const
         ui->async_app_display_error_dialog(MUST(String::from_utf8(error_message)));
     else
         WebView::Application::display_error_dialog(error_message);
+}
+
+void Application::display_openssl_mismatch(PlatformFeatures::OpenSSLFacts const& facts)
+{
+    auto* ui = ConnectionFromUI::the();
+    if (!ui)
+        return;
+    if (!m_ui_did_start) {
+        m_openssl_mismatch_awaiting_ui = facts;
+        return;
+    }
+    ui->async_app_display_openssl_mismatch(facts.curl_version.value_or({}), facts.linked_version);
 }
 
 #if defined(LADYBIRD_HAS_UPDATE_CHECK)
@@ -593,6 +610,15 @@ bool Application::platform_scrollbar_track_press_jumps() const
     if (auto const* info = ui_info())
         return info->scrollbar_track_press_jumps;
     return WebView::Application::platform_scrollbar_track_press_jumps();
+}
+
+bool Application::platform_scrollbars_always_shown() const
+{
+    if (m_host)
+        return m_host->platform_scrollbars_always_shown();
+    if (auto const* info = ui_info())
+        return info->scrollbars_always_shown;
+    return WebView::Application::platform_scrollbars_always_shown();
 }
 
 bool Application::platform_prefers_reduced_motion() const

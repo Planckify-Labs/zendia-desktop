@@ -997,34 +997,46 @@ fn compute_backdrop_filter_data(
     })
 }
 
-pub(crate) struct MaskLayerPresenceEntry {
+pub(super) struct MaskLayerPresenceEntry {
     pub origin: super::MaskLayerOrigin,
     pub area: CssPixelRect,
     pub kind: libgfx_rust::MaskKind,
 }
 
-pub(crate) fn mask_layer_presence(
-    layout_arena: &impl PaintRead,
-    slot: NodeSlotId,
-    include_css_mask_layers: bool,
-) -> Vec<MaskLayerPresenceEntry> {
+/// The masks of the box at `slot`, outermost first. Gathering the facts of a box is the one place that asks: what
+/// records the content of the masks and what hit tests the box read the answer from there.
+pub(super) fn mask_layer_presence(layout_arena: &impl PaintRead, slot: NodeSlotId) -> Vec<MaskLayerPresenceEntry> {
     use super::MaskLayerOrigin;
     let mut layers = Vec::new();
-    if include_css_mask_layers {
-        let node = slot;
-        if let Some(style) = layout_arena.node_style_if_live(node)
-            && style_queries::mask_layers_have_image(style.mask())
-            && layout_arena
-                .node_kind_if_live(node)
-                .is_some_and(node_facts::kind_is_box)
-            && style_queries::establishes_stacking_context(layout_arena, node)
-        {
-            layers.push(MaskLayerPresenceEntry {
-                origin: MaskLayerOrigin::CssMaskLayers,
-                area: paintable_geometry::absolute_border_box_rect(layout_arena, slot),
-                kind: libgfx_rust::MaskKind::Alpha,
-            });
+    if let Some(style) = layout_arena.node_style_if_live(slot)
+        && style_queries::has_css_mask_image(style.mask())
+        && layout_arena
+            .node_kind_if_live(slot)
+            .is_some_and(node_facts::kind_is_box)
+        && style_queries::establishes_stacking_context(layout_arena, slot)
+    {
+        let mut area = paintable_geometry::absolute_border_box_rect(layout_arena, slot);
+        // NB: mask-border-outset can extend the mask border image area beyond the border box.
+        //     https://drafts.csswg.org/css-masking-1/#the-mask-border-outset
+        if style_queries::mask_border_has_image(style.mask()) {
+            use crate::painting::record::paint::{border, border_image};
+            let border_widths = border::present_css_border_widths(
+                style,
+                paintable_geometry::committed_border(layout_arena, slot),
+                border::ALL_PIECE_EDGES,
+            );
+            area.unite(border_image::nine_piece_image_area(
+                border_image::mask_border_values(style),
+                area,
+                border_widths,
+                border::ALL_PIECE_EDGES,
+            ));
         }
+        layers.push(MaskLayerPresenceEntry {
+            origin: MaskLayerOrigin::CssMaskLayers,
+            area,
+            kind: libgfx_rust::MaskKind::Alpha,
+        });
     }
     if layout_arena
         .node_kind_if_live(slot)

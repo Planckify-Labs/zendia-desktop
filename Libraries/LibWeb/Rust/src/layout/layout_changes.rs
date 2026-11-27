@@ -10,7 +10,7 @@
 use super::LayoutNodeArena;
 use super::math_formatting_context::FfiMathAttributeFacts;
 use super::node_data::{NodeFlag, NodeSlotId};
-use super::svg_formatting_context::{FfiFloatPoint, FfiSvgAttributeFacts};
+use super::svg_formatting_context::{FfiFloatPoint, FfiSvgAttributeFacts, FfiSvgTextPosition};
 use super::tree_mutation::{HostCalls, HostWorkDue, OwedHostWork};
 use super::used_values::FfiCssPixelPoint;
 use crate::css::css_pixels::CssPixelPoint;
@@ -95,6 +95,7 @@ pub(crate) enum LayoutChange {
         element: StyleNodeID,
         facts: Box<FfiSvgAttributeFacts>,
         points: Box<[FfiFloatPoint]>,
+        text_positions: Box<[FfiSvgTextPosition]>,
     },
     /// The parsed MathML attributes a MathML element published, which its layout reads.
     MathAttributeFacts {
@@ -302,8 +303,13 @@ impl LayoutChange {
             Self::SetIdentityInFocusedTextControl { node, value } => {
                 arena.set_identity_in_focused_text_control(node, value);
             }
-            Self::SvgAttributeFacts { element, facts, points } => {
-                arena.set_style_node_svg_attribute_facts(element, *facts, &points);
+            Self::SvgAttributeFacts {
+                element,
+                facts,
+                points,
+                text_positions,
+            } => {
+                arena.set_style_node_svg_attribute_facts(element, *facts, &points, &text_positions);
             }
             Self::MathAttributeFacts { element, facts } => arena.set_style_node_math_attribute_facts(element, *facts),
             Self::SvgStyleReferences { element, references } => {
@@ -414,7 +420,6 @@ impl LayoutWrite<'_> {
                 }
             }
             Self::DetachRemainingRowsForRemoval(nodes) => {
-                super::tree_builder::note_removed_list_entries(arena, nodes);
                 for node in nodes.iter().filter_map(|&node| StyleNodeID::from_raw(node)) {
                     super::tree_builder::detach_remaining_rows_for_removal(host_calls, arena, node);
                 }
@@ -614,31 +619,17 @@ pub extern "C" fn render_state_set_element_scroll_offset(host: &DocumentHost, el
 
 /// Publishes the writing suggestion showing after the caret: `remainder` is what it would add at `offset` in the text
 /// node `text`. A zero `text` publishes that none shows.
-///
-/// # Safety
-///
-/// `host` must be a live document host, on the document's thread, and `remainder` must point at `length` readable code
-/// units.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn render_state_set_writing_suggestion(
+pub extern "C" fn render_state_set_writing_suggestion(
     host: &DocumentHost,
     text: u32,
     offset: usize,
-    remainder: *const u16,
-    length: usize,
+    remainder: ak::Span<'_, u16>,
 ) {
-    let suggestion = StyleNodeID::from_raw(text).map(|text| {
-        let remainder: &[u16] = if length == 0 {
-            &[]
-        } else {
-            // SAFETY: Guaranteed by the caller.
-            unsafe { ak::slice_from_raw_parts(remainder, length) }
-        };
-        super::layout_node_arena::PublishedWritingSuggestion {
-            text,
-            offset,
-            remainder: remainder.to_vec(),
-        }
+    let suggestion = StyleNodeID::from_raw(text).map(|text| super::layout_node_arena::PublishedWritingSuggestion {
+        text,
+        offset,
+        remainder: remainder.as_slice().to_vec(),
     });
     queue(host, LayoutChange::SetWritingSuggestion(suggestion));
 }
@@ -670,13 +661,14 @@ pub extern "C" fn render_state_set_identity_in_focused_text_control(host: &Docum
 }
 
 /// Publishes what the SVG element `element` names parses to. A `<polyline>` or `<polygon>` passes its `points` list
-/// beside the facts, since it is the one geometry attribute that is not a fixed number of values.
+/// beside the facts, and a text positioning element passes its length lists.
 #[unsafe(no_mangle)]
 pub extern "C" fn render_state_set_svg_attribute_facts(
     host: &DocumentHost,
     element: u32,
     facts: FfiSvgAttributeFacts,
     points: ak::Span<'_, FfiFloatPoint>,
+    text_positions: ak::Span<'_, FfiSvgTextPosition>,
 ) {
     let Some(element) = StyleNodeID::from_raw(element) else {
         return;
@@ -685,6 +677,7 @@ pub extern "C" fn render_state_set_svg_attribute_facts(
         element,
         facts: Box::new(facts),
         points: points.as_slice().into(),
+        text_positions: text_positions.as_slice().into(),
     };
     queue(host, change);
 }

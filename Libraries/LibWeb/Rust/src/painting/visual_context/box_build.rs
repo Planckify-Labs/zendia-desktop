@@ -32,6 +32,7 @@ pub(crate) struct PaintableVisualContextAssignment {
     pub accumulated_visual_context: ContextRef,
     pub accumulated_visual_context_for_descendants: ContextRef,
     pub has_non_invertible_css_transform: bool,
+    pub hidden_by_empty_svg_mask_or_clip: bool,
     pub record: PaintableVisualContextRecord,
     pub node_handles: BoxVisualContextNodeHandles,
     /// The bounds of the SVG filter the box references, as the build gathered them, which the row takes as the
@@ -49,6 +50,7 @@ impl PaintableVisualContextAssignment {
             accumulated_visual_context: data.accumulated_visual_context,
             accumulated_visual_context_for_descendants: data.accumulated_visual_context_for_descendants,
             has_non_invertible_css_transform: data.has_flag(PaintableFlag::HasNonInvertibleCssTransform),
+            hidden_by_empty_svg_mask_or_clip: data.has_flag(PaintableFlag::HiddenByEmptySvgMaskOrClip),
             record,
             node_handles: BoxVisualContextNodeHandles::default(),
             gathered_svg_filter_bounds: None,
@@ -86,6 +88,10 @@ impl PaintableVisualContextAssignment {
             data.set_flag(
                 PaintableFlag::HasNonInvertibleCssTransform,
                 self.has_non_invertible_css_transform,
+            );
+            data.set_flag(
+                PaintableFlag::HiddenByEmptySvgMaskOrClip,
+                self.hidden_by_empty_svg_mask_or_clip,
             );
         }
         layout_arena.set_paintable_visual_context_record(self.slot, self.record, self.node_handles);
@@ -206,8 +212,10 @@ fn append_anchor_scroll_shift_nodes<Arena: PaintableRowsRead, Sink: VisualContex
     own_state
 }
 
-// Positioned descendants skip intermediate overflow clips. Share the new clip when
-// their spatial and clip chains coincide; otherwise append it under their own chain.
+// Positioned descendants skip intermediate overflow clips. Share the new clip when their spatial and
+// clip chains coincide; otherwise append it under their own clip chain.
+// NB: The clip geometry is in the clipping box's own space, which differs from the chain's space when the
+//     chain skips a scroll node (e.g. fixed position descendants of a box in a scrolled document).
 fn append_clip_to_positioned_chain<Sink: VisualContextNodeSink>(
     sink: &mut Sink,
     chain: PositioningContext,
@@ -218,7 +226,7 @@ fn append_clip_to_positioned_chain<Sink: VisualContextNodeSink>(
     let clip = if chain.spatial == normal_before.spatial && chain.clip == normal_before.clip {
         normal_after.clip
     } else {
-        sink.append_clip_node(data, chain.clip, chain.spatial)
+        sink.append_clip_node(data, chain.clip, normal_before.spatial)
     };
     PositioningContext { clip, ..chain }
 }
@@ -470,6 +478,7 @@ pub(crate) fn build_box_visual_context_nodes<Arena: PaintableRowsRead>(
     for mask_layer in &facts.mask_layers {
         append_shared_effect!(EffectNodeData::Mask(*mask_layer));
     }
+    assignment.hidden_by_empty_svg_mask_or_clip = facts.is_hidden_by_empty_svg_mask_or_clip();
 
     // https://drafts.fxtf.org/filter-effects-2/#backdrop-filter-operation
     // A backdrop filter is limited to the box's rounded border box in the box's own space, and a clip

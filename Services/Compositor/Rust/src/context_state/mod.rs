@@ -9,10 +9,13 @@
 mod frames_and_viewport;
 mod gestures_and_scrollbars;
 mod keys_and_pointer;
+mod scroller_moves;
 mod scrolling;
 mod wheel;
 
-use crate::async_scroll_update_outbox::{AsyncScrollUpdateOutbox, UserScrollGestureState};
+use crate::async_scroll_update_outbox::{
+    AsyncScrollUpdateOutbox, FIRST_OPERATION_ID_THE_MAIN_THREAD_REQUESTS, UserScrollGestureState,
+};
 use crate::context_scene::ContextScene;
 use crate::display_list_coverage_watch::{DisplayListCoverageWatch, ShownOfDisplayList};
 use crate::elastic_overscroll_controller::ElasticOverscrollController;
@@ -20,12 +23,14 @@ use crate::frame_inputs::FrameInputs;
 use crate::host::{ContextTimer, Host, PendingFrame, PresentationId, WebContentClientId};
 use crate::input_event::is_keyboard_scroll_key;
 use crate::keyboard_scroll_controller::{KeyRelease, KeyStep, KeyboardScrollController};
-use crate::overlays::{ContextOverlays, UIOverlays, UIOverlaysChange};
+use crate::overlays::{ContextOverlays, UIOverlays};
 use crate::scroll_fling_controller::ScrollFlingController;
 use crate::scroll_snap_controller::{ScrollSnapController, SnapScrollStart, StepDecision};
 use crate::scrollbar_controller::{Drag, ScrollbarController};
 use crate::wheel_gesture_routing::{ResolvedLatch, WheelGestureIdAllocator, WheelGestureRouting};
+use libcompositing_rust::display_list::commands::EffectNodeIndex;
 use libcompositing_rust::display_list::layers::UnvalidatedLayerPlan;
+use libcompositing_rust::display_list::replay::layer_filter_cache_key;
 use libcompositing_rust::ipc_types::{
     Compositing_AsyncScrollOperationTracking as AsyncScrollOperationTracking,
     Compositing_ContextVisibility as ContextVisibility, Compositing_RequestedRelativeScroll as RequestedRelativeScroll,
@@ -36,7 +41,9 @@ use libcompositing_rust::scrolling::smooth_scroll_animation::SmoothScrollAnimati
 use libcompositing_rust::scrolling::wheel_gesture_identity::TouchpadGestureEnd;
 use libcompositing_rust::scrolling::*;
 use libcompositing_rust::time::{Duration, MonotonicTime};
+use libcompositing_rust::visual_context::{ClipNodeData, EffectNodeData};
 use libgfx_rust::{FloatPoint, IntRect, IntSize, Orientation};
+use scroller_moves::{ScrollerMoveCause, VisualViewportMoveCause};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -53,18 +60,6 @@ pub struct AsyncScrollEnqueueResult {
 pub struct AsyncScrollResult {
     pub enqueue_result: AsyncScrollEnqueueResult,
     pub frame_to_present: Option<PendingFrame>,
-}
-
-impl AsyncScrollResult {
-    pub fn declined(decision: InputRoutingDecision) -> Self {
-        Self {
-            enqueue_result: AsyncScrollEnqueueResult {
-                routing_decision: Some(decision),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
 }
 
 /// A wheel step that goes to a context nested in this one: the first step of a gesture over the content of the
@@ -188,6 +183,7 @@ pub struct ScrollCapabilities {
     pub synthesizes_scroll_momentum: bool,
     pub scrolls_elastically: bool,
     pub scrollbar_track_press_jumps: bool,
+    pub scrollbars_always_shown: bool,
     pub touchpad_gesture_end: TouchpadGestureEnd,
 }
 
@@ -197,6 +193,7 @@ impl Default for ScrollCapabilities {
             synthesizes_scroll_momentum: false,
             scrolls_elastically: false,
             scrollbar_track_press_jumps: false,
+            scrollbars_always_shown: false,
             touchpad_gesture_end: TouchpadGestureEnd::AfterIdleDelay,
         }
     }
@@ -215,11 +212,6 @@ struct ActiveSmoothScrollAnimation {
     started_at: MonotonicTime,
     is_user_scroll: bool,
     heads_to_end_of_scroll_range: bool,
-}
-
-struct VisualViewportScrollDelta {
-    scroll_offset: AsyncScrollOffset,
-    consumed_delta: FloatPoint,
 }
 
 struct KeyScroll {
@@ -319,6 +311,7 @@ pub struct ContextState {
     // The boxes the last frame brought, whose offsets came from that frame's snapshot.
     scroll_nodes_seeded_by_last_frame: HashSet<AsyncScrollNodeStableID>,
     scroll_offsets_differ_from_last_frame: bool,
+    sticky_offsets_are_stale: bool,
     // The document whose visual viewport this context zoomed or panned, which it presents as it left it from then on.
     visual_viewport_document_id: Option<UniqueNodeId>,
     pinch_gesture_was_let_through: bool,
@@ -352,6 +345,9 @@ pub struct ContextState {
 const SCROLLBAR_PAGING_INITIAL_DELAY: Duration = Duration::from_milliseconds(250);
 const SCROLLBAR_PAGING_REPEAT_INTERVAL: Duration = Duration::from_milliseconds(50);
 
+// After this long without a step of a pinch, frames raster at the scale for the zoom at rest.
+const ZOOM_SETTLES_AFTER: Duration = Duration::from_milliseconds(150);
+
 // INTEROP: The modifier that makes a press beside the thumb page instead of jumping there or the other way around, as in
 //          Chromium and Firefox.
 #[cfg(target_os = "macos")]
@@ -360,6 +356,14 @@ const SCROLLBAR_TRACK_PRESS_INVERTING_MODIFIER: KeyModifier = KeyModifier::Mod_A
 const SCROLLBAR_TRACK_PRESS_INVERTING_MODIFIER: KeyModifier = KeyModifier::Mod_Shift;
 
 // The offset of the visual viewport in the layout viewport, in device pixels of the content it scales.
+fn visual_viewport_stable_node_id(document_id: UniqueNodeId) -> AsyncScrollNodeStableID {
+    AsyncScrollNodeStableID {
+        node_id: document_id,
+        kind: AsyncScrollNodeKind::VisualViewport,
+        pseudo_element_type: 0,
+    }
+}
+
 fn visual_viewport_scroll_offset(transform: &TransformWithOrigin) -> FloatPoint {
     let scale = transform.matrix.elements[0][0];
     FloatPoint {
@@ -414,6 +418,7 @@ impl ContextState {
             context_user_input_scroll_count: Default::default(),
             scroll_nodes_seeded_by_last_frame: Default::default(),
             scroll_offsets_differ_from_last_frame: Default::default(),
+            sticky_offsets_are_stale: Default::default(),
             visual_viewport_document_id: Default::default(),
             pinch_gesture_was_let_through: Default::default(),
             keyboard_scroll_controller: Default::default(),
@@ -486,6 +491,38 @@ impl ContextState {
                 .for_each_effects_filter_image_frame_id(&mut |id| image_frame_ids.push(id));
         }
         image_frame_ids
+    }
+    /// The identities of the paths that the clips of the visual context tree clip to.
+    pub fn clip_path_identities_drawn(&self) -> Vec<u64> {
+        let Some(visual_context_tree) = self.scene.visual_context_tree() else {
+            return Vec::new();
+        };
+        visual_context_tree
+            .as_arc()
+            .clip_nodes
+            .iter()
+            .filter_map(|node| match &node.data {
+                ClipNodeData::Path(clip_path) => Some(clip_path.path.identity()),
+                _ => None,
+            })
+            .collect()
+    }
+    /// The keys that replay gives the layers of the effects of the visual context tree that hold a filter or a
+    /// backdrop filter.
+    pub fn layer_filter_cache_keys_drawn(&self) -> Vec<u64> {
+        let Some(visual_context_tree) = self.scene.visual_context_tree() else {
+            return Vec::new();
+        };
+        let tree = visual_context_tree.as_arc();
+        tree.effect_nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                matches!(&node.data, EffectNodeData::Effects(effects)
+                    if effects.filter.is_some() || effects.backdrop_filter.is_some())
+            })
+            .map(|(effect_index, _)| layer_filter_cache_key(tree, EffectNodeIndex(effect_index as u32)))
+            .collect()
     }
     /// The ids of the SVG images that the display list draws.
     pub fn vector_image_ids_drawn(&self) -> Vec<u64> {
@@ -637,6 +674,7 @@ impl ContextState {
                 self.scrollbar_paging_timer_is_armed = true;
             }
             ContextTimer::ScrollbarFadeOut => self.request_display_ticks_if_needed(now),
+            ContextTimer::RasterScaleOfZoomSettles => return self.scene.settle_raster_scale(),
             ContextTimer::CaretBlink => {
                 self.schedule_next_caret_blink(now);
                 // The frame finds what the blink changes in the content hashes of what draws each caret.
@@ -655,16 +693,7 @@ impl ContextState {
     pub fn request_rendering_update(&mut self) {
         // The rendering update this asks for adopts the scroll updates it finds pushed by then. What is pending here goes
         // ahead of the request on the wire, so that an update run on the request never misses it.
-        if self.has_pending_async_scroll_updates() {
-            let updates = self.take_pending_async_scroll_updates();
-            self.host.post_to_web_content(
-                self.web_content_client_id,
-                compositor_web_content_client::messages::AsyncScrollUpdates {
-                    context_id: self.context_id,
-                    updates,
-                },
-            );
-        }
+        self.publish_pending_async_scroll_updates();
         self.host.post_to_web_content(
             self.web_content_client_id,
             compositor_web_content_client::messages::RequestRenderingUpdate {},
@@ -724,8 +753,7 @@ impl ContextState {
 
     /// Whether the scroll offsets here moved past those of the last frame WebContent presented.
     pub fn scrolled_since_last_frame(&self) -> bool {
-        self.has_pending_async_scroll_updates()
-            || self.scroll_offsets_differ_from_last_frame
+        self.scroll_offsets_differ_from_last_frame
             || self.has_active_smooth_scroll_animations()
             || self.has_active_scroll_fling()
     }
@@ -769,6 +797,7 @@ impl ContextState {
         display_list: Rc<DisplayList>,
         visual_context_tree: AccumulatedVisualContextTree,
         scroll_state_snapshot: ScrollStateSnapshot,
+        keyboard_scroll_state: KeyboardScrollState,
         now: MonotonicTime,
     ) -> bool {
         assert_eq!(
@@ -801,9 +830,7 @@ impl ContextState {
             self.pinch_gesture_was_let_through = false;
         }
         self.adopt_scrolling_state(async_scrolling_state, &scroll_offsets_of_known_nodes);
-        if let Some(metadata) = self.scene.display_list().as_ref().unwrap().async_scrolling_metadata() {
-            self.adopt_keyboard_scroll_state(metadata.keyboard_scroll_state.clone());
-        }
+        self.adopt_keyboard_scroll_state(keyboard_scroll_state);
         true
     }
 
@@ -822,11 +849,17 @@ impl ContextState {
             self.stop_scrollbar_paging();
         }
         self.note_user_scroll_gesture_end_if_drag_ended(box_of_dragged_scrollbar);
+        let device_pixels_per_css_pixel_before = self.async_scroll_tree.device_pixels_per_css_pixel();
         self.async_scroll_tree.set_state(async_scrolling_state);
         self.elastic_overscroll_controller
             .did_install_scrolling_state(&self.async_scroll_tree);
         self.scroll_snap_controller
             .did_install_scrolling_state(&self.async_scroll_tree);
+        if self.async_scroll_tree.device_pixels_per_css_pixel() != device_pixels_per_css_pixel_before {
+            for &stable_node_id in scroll_offsets_of_known_nodes.keys() {
+                self.scroll_snap_controller.did_move_scroller(stable_node_id);
+            }
+        }
         if let Some(offset) = self.keep_scroll_offsets_of_known_nodes(scroll_offsets_of_known_nodes) {
             async_scrolling_viewport_rect.x = offset.x as i32;
             async_scrolling_viewport_rect.y = offset.y as i32;
@@ -886,8 +919,8 @@ impl ContextState {
         self.scene.take_layer_plan_of_scroll_state(layer_plan)
     }
 
-    /// Returns false for a tree that does not fit the installed display list, which keeps the tree it has and takes
-    /// only the scroll state that pairs with the new one.
+    /// Returns false for a tree that does not fit the installed display list, which keeps the tree it has and the
+    /// scroll state that pairs with it.
     pub fn update_visual_context_tree(
         &mut self,
         visual_context_tree: AccumulatedVisualContextTree,
@@ -898,7 +931,6 @@ impl ContextState {
         let scroll_offsets_of_known_nodes = self.scroll_offsets_by_stable_id();
         let previous_visual_context_tree = self.scene.visual_context_tree().clone();
         if !self.scene.replace_visual_context_tree(visual_context_tree, now) {
-            self.update_scroll_state(scroll_state_snapshot, keyboard_scroll_state);
             return false;
         }
         let compositor_scroll_table_changed = previous_visual_context_tree.is_some_and(|previous| {
@@ -920,11 +952,22 @@ impl ContextState {
         true
     }
 
+    /// Returns false, leaving everything as it was, for a scroll state built for a visual context tree of another
+    /// structure than the installed one.
     pub fn update_scroll_state(
         &mut self,
+        visual_context_tree_structural_epoch: u64,
         scroll_state_snapshot: ScrollStateSnapshot,
         keyboard_scroll_state: KeyboardScrollState,
-    ) {
+    ) -> bool {
+        if self
+            .scene
+            .visual_context_tree()
+            .as_ref()
+            .is_none_or(|tree| tree.structural_epoch() != visual_context_tree_structural_epoch)
+        {
+            return false;
+        }
         let scroll_offsets_of_known_nodes = self.scroll_offsets_by_stable_id();
         self.update_scroll_state_with_known_offsets(
             scroll_state_snapshot,
@@ -932,6 +975,7 @@ impl ContextState {
             &scroll_offsets_of_known_nodes,
             false,
         );
+        true
     }
 
     fn update_scroll_state_with_known_offsets(
@@ -941,7 +985,6 @@ impl ContextState {
         scroll_offsets_of_known_nodes: &HashMap<AsyncScrollNodeStableID, FloatPoint>,
         compositor_scroll_table_changed: bool,
     ) {
-        self.scene.forget_whether_animated_content_may_affect_viewport();
         // Newly adopted stable ids must start at the offsets in the snapshot that pairs with this tree.
         self.scroll_state_snapshot = scroll_state_snapshot;
         self.scroll_state_snapshot.set_node_count(
@@ -979,7 +1022,16 @@ impl ContextState {
     }
 
     fn adopt_keyboard_scroll_state(&mut self, state: KeyboardScrollState) {
-        if self.keyboard_scroll_controller.adopt_state(state) && !self.keyboard_scroll_controller.has_target() {
+        let visual_context_tree_structural_epoch = self
+            .scene
+            .visual_context_tree()
+            .as_ref()
+            .map_or(0, |tree| tree.structural_epoch());
+        if self
+            .keyboard_scroll_controller
+            .adopt_state(state, visual_context_tree_structural_epoch)
+            && !self.keyboard_scroll_controller.has_target()
+        {
             self.end_keyboard_scroll_gesture();
         }
     }

@@ -12,6 +12,7 @@
 #include <AK/Platform.h>
 #include <AK/StdLibExtras.h>
 #include <AK/TypeCasts.h>
+#include <AK/Vector.h>
 #include <LibCore/BrowserVersion.h>
 #include <LibCore/EventLoop.h>
 #include <LibWebView/Application.h>
@@ -68,8 +69,6 @@
 
 namespace Ladybird {
 
-static constexpr auto AUDIO_STATE_BUTTON_POSITION = QTabBar::LeftSide;
-static constexpr auto TAB_CLOSE_BUTTON_POSITION = QTabBar::RightSide;
 static constexpr int LADYBIRD_MENU_WIDTH = 280;
 static constexpr int WINDOW_RESIZE_BORDER_WIDTH = 6;
 static constexpr int WINDOW_RESIZE_CORNER_WIDTH = WINDOW_RESIZE_BORDER_WIDTH * 2;
@@ -503,6 +502,8 @@ void BrowserWindow::initialize_application_actions()
     addAction(application.toggle_bookmark_bar_action());
     addAction(application.toggle_sidebar_action());
     addAction(application.open_location_action());
+    addAction(application.navigate_back_action());
+    addAction(application.navigate_forward_action());
     addAction(application.reload_action());
     addAction(application.reload_bypassing_cache_action());
     addAction(application.find_in_page_action());
@@ -513,17 +514,25 @@ void BrowserWindow::initialize_application_actions()
     addAction(application.reset_zoom_action());
     addAction(application.quit_action());
 
-    for (int i = 0; i < 8; ++i) {
-        new QShortcut(QKeySequence(Qt::CTRL | static_cast<Qt::Key>(Qt::Key_1 + i)), this, [this, i]() {
+    // On Linux, Alt+number is the conventional shortcut for selecting a tab.
+    Vector<Qt::KeyboardModifier, 2> tab_selection_modifiers { Qt::ControlModifier };
+#if !defined(AK_OS_MACOS) && !defined(AK_OS_WINDOWS)
+    tab_selection_modifiers.append(Qt::AltModifier);
+#endif
+
+    for (auto modifier : tab_selection_modifiers) {
+        for (int i = 0; i < 8; ++i) {
+            new QShortcut(QKeySequence(modifier | static_cast<Qt::Key>(Qt::Key_1 + i)), this, [this, i]() {
+                if (m_tabs_container->count() > 1)
+                    m_tabs_container->set_current_index(min(i, m_tabs_container->count() - 1));
+            });
+        }
+
+        new QShortcut(QKeySequence(modifier | Qt::Key_9), this, [this]() {
             if (m_tabs_container->count() > 1)
-                m_tabs_container->set_current_index(min(i, m_tabs_container->count() - 1));
+                m_tabs_container->set_current_index(m_tabs_container->count() - 1);
         });
     }
-
-    new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_9), this, [this]() {
-        if (m_tabs_container->count() > 1)
-            m_tabs_container->set_current_index(m_tabs_container->count() - 1);
-    });
 }
 
 void BrowserWindow::initialize_application_menu()
@@ -1247,14 +1256,7 @@ void BrowserWindow::discard_tab(Tab& tab)
             other_tab->did_replace_tab(tab, *discarded_tab);
     }
 
-    // NB: The tab bar only hides a tab button that another takes the place of, and the old one refers to the old tab.
     uninitialize_tab(&tab);
-    auto* tab_bar = m_tabs_container->tab_bar();
-    if (auto* close_button = tab_bar->tabButton(index, TAB_CLOSE_BUTTON_POSITION)) {
-        tab_bar->setTabButton(index, TAB_CLOSE_BUTTON_POSITION, nullptr);
-        close_button->deleteLater();
-    }
-
     m_tabs_container->replace_tab(index, discarded_tab);
     initialize_tab(discarded_tab);
     tab_title_changed(index, discarded_tab->title());
@@ -1425,7 +1427,7 @@ void BrowserWindow::initialize_tab_buttons(Tab* tab)
     m_tabs_container->set_tab_icon(index, tab->tab_icon());
 
     // A pinned tab has no close button.
-    m_tabs_container->tab_bar()->setTabButton(index, TAB_CLOSE_BUTTON_POSITION, tab->is_pinned() ? nullptr : create_tab_close_button(*tab));
+    m_tabs_container->tab_bar()->set_tab_close_button(index, tab->is_pinned() ? nullptr : create_tab_close_button(*tab));
     m_tabs_container->update_tab_button_visibility();
     update_tab_audio_button(*tab);
 }
@@ -1436,29 +1438,18 @@ void BrowserWindow::update_tab_close_button(Tab& tab)
     if (index < 0)
         return;
 
-    auto* tab_bar = m_tabs_container->tab_bar();
-    auto* close_button = tab_bar->tabButton(index, TAB_CLOSE_BUTTON_POSITION);
-    if (tab.is_pinned() && close_button) {
-        tab_bar->setTabButton(index, TAB_CLOSE_BUTTON_POSITION, nullptr);
-        close_button->deleteLater();
-    } else if (!tab.is_pinned() && !close_button) {
-        tab_bar->setTabButton(index, TAB_CLOSE_BUTTON_POSITION, create_tab_close_button(tab));
-    }
+    m_tabs_container->tab_bar()->set_tab_close_button(index, tab.is_pinned() ? nullptr : create_tab_close_button(tab));
     m_tabs_container->update_tab_button_visibility();
 }
 
 void BrowserWindow::update_tab_button_icons()
 {
     for (int index = 0; index < m_tabs_container->count(); ++index) {
-        if (auto* button = m_tabs_container->tab_bar()->tabButton(index, TAB_CLOSE_BUTTON_POSITION)) {
-            if (auto* tab_bar_button = qobject_cast<TabBarButton*>(button))
-                tab_bar_button->setIcon(create_chrome_icon(ChromeIcon::TabClose, Theme::chrome_palette(*this)));
-        }
+        if (auto* button = m_tabs_container->tab_bar()->tab_close_button(index))
+            button->setIcon(create_chrome_icon(ChromeIcon::TabClose, Theme::chrome_palette(*this)));
 
-        if (auto* button = m_tabs_container->tab_bar()->tabButton(index, AUDIO_STATE_BUTTON_POSITION)) {
-            if (auto* tab_bar_button = qobject_cast<TabBarButton*>(button))
-                tab_bar_button->setIcon(icon_for_page_mute_state(*m_tabs_container->tab(index)));
-        }
+        if (auto* button = m_tabs_container->tab_bar()->tab_audio_button(index))
+            button->setIcon(icon_for_page_mute_state(*m_tabs_container->tab(index)));
     }
 }
 
@@ -1611,24 +1602,22 @@ void BrowserWindow::update_tab_audio_button(Tab& tab)
     auto* tab_bar = m_tabs_container->tab_bar();
     auto shows_playing_audio = tab.is_loaded() && tab.view().tab_indicator_visible(WebView::TabIndicator::PlayingAudio);
 
+    auto* button = tab_bar->tab_audio_button(index);
     if (!tab.is_loaded() || (!shows_playing_audio && tab.view().page_mute_state() == Web::HTML::MuteState::Unmuted)) {
-        // The tab bar only hides the button it lets go of.
-        if (auto* button = tab_bar->tabButton(index, AUDIO_STATE_BUTTON_POSITION)) {
-            button->deleteLater();
-            tab_bar->setTabButton(index, AUDIO_STATE_BUTTON_POSITION, nullptr);
+        if (button) {
+            tab_bar->set_tab_audio_button(index, nullptr);
             m_tabs_container->update_tab_button_visibility();
         }
         return;
     }
 
-    auto* button = qobject_cast<TabBarButton*>(tab_bar->tabButton(index, AUDIO_STATE_BUTTON_POSITION));
     if (!button) {
         button = new TabBarButton(icon_for_page_mute_state(tab), TabBarButton::Role::Audio);
         button->setObjectName("LadybirdAudioState");
         connect(button, &QPushButton::clicked, this, [&tab]() {
             tab.view().toggle_page_mute_state();
         });
-        tab_bar->setTabButton(index, AUDIO_STATE_BUTTON_POSITION, button);
+        tab_bar->set_tab_audio_button(index, button);
         m_tabs_container->update_tab_button_visibility();
     }
     button->setIcon(icon_for_page_mute_state(tab));

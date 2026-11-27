@@ -7,6 +7,7 @@
 //! The layers a frame is painted in, each cached as tiles from one frame and one list to the next, and what of them the
 //! window server shows above the frame by itself.
 
+use super::damage::FrameDamage;
 use super::layer_overlay::{
     FrameWorkCounts, LayerOverlayModel, MediaPresentation, ModelLayer, ModelLayerContent, NamedVisualContextNode,
     PaintedLayerPresentation, RasterCountsByCause, layers_whose_names_are_shown,
@@ -16,12 +17,13 @@ use super::tiles::{
 };
 use super::window_server::{WhyMediaIsReplayed, WindowServerLayers};
 use super::{
-    ContextPresenting, FrameToPaint, NestedContexts, PresentingEnvironment, apply_raster_transform,
-    composite_inside_effects_of_frame, inflated, rect_of_size, replay_into, replay_with_scroll_offsets, size_of,
+    ContextPresenting, FrameToPaint, NestedContexts, PresentingEnvironment, apply_raster_to_frame,
+    apply_raster_transform, composite_inside_effects_of_frame, inflated, replay_into, replay_with_scroll_offsets,
 };
 use crate::context_scene::ReceivedLayerPlan;
-use crate::raster_host::{FfiSublayer, LiveContent};
+use crate::raster_host::{LiveContent, RasterHost, SurfaceSampling};
 use crate::surfaces::painting_surface::PaintingSurface;
+use crate::window_server::PlannedSublayer;
 use libcompositing_rust::display_list::commands::{
     CanvasId, CompositorContextId, EffectNodeIndex, ImageFrameResourceId, SpatialNodeIndex, VideoSinkHandle,
 };
@@ -44,10 +46,12 @@ use libcompositing_rust::display_list::tile_keys::{
     BandTileKeys, ContentHash, FrameStateReadByReplay, LayerRasterSettings, LiveContentVersions, TileCoverage,
     TileKeyingOfList, TileKeyingOfRasterSpace,
 };
-use libcompositing_rust::display_list::tiles::TILE_SIZE_IN_DEVICE_PIXELS;
+use libcompositing_rust::display_list::tiles::{TILE_HEIGHT_IN_DEVICE_PIXELS, TILE_WIDTH_IN_DEVICE_PIXELS};
 use libcompositing_rust::scrolling::DisplayList;
 use libcompositing_rust::visual_context::{VisualContextTree, WorldTransforms};
-use libgfx_rust::{Color, CornerRadii, FloatMatrix4x4, FloatPoint, IntPoint, IntRect};
+use libgfx_rust::{
+    AffineTransform, Color, CornerRadii, FloatMatrix4x4, FloatPoint, IntPoint, IntRect, multiply_affine,
+};
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -94,7 +98,7 @@ impl LiveContentVersions for LiveContentVersionsOfFrame<'_> {
         self.live_content
             .video_sinks
             .get(&video_sink.0)
-            .and_then(|sink| sink.has_frame.then_some(sink.frame_id))
+            .and_then(|sink| sink.frame.is_some().then_some(sink.frame_id))
     }
 
     fn image_frame_pixel_generation(&self, image_frame: ImageFrameResourceId) -> Option<u64> {
@@ -183,6 +187,9 @@ pub struct LayerUpdate {
     shown_tiles_by_layer: Vec<Vec<TileShownInFrame>>,
     composited_filter_read_reach_by_layer: Vec<i32>,
     pub(super) frame_allows_lcd_text: bool,
+    /// Whether the window server shows by itself a canvas or video that draws something else than in the latest frame,
+    /// or that was no layer of it, which the window server shows only once the frame is presented.
+    pub(super) media_shown_by_window_server_changed: bool,
     work_counts: FrameWorkCounts,
 }
 
@@ -197,12 +204,6 @@ impl LayerUpdate {
 
     pub fn window_server_shows_every_layer(&self) -> bool {
         self.layers.window_server_shows_every_layer()
-    }
-
-    /// Whether the window server shows layers of the frame tile by tile, which the frame rasters the tiles of even
-    /// where it paints nothing into a store.
-    pub fn window_server_shows_tiles(&self) -> bool {
-        self.layers.shown_by_window_server() && self.layers.window_server_compositing.shows_tiles_of_painted_layers
     }
 
     /// Has the frame hold every layer, as where the window server could not be given what it was to show.
@@ -279,6 +280,7 @@ struct StackOfFrames {
     /// plan was made for. One plan stands for one list, one tree without the samples of the compositor's animations,
     /// one viewport, and the scroll offsets the plan reads.
     layer_plan: Option<ReceivedLayerPlan>,
+    /// The stack of the plan, or of one layer, at the raster scale of the frames.
     stack: Rc<LayerStack>,
     // Keeps the address of the list the frames draw from being taken by another list.
     display_list: Weak<DisplayList>,
@@ -429,6 +431,9 @@ pub struct PaintedLayers {
     pub(super) window_server_placements_of_effects: WindowServerPlacementsOfEffects,
     /// What the window server that shows the frame composites by itself, besides canvases and videos.
     pub(super) window_server_compositing: WindowServerCompositing,
+    /// From the pixels of the raster, which the layers are composited in, to those of the frame, where the frame shows
+    /// the raster through a transform.
+    pub(super) raster_to_frame: Option<AffineTransform>,
     content_hash_by_composited_node: HashMap<PlacementNodeIdentity, ContentHash>,
     media_replayed_by_identity: HashMap<LayerIdentity, MediaRecordsReplayedInFrame>,
 }
@@ -448,12 +453,6 @@ impl PaintedLayers {
             .first()
             .is_some_and(|base_layer_compositing| base_layer_compositing.shown_by_window_server)
     }
-
-    /// Whether the window server shows the tiles of the layer by itself, so that what changes of them changes
-    /// nothing of what the frame holds.
-    fn window_server_shows_tiles_of(&self, compositing: &LayerCompositingInFrame) -> bool {
-        compositing.shown_by_window_server && self.window_server_compositing.shows_tiles_of_painted_layers
-    }
 }
 
 /// The layers of the frames of a context, their tiles, and what of them the window server shows.
@@ -464,9 +463,9 @@ pub struct ContextLayers {
     layering_obstacles_of_frames_not_drawn_as_planned: Option<LayeringObstaclesOfListAndTree>,
     pub(super) tiles: LayerTiles,
     pub(super) window_server: WindowServerLayers,
-    /// The plan whose frames show more tiles than a frame may, which frames draw as one layer until another plan comes.
-    /// The address of its stack is kept from being taken by the stack of another plan.
-    plan_showing_too_many_tiles: Option<Weak<LayerStack>>,
+    /// The plan whose frames at a raster scale show more tiles than a frame may, which frames at that scale draw as one
+    /// layer until another plan comes. The address of its stack is kept from being taken by the stack of another plan.
+    plan_showing_too_many_tiles: Option<(Weak<LayerStack>, i32)>,
 }
 
 impl ContextLayers {
@@ -474,22 +473,26 @@ impl ContextLayers {
         self.tiles.evict_spare_tiles(env);
     }
 
-    /// Whether frames draw `layer_plan` as one layer, as a frame drawn with it showed more tiles than a frame may.
-    fn plan_shows_too_many_tiles(&self, layer_plan: &ReceivedLayerPlan) -> bool {
-        self.plan_showing_too_many_tiles
-            .as_ref()
-            .is_some_and(|stack| std::ptr::eq(stack.as_ptr(), Rc::as_ptr(&layer_plan.stack)))
+    /// Whether frames at `raster_scale` draw `layer_plan` as one layer, as a frame drawn with it at that scale showed
+    /// more tiles than a frame may.
+    fn plan_shows_too_many_tiles(&self, layer_plan: &ReceivedLayerPlan, raster_scale: i32) -> bool {
+        self.plan_showing_too_many_tiles.as_ref().is_some_and(|(stack, scale)| {
+            *scale == raster_scale && std::ptr::eq(stack.as_ptr(), Rc::as_ptr(&layer_plan.stack))
+        })
     }
 
     /// Has later frames draw the plan of the stack the frame took as one layer, as the frame showed more tiles than a
     /// frame may.
     fn draw_plan_of_frames_as_one_layer(&mut self) {
-        let layer_plan = self
+        let stack_of_frames = self
             .stack_of_frames
             .as_ref()
-            .and_then(|stack_of_frames| stack_of_frames.layer_plan.as_ref())
             .expect("only a frame drawn with a plan has a budget of tiles");
-        self.plan_showing_too_many_tiles = Some(Rc::downgrade(&layer_plan.stack));
+        let layer_plan = stack_of_frames
+            .layer_plan
+            .as_ref()
+            .expect("only a frame drawn with a plan has a budget of tiles");
+        self.plan_showing_too_many_tiles = Some((Rc::downgrade(&layer_plan.stack), stack_of_frames.stack.raster_scale));
     }
 
     /// The stack of one layer that replays the whole list, for a frame that is not drawn as a plan was made for, with
@@ -510,7 +513,7 @@ impl ContextLayers {
                 of_list_and_tree.obstacles
             }
             _ => {
-                let obstacles = LayeringObstacles::of(display_list.storage(), tree);
+                let obstacles = LayeringObstacles::of(tree);
                 self.layering_obstacles_of_frames_not_drawn_as_planned = Some(LayeringObstaclesOfListAndTree {
                     display_list: Rc::downgrade(display_list),
                     tree_copy_number: tree.copy.number(),
@@ -537,18 +540,22 @@ impl ContextLayers {
         display_list: &Rc<DisplayList>,
         one_layer: impl FnOnce(&mut Self) -> LayerStack,
         viewport_to_raster_transform: FloatMatrix4x4,
+        raster_scale: i32,
     ) -> bool {
-        let latest_plan = self
-            .stack_of_frames
-            .as_ref()
-            .and_then(|stack_of_frames| stack_of_frames.layer_plan.as_ref());
         if let Some(layer_plan) = layer_plan
-            && latest_plan.is_some_and(|latest_plan| Rc::ptr_eq(&latest_plan.stack, &layer_plan.stack))
+            && self.stack_of_frames.as_ref().is_some_and(|latest| {
+                latest.stack.raster_scale == raster_scale
+                    && latest
+                        .layer_plan
+                        .as_ref()
+                        .is_some_and(|latest_plan| Rc::ptr_eq(&latest_plan.stack, &layer_plan.stack))
+            })
         {
             return false;
         }
         let stack = match layer_plan {
-            Some(layer_plan) => layer_plan.stack.clone(),
+            Some(layer_plan) if raster_scale == 1 => layer_plan.stack.clone(),
+            Some(layer_plan) => Rc::new(layer_plan.stack.at_raster_scale(raster_scale)),
             None => {
                 let one_layer = one_layer(self);
                 let latest_drew_same_one_layer = self.stack_of_frames.as_ref().is_some_and(|latest| {
@@ -578,6 +585,36 @@ impl ContextLayers {
     }
 }
 
+/// How a space whose rasters a frame composites through `space_to_frame` shows in the frame, where the frame maps the
+/// raster of the page to its pixels through `raster_to_frame`.
+fn space_to_frame_through(raster_to_frame: AffineTransform, space_to_frame: SpaceToFrame) -> SpaceToFrame {
+    SpaceToFrame::Transform(match space_to_frame {
+        SpaceToFrame::Offset(offset) => raster_to_frame.translated(offset.x as f32, offset.y as f32),
+        SpaceToFrame::Transform(transform) => multiply_affine(raster_to_frame, transform),
+    })
+}
+
+/// Has what is drawn into the surface next go from the pixels of the raster to those of the frame, through
+/// `raster_to_frame` where the frame has one, and answers `damage_rect` of the frame in the pixels of the raster, and
+/// how tiles are sampled there.
+fn draw_from_pixels_of_raster(
+    raster: &RasterHost,
+    surface: &Rc<PaintingSurface>,
+    raster_to_frame: Option<AffineTransform>,
+    damage_rect: IntRect,
+) -> (IntRect, SurfaceSampling) {
+    match raster_to_frame {
+        Some(raster_to_frame) => {
+            apply_raster_to_frame(raster, surface, raster_to_frame);
+            (
+                SpaceToFrame::Transform(raster_to_frame).rect_in_space(damage_rect),
+                SurfaceSampling::Linear,
+            )
+        }
+        None => (damage_rect, SurfaceSampling::Nearest),
+    }
+}
+
 fn rect_in_frame_of_space(
     rect_in_space: IntRect,
     space_to_frame: SpaceToFrame,
@@ -603,14 +640,21 @@ fn frame_rect_in_space_unless_viewport_or_transformed(
     }
 }
 
+/// Where the viewport's space of the stack reaches: the viewport the stack was made within, or more for a stack of one
+/// layer that a frame scales or moves.
+fn extent_of_viewport_space(stack: &LayerStack) -> IntRect {
+    stack.spaces[RasterSpaceIndex::VIEWPORT.0].extent
+}
+
 fn rect_of_kept_tiles(
     raster_space_index: RasterSpaceIndex,
     rect_shown: IntRect,
     viewport_rect: IntRect,
+    rect_of_raster_shown: IntRect,
     composited_filter_read_reach: i32,
 ) -> IntRect {
     if raster_space_index == RasterSpaceIndex::VIEWPORT {
-        return inflated(viewport_rect, composited_filter_read_reach);
+        return inflated(rect_of_raster_shown, composited_filter_read_reach);
     }
     if rect_shown.is_empty() {
         return IntRect::default();
@@ -645,9 +689,9 @@ fn composited_filter_read_reach_by_layer(
 
 /// How many cells a rect of the size of `viewport_rect` can touch.
 fn cells_one_layer_shows_at_most(viewport_rect: IntRect) -> u64 {
-    let tile_size = TILE_SIZE_IN_DEVICE_PIXELS as u64;
-    let most_cells_along = |length: i32| (length.max(1) as u64 - 1).div_ceil(tile_size) + 1;
-    most_cells_along(viewport_rect.width) * most_cells_along(viewport_rect.height)
+    let most_cells_along = |length: i32, tile_length: i32| (length.max(1) as u64 - 1).div_ceil(tile_length as u64) + 1;
+    most_cells_along(viewport_rect.width, TILE_WIDTH_IN_DEVICE_PIXELS)
+        * most_cells_along(viewport_rect.height, TILE_HEIGHT_IN_DEVICE_PIXELS)
 }
 
 /// The tiles a frame drawn with a plan shows so far, which it counts as it keys them, against how many it may show.
@@ -661,7 +705,7 @@ struct TileBudgetOfFrame {
 impl TileBudgetOfFrame {
     fn within(viewport_rect: IntRect) -> Self {
         let cells = cells_one_layer_shows_at_most(viewport_rect);
-        let cell_pixels = (TILE_SIZE_IN_DEVICE_PIXELS as u64).pow(2);
+        let cell_pixels = TILE_WIDTH_IN_DEVICE_PIXELS as u64 * TILE_HEIGHT_IN_DEVICE_PIXELS as u64;
         Self {
             most_tiles: MAXIMUM_TILES_A_PLAN_SHOWS_PER_CELL_ONE_LAYER_SHOWS * cells,
             most_tile_pixels: MAXIMUM_LAYERS_OF_TILES_A_PLAN_SHOWS * cells * cell_pixels,
@@ -831,9 +875,8 @@ fn damage_of_layers_moved_by_animated_transforms(
         }
         // The window server moves and clips a layer it shows tile by tile, which changes nothing of what the frame
         // holds.
-        let window_server_shows_layer_in_both_frames = latest.identity == current.identity
-            && latest.shown_by_window_server
-            && layer_update.layers.window_server_shows_tiles_of(current);
+        let window_server_shows_layer_in_both_frames =
+            latest.identity == current.identity && latest.shown_by_window_server && current.shown_by_window_server;
         if window_server_shows_layer_in_both_frames {
             continue;
         }
@@ -935,6 +978,46 @@ enum LayersToComposite {
     ShownByWindowServer,
 }
 
+pub(super) enum CompositionStep<'a> {
+    EnterBandOfCompositedEffect(BandIndex),
+    LeaveInnermostBandEntered,
+    Layer(&'a LayerCompositingInFrame),
+}
+
+/// Walks `layers` from the bottom up, entering the bands of composited effects around each layer that the layer before
+/// was not in, once it left those that this one is not in, and leaves every band entered at the end.
+pub(super) fn walk_composition<'a>(
+    stack: &LayerStack,
+    layers: impl IntoIterator<Item = &'a LayerCompositingInFrame>,
+    mut step: impl FnMut(CompositionStep<'a>),
+) {
+    let mut entered_composited_bands: Vec<BandIndex> = Vec::new();
+    let mut composited_bands_around_layer: Vec<BandIndex> = Vec::new();
+    for compositing in layers {
+        composited_bands_around_layer.clear();
+        composited_bands_around_layer
+            .extend(stack.composited_bands_around_layer_innermost_first(compositing.layer_index));
+        composited_bands_around_layer.reverse();
+        let count_of_bands_still_entered = entered_composited_bands
+            .iter()
+            .zip(&composited_bands_around_layer)
+            .take_while(|(entered, around_layer)| entered == around_layer)
+            .count();
+        while entered_composited_bands.len() > count_of_bands_still_entered {
+            entered_composited_bands.pop();
+            step(CompositionStep::LeaveInnermostBandEntered);
+        }
+        for &band_index in &composited_bands_around_layer[count_of_bands_still_entered..] {
+            entered_composited_bands.push(band_index);
+            step(CompositionStep::EnterBandOfCompositedEffect(band_index));
+        }
+        step(CompositionStep::Layer(compositing));
+    }
+    for _ in entered_composited_bands {
+        step(CompositionStep::LeaveInnermostBandEntered);
+    }
+}
+
 fn compositing_of_layer(
     stack: &LayerStack,
     layer_index: LayerIndex,
@@ -960,22 +1043,18 @@ impl ContextPresenting {
     /// otherwise. A frame drawn with a plan that shows more tiles than a frame may is drawn as one layer instead.
     ///
     /// Keys the tiles the frame shows of each layer, and answers too the rect of the viewport that the tiles to raster
-    /// again, the tiles that go, and the media replayed anew cover. `invalidates_every_tile` makes every tile stale
-    /// whatever its content hash, as when the frame draws content that the list does not name. What a frame is made to
-    /// repaint otherwise leaves the tiles as they are: it is either drawn over the layers by the compositor, as its
-    /// scroll bars are, or told by the content hashes of the tiles that hold it, as a caret's blink is.
+    /// again, the tiles that go, and the media replayed anew cover. A pooled tile holds current pixels for as long as
+    /// its content hash is what a frame shows, as the hash covers all that its pixels depend on. What a frame is made
+    /// to repaint leaves the tiles as they are: it is either drawn over the layers by the compositor, as its scroll
+    /// bars are, or told by the content hashes of the tiles that hold it, as a caret's blink is.
     pub(super) fn layer_update_for(
         &mut self,
         env: &PresentingEnvironment<'_>,
         frame: &FrameToPaint<'_>,
         viewport_rect: IntRect,
         live_content: &LiveContent,
-        invalidates_every_tile: bool,
         frame_allows_lcd_text: bool,
     ) -> (LayerUpdate, IntRect) {
-        if invalidates_every_tile {
-            self.layers.tiles.invalidate_every_tile();
-        }
         let raster_transform = self.raster_transform();
         let tree = frame.frame_inputs.visual_context_tree.as_arc();
         // A plan places spaces that scroll at whole device pixels of the viewport it was made within, which a raster
@@ -985,32 +1064,33 @@ impl ContextPresenting {
         let plan_drawn_as_made_for = frame.frame_inputs.layer_plan.as_ref().filter(|layer_plan| {
             raster_transform == FloatMatrix4x4::identity() && layer_plan.viewport_rect == viewport_rect
         });
-        let layer_plan = plan_drawn_as_made_for.filter(|layer_plan| !self.layers.plan_shows_too_many_tiles(layer_plan));
+        let raster_scale = frame.frame_inputs.raster_scale;
+        let layer_plan = plan_drawn_as_made_for
+            .filter(|layer_plan| !self.layers.plan_shows_too_many_tiles(layer_plan, raster_scale));
         let why_list_is_one_layer = if plan_drawn_as_made_for.is_some() {
             WhyListIsOneLayer::PlanShowsTooManyTiles
         } else {
             WhyListIsOneLayer::FrameIsNotDrawnAsPlanned
         };
         let one_layer = |layers: &mut ContextLayers| {
-            layers.one_layer_stack_of_frame(frame.display_list, tree, viewport_rect, why_list_is_one_layer)
+            layers
+                .one_layer_stack_of_frame(frame.display_list, tree, viewport_rect, why_list_is_one_layer)
+                .at_raster_scale(raster_scale)
         };
-        let took_another_stack =
-            self.layers
-                .take_stack_of_frame(layer_plan, frame.display_list, one_layer, raster_transform);
+        let took_another_stack = self.layers.take_stack_of_frame(
+            layer_plan,
+            frame.display_list,
+            one_layer,
+            raster_transform,
+            raster_scale,
+        );
         let took_plan_into_use = layer_plan.is_some() && took_another_stack;
         let layer_update = self.layer_update_of_stack(env, frame, viewport_rect, live_content, frame_allows_lcd_text);
         let Some((mut layer_update, stale_rect)) = layer_update else {
             // Frames draw the plan as one layer from now on. The budget does not hold a frame of one layer, so the frame
             // is worked out once more at most.
             self.layers.draw_plan_of_frames_as_one_layer();
-            return self.layer_update_for(
-                env,
-                frame,
-                viewport_rect,
-                live_content,
-                invalidates_every_tile,
-                frame_allows_lcd_text,
-            );
+            return self.layer_update_for(env, frame, viewport_rect, live_content, frame_allows_lcd_text);
         };
         layer_update.work_counts.took_plan_into_use = took_plan_into_use;
         (layer_update, stale_rect)
@@ -1051,11 +1131,19 @@ impl ContextPresenting {
             .expect("a frame with layers has a stack");
         let geometries = stack_of_frames.geometries_of_spaces(tree, scroll_offsets);
         let stack_the_frame_draws_with = stack_of_frames.stack.clone();
-        let mut tile_budget = stack_of_frames
-            .layer_plan
-            .is_some()
-            .then(|| TileBudgetOfFrame::within(viewport_rect));
+        // A frame that scales its raster down shows more of the raster than its own pixels.
+        let raster_shown_through_frame = frame.rect_of_raster_shown_in(viewport_rect);
+        let mut tile_budget = stack_of_frames.layer_plan.is_some().then(|| {
+            TileBudgetOfFrame::within(IntRect::new(
+                0,
+                0,
+                viewport_rect.width.max(raster_shown_through_frame.width),
+                viewport_rect.height.max(raster_shown_through_frame.height),
+            ))
+        });
         let stack = stack_the_frame_draws_with.as_ref();
+        let extent_of_viewport_space = extent_of_viewport_space(stack);
+        let rect_of_raster_shown = raster_shown_through_frame.intersected(extent_of_viewport_space);
         // Built at the first question, as only media the window server may show and spaces whose anchors the
         // compositor animates ask for it.
         let world_transforms_of_frame = OnceCell::new();
@@ -1063,10 +1151,9 @@ impl ContextPresenting {
             world_transforms_of_frame
                 .get_or_init(|| WorldTransforms::new(tree, scroll_offsets, Some(FloatMatrix4x4::identity())))
         };
-        let window_server_may_show_media = self.why_window_server_shows_no_media_of_this_context(env).is_none();
         let window_server_compositing = self.window_server_compositing(env);
-        let window_server_placements_of_media = if window_server_may_show_media {
-            stack.window_server_placements_of_media(storage, tree, world_of_frame, viewport_rect)
+        let window_server_placements_of_media = if window_server_compositing.shows_tiles_of_painted_layers {
+            stack.window_server_placements_of_media(storage, tree, world_of_frame, extent_of_viewport_space)
         } else {
             WindowServerPlacementsOfMedia::default()
         };
@@ -1082,29 +1169,25 @@ impl ContextPresenting {
         } else {
             WindowServerPlacementsOfEffects::default()
         };
-        let shown_by_window_server_by_layer = if window_server_may_show_media {
-            stack.layers_the_window_server_shows(
-                &composite_offsets,
-                &WhatWindowServerShowsOfFrame {
-                    compositing: window_server_compositing,
-                    can_show_media_of_layer: &|layer_index| {
-                        self.why_window_server_does_not_show_media_layer(
-                            env,
-                            &window_server_placements_of_media,
-                            layer_index,
-                            &stack.layers[layer_index.0],
-                            live_content,
-                        )
-                        .is_none()
-                    },
-                    can_composite_effect_of_node: &|node_index| {
-                        matches!(window_server_placements_of_effects.of_node(node_index), Some(Ok(_)))
-                    },
+        let shown_by_window_server_by_layer = stack.layers_the_window_server_shows(
+            &composite_offsets,
+            &WhatWindowServerShowsOfFrame {
+                compositing: window_server_compositing,
+                can_show_media_of_layer: &|layer_index| {
+                    self.why_window_server_does_not_show_media_layer(
+                        env,
+                        &window_server_placements_of_media,
+                        layer_index,
+                        &stack.layers[layer_index.0],
+                        live_content,
+                    )
+                    .is_none()
                 },
-            )
-        } else {
-            vec![false; stack.layers.len()]
-        };
+                can_composite_effect_of_node: &|node_index| {
+                    matches!(window_server_placements_of_effects.of_node(node_index), Some(Ok(_)))
+                },
+            },
+        );
         let compositing_of_layers: Vec<LayerCompositingInFrame> = (stack.base_layer.0..stack.layers.len())
             .map(LayerIndex)
             .filter(|&layer_index| layer_index == stack.base_layer || stack.layers[layer_index.0].may_hold_content)
@@ -1169,7 +1252,7 @@ impl ContextPresenting {
                 compositing_of_layer(stack, band.layer_below_all_cuts, &composite_offsets, &spaces_to_frame);
             let composited_filter_read_reach = composited_filter_read_reach_by_layer[band.layer_below_all_cuts.0];
             let shown_rect = compositing_of_layer_below_all_cuts
-                .rect_shown_in_layer_space(viewport_rect, composited_filter_read_reach);
+                .rect_shown_in_layer_space(rect_of_raster_shown, composited_filter_read_reach);
             // Frames drawn with one stack draw one list, so the tile keys of the band are bound to the list and the band
             // of the frame.
             let geometry = &geometries[raster_space_index.0];
@@ -1191,12 +1274,13 @@ impl ContextPresenting {
                     raster_space_index,
                     shown_rect,
                     viewport_rect,
+                    rect_of_raster_shown,
                     composited_filter_read_reach,
                 ),
                 frame_rect_in_space_unless_viewport_or_transformed(
                     raster_space_index,
                     compositing_of_layer_below_all_cuts.space_to_frame,
-                    viewport_rect,
+                    raster_shown_through_frame,
                 ),
             );
             work_counts.cells_binned += keying_counts.cells_binned as u64;
@@ -1210,9 +1294,11 @@ impl ContextPresenting {
                 } else {
                     tile.content_bounds
                 };
+                // A tile of the viewport's space is rastered over all of its cell within the space, and not only where
+                // the frame shows it, so that a frame that shows more of the cell does not raster the tile again.
                 if raster_space_index == RasterSpaceIndex::VIEWPORT {
-                    part_of_cell_needed =
-                        part_of_cell_needed.intersected(inflated(viewport_rect, composited_filter_read_reach));
+                    part_of_cell_needed = part_of_cell_needed
+                        .intersected(inflated(extent_of_viewport_space, composited_filter_read_reach));
                 }
                 if part_of_cell_needed.is_empty() {
                     continue;
@@ -1264,7 +1350,7 @@ impl ContextPresenting {
             &tile_keying_by_raster_space,
             &composite_offsets,
             &spaces_to_frame,
-            viewport_rect,
+            rect_of_raster_shown,
             painted.map(|painted| &painted.content_hash_by_composited_node),
         );
         let mut stale_rect = composited_effects.stale_rect;
@@ -1273,10 +1359,11 @@ impl ContextPresenting {
             &mut shown_tiles_by_layer,
             &compositing_of_layers,
             &composited_effects.read_reaches_in_frame,
-            viewport_rect,
+            rect_of_raster_shown,
             |identity| self.layer_overlay.hides_layer(identity),
         ) as u64;
         let mut media_replayed_by_identity = HashMap::new();
+        let mut media_shown_by_window_server_changed = false;
         for compositing in &compositing_of_layers {
             let layer_index = compositing.layer_index;
             let layer = &stack.layers[layer_index.0];
@@ -1285,7 +1372,7 @@ impl ContextPresenting {
                 let media_replayed = MediaRecordsReplayedInFrame {
                     content_hash: tile_keying_by_raster_space[raster_space_index.0]
                         .content_hash_of_records_within(*record_span),
-                    reach_in_frame: compositing.rect_in_frame(layer.reach, viewport_rect),
+                    reach_in_frame: compositing.rect_in_frame(layer.reach, rect_of_raster_shown),
                 };
                 let media_replayed_in_latest_frame =
                     painted.and_then(|painted| painted.media_replayed_by_identity.get(&layer.identity).copied());
@@ -1293,6 +1380,13 @@ impl ContextPresenting {
                     stale_rect = stale_rect.united(media_replayed.reach_in_frame).united(
                         media_replayed_in_latest_frame.map_or(IntRect::default(), |latest| latest.reach_in_frame),
                     );
+                }
+                if compositing.shown_by_window_server
+                    && matches!(layer.content, LayerContent::Media { .. })
+                    && media_replayed_in_latest_frame
+                        .is_none_or(|latest| latest.content_hash != media_replayed.content_hash)
+                {
+                    media_shown_by_window_server_changed = true;
                 }
                 media_replayed_by_identity.insert(layer.identity, media_replayed);
                 continue;
@@ -1303,13 +1397,13 @@ impl ContextPresenting {
                 .count() as u64;
             // The window server shows the tiles of the layer as they are, so the frame holds nothing that goes stale
             // with them.
-            if compositing.shown_by_window_server && window_server_compositing.shows_tiles_of_painted_layers {
+            if compositing.shown_by_window_server {
                 continue;
             }
             stale_rect = stale_rect.united(self.layers.tiles.stale_rect_of_layer(
                 &shown_tiles_by_layer[layer_index.0],
                 compositing,
-                viewport_rect,
+                rect_of_raster_shown,
                 composited_filter_read_reach_by_layer[layer_index.0],
             ));
         }
@@ -1320,6 +1414,7 @@ impl ContextPresenting {
                 window_server_placements_of_media,
                 window_server_placements_of_effects,
                 window_server_compositing,
+                raster_to_frame: frame.frame_inputs.raster_to_frame,
                 content_hash_by_composited_node: composited_effects.content_hash_by_composited_node,
                 media_replayed_by_identity,
             },
@@ -1327,6 +1422,7 @@ impl ContextPresenting {
             shown_tiles_by_layer,
             composited_filter_read_reach_by_layer,
             frame_allows_lcd_text,
+            media_shown_by_window_server_changed,
             work_counts,
         };
         Some((layer_update, stale_rect))
@@ -1437,13 +1533,22 @@ impl ContextPresenting {
                 } else {
                     name_not_shown.clone()
                 };
+                let (space_to_frame, composite_clip) = match frame.frame_inputs.raster_to_frame {
+                    Some(raster_to_frame) => (
+                        space_to_frame_through(raster_to_frame, compositing.space_to_frame),
+                        compositing
+                            .composite_clip
+                            .map(|clip| SpaceToFrame::Transform(raster_to_frame).rect_in_frame(clip)),
+                    ),
+                    None => (compositing.space_to_frame, compositing.composite_clip),
+                };
                 ModelLayer {
                     identity: compositing.identity,
                     name,
                     nodes_named,
                     hidden: hidden_by_layer[position],
-                    space_to_frame: compositing.space_to_frame,
-                    composite_clip: compositing.composite_clip,
+                    space_to_frame,
+                    composite_clip,
                     content,
                     raster_counts_since_reset: RasterCountsByCause::default(),
                 }
@@ -1521,32 +1626,34 @@ impl ContextPresenting {
                 .iter()
                 .map(|compositing| compositing.identity)
                 .collect();
-            layers.window_server.keep_only_layers(&identities_in_stack);
             layers.tiles.keep_only_layers(&identities_in_stack);
         }
         layers.tiles.evict_spare_tiles_if_tiles_changed(env);
         painted_layers
     }
 
-    /// Paints what the frame holds of its layers over `damage_rect`, and presents the layers the window server shows to
-    /// it. Answers the rect it painted, which grows to the whole raster where the frame has to hold what the window
-    /// server was to show by itself, and the sublayers the window server shows of the frame, bottom to top. Unless
-    /// `paints_ui_overlays` is set, the frame leaves out the overlays of the browser and of the layers.
+    /// Rasters the tiles of the layers of the frame, made like `like`, and presents the layers the window server shows
+    /// to it. Where it cannot be given them, the frame holds every layer and repaints all of the raster. A frame that
+    /// changes nothing it holds rasters no tile unless the window server shows layers of it, and keeps the overlays the
+    /// window server shows where they draw as in the latest frame. Answers the sublayers the window server shows of the
+    /// frame, bottom to top, and the rects of the frame where tiles are painted straight from the list.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn paint_layered_frame(
+    pub(super) fn raster_and_present_layers(
         &mut self,
         env: &PresentingEnvironment<'_>,
-        surface: &Rc<PaintingSurface>,
+        like: &Rc<PaintingSurface>,
         frame: &FrameToPaint<'_>,
-        mut damage_rect: IntRect,
-        layer_update: &mut LayerUpdate,
+        frame_damage: &mut FrameDamage,
         live_content: &LiveContent,
-        paints_ui_overlays: bool,
-    ) -> (IntRect, Vec<FfiSublayer>) {
-        env.raster.start_raster_cache_frame(env.context_id);
-        // A store can miss the damage of several frames, which joined can reach part of what a composited effect reads.
-        damage_rect = layer_update.damage_grown_over_what_composited_effects_read(damage_rect);
-        let rects_painted_straight = self.raster_tiles_of_layers(env, surface, frame, layer_update);
+        frame_changes_nothing_it_holds: bool,
+        overlays_draw_same_as_in_latest_frame: bool,
+    ) -> (Vec<PlannedSublayer>, Vec<IntRect>) {
+        let layer_update = &mut frame_damage.layers;
+        let rects_painted_straight = if frame_changes_nothing_it_holds && !layer_update.shown_by_window_server() {
+            Vec::new()
+        } else {
+            self.raster_tiles_of_layers(env, like, frame, layer_update)
+        };
 
         // The overlay goes into the surface the window server shows the overlays from, so it is worked out first,
         // expecting presenting to the window server to succeed.
@@ -1566,17 +1673,25 @@ impl ContextPresenting {
             let presented_sublayers = rects_painted_straight
                 .is_empty()
                 .then(|| {
-                    self.present_layers_to_window_server(env, frame, &layer_update.layers, surface, live_content, false)
+                    self.present_layers_to_window_server(
+                        env,
+                        frame,
+                        &layer_update.layers,
+                        like,
+                        live_content,
+                        frame_changes_nothing_it_holds && overlays_draw_same_as_in_latest_frame,
+                    )
                 })
                 .flatten();
             match presented_sublayers {
                 Some(presented_sublayers) => sublayers = presented_sublayers,
                 None => {
                     layer_update.hold_every_layer_in_frame();
-                    damage_rect = self.raster_rect();
+                    frame_damage.rect_in_raster_device_pixels = self.raster_rect();
                 }
             }
         }
+        let layer_update = &frame_damage.layers;
         if layer_update.shown_by_window_server() != expected_shown_by_window_server {
             self.update_layer_overlay_with_frame(
                 env,
@@ -1587,56 +1702,8 @@ impl ContextPresenting {
                 live_content,
             );
         }
-
-        self.composite_frame_from_layers(
-            env,
-            surface,
-            frame,
-            damage_rect,
-            layer_update,
-            &rects_painted_straight,
-            paints_ui_overlays,
-        );
-        if !layer_update.shown_by_window_server() {
-            self.layers.window_server.did_paint_compositor_overlays_into_store();
-        }
         self.layer_overlay.did_paint_frame();
-        (damage_rect, sublayers)
-    }
-
-    /// Presents to the window server the layers it shows of a frame that changes nothing of what the frame holds, or
-    /// that holds nothing, once it has rastered the tiles those layers show, and answers the sublayers the window
-    /// server then shows of the frame, bottom to top. None where the window server cannot be given the layers, which
-    /// the frame then has to hold.
-    pub(super) fn present_layers_of_frame_painted_into_no_store(
-        &mut self,
-        env: &PresentingEnvironment<'_>,
-        frame: &FrameToPaint<'_>,
-        layer_update: &mut LayerUpdate,
-        live_content: &LiveContent,
-        overlays_draw_same_as_in_latest_frame: bool,
-    ) -> Option<Vec<FfiSublayer>> {
-        let surface_tiles_are_made_like = self
-            .layers
-            .window_server
-            .surface_tiles_are_made_like_without_store(env)?;
-        env.raster.start_raster_cache_frame(env.context_id);
-        let rects_painted_straight =
-            self.raster_tiles_of_layers(env, &surface_tiles_are_made_like, frame, layer_update);
-        if !rects_painted_straight.is_empty() {
-            return None;
-        }
-        self.update_layer_overlay_with_frame(env, frame, layer_update, true, false, live_content);
-        let sublayers = self.present_layers_to_window_server(
-            env,
-            frame,
-            &layer_update.layers,
-            &surface_tiles_are_made_like,
-            live_content,
-            overlays_draw_same_as_in_latest_frame,
-        )?;
-        self.layer_overlay.did_paint_frame();
-        Some(sublayers)
+        (sublayers, rects_painted_straight)
     }
 
     /// Rasters the tiles that each painted layer of the frame shows and that lack current pixels, and answers the
@@ -1661,6 +1728,9 @@ impl ContextPresenting {
             .expect("a frame with layers has a stack");
         debug_assert!(Rc::ptr_eq(&layer_update.layers.stack, &stack_of_frames.stack));
         let stack = layer_update.layers.stack.as_ref();
+        let extent_of_viewport_space = extent_of_viewport_space(stack);
+        let raster_shown_through_frame = frame.rect_of_raster_shown_in(viewport_rect);
+        let rect_of_raster_shown = raster_shown_through_frame.intersected(extent_of_viewport_space);
         let tiles_replay_the_whole_list = stack.one_layer_list_cannot_tell_which_records_show_in_tile();
         let mut rects_painted_straight = Vec::new();
         for compositing in &layer_update.layers.compositing_of_layers {
@@ -1672,12 +1742,12 @@ impl ContextPresenting {
             let raster_space_index = stack.space_of_layer(layer_index);
             let composited_filter_read_reach = layer_update.composited_filter_read_reach_by_layer[layer_index.0];
             let rect_shown_in_layer_space =
-                compositing.rect_shown_in_layer_space(viewport_rect, composited_filter_read_reach);
+                compositing.rect_shown_in_layer_space(rect_of_raster_shown, composited_filter_read_reach);
             let allows_lcd_text = layer_allows_lcd_text(stack, layer_index, layer_update.frame_allows_lcd_text);
             let frame_rect_in_layer_space = frame_rect_in_space_unless_viewport_or_transformed(
                 raster_space_index,
                 compositing.space_to_frame,
-                viewport_rect,
+                raster_shown_through_frame,
             );
             let band_tile_keys = || {
                 stack_of_frames.band_tile_keys[layer.band_index.0]
@@ -1702,7 +1772,7 @@ impl ContextPresenting {
                 replay_with_scroll_offsets(env, target, frame, selection, &geometry.raster_scroll_offsets);
             };
             if let LayerContent::OwnSurface { record_span } = layer.content {
-                if layer_update.layers.window_server_shows_tiles_of(compositing) {
+                if compositing.shown_by_window_server {
                     let painting = OwnSurfacePainting {
                         content_hash: layer_update.layers.media_replayed_by_identity[&compositing.identity]
                             .content_hash,
@@ -1742,11 +1812,12 @@ impl ContextPresenting {
                         raster_space_index,
                         rect_shown_in_layer_space,
                         viewport_rect,
+                        rect_of_raster_shown,
                         composited_filter_read_reach,
                     ),
                     clear_color: clear_color_of_layer(stack, layer_index, surface_clear_color),
-                    rastered_within: (raster_space_index == RasterSpaceIndex::VIEWPORT).then_some(viewport_rect),
-                    shown_by_window_server: layer_update.layers.window_server_shows_tiles_of(compositing),
+                    rastered_within: stack.rect_rasters_of_space_stay_within(raster_space_index),
+                    shown_by_window_server: compositing.shown_by_window_server,
                     window_server_shows_tiles: layer_update
                         .layers
                         .window_server_compositing
@@ -1764,27 +1835,44 @@ impl ContextPresenting {
                 rastered
                     .rects_painted_straight
                     .into_iter()
-                    .map(|rect_in_layer_space| compositing.rect_in_frame(rect_in_layer_space, viewport_rect)),
+                    .map(|rect_in_layer_space| compositing.rect_in_frame(rect_in_layer_space, rect_of_raster_shown)),
             );
             layer_update.work_counts.tiles_rastered += rastered.tile_count;
         }
         rects_painted_straight
     }
 
+    /// Composites what the frame holds of its layers into the surface over `damage_rect`, and answers the rect it
+    /// painted. Unless `paints_ui_overlays` is set, the frame leaves out the overlays of the browser and of the layers.
     #[allow(clippy::too_many_arguments)]
-    fn composite_frame_from_layers(
-        &self,
+    pub(super) fn composite_frame_from_layers(
+        &mut self,
         env: &PresentingEnvironment<'_>,
         surface: &Rc<PaintingSurface>,
         frame: &FrameToPaint<'_>,
-        damage_rect: IntRect,
+        mut damage_rect: IntRect,
         layer_update: &LayerUpdate,
         rects_painted_straight: &[IntRect],
         paints_ui_overlays: bool,
-    ) {
+    ) -> IntRect {
+        // A store can miss the damage of several frames, which joined can reach part of what a composited effect reads.
+        // A frame that maps the raster to its pixels through a transform repaints all of them, and what effects read is
+        // in the pixels of the raster.
+        if frame.frame_inputs.raster_to_frame.is_none() {
+            damage_rect = layer_update.damage_grown_over_what_composited_effects_read(damage_rect);
+        }
         let raster = env.raster;
         let save_count = raster.save(surface);
         raster.clip_rect(surface, damage_rect);
+        // The layers, and what is painted straight from the list, are in the pixels of the raster. The overlays are in
+        // those of the frame.
+        let save_count_outside_raster_to_frame = raster.save(surface);
+        if frame.frame_inputs.raster_to_frame.is_some() {
+            // The layers can leave pixels of the frame uncovered at its edges.
+            raster.clear(surface, frame.surface_clear_color());
+        }
+        let (damage_rect_in_raster, sampling) =
+            draw_from_pixels_of_raster(raster, surface, frame.frame_inputs.raster_to_frame, damage_rect);
         if let Some(base_layer_compositing) = layer_update
             .layers
             .compositing_of_layers
@@ -1801,25 +1889,26 @@ impl ContextPresenting {
                 }
                 self.layers
                     .tiles
-                    .copy_into(raster, surface, damage_rect, base_layer_compositing);
+                    .copy_into(raster, surface, damage_rect_in_raster, base_layer_compositing, sampling);
             }
         }
         self.composite_layers_above_base_of_stack(
             env,
             surface,
             frame,
-            damage_rect,
+            damage_rect_in_raster,
             &layer_update.layers,
             &layer_update.composited_filter_read_reach_by_layer,
             LayersToComposite::HeldByFrame,
         );
-        if !layer_update.shown_by_window_server() {
+        let window_server_shows_layers = layer_update.shown_by_window_server();
+        if !window_server_shows_layers {
             let selection_painting_straight = ReplaySelection {
                 allows_lcd_text: layer_update.frame_allows_lcd_text,
                 ..Default::default()
             };
             for &rect_painted_straight in rects_painted_straight {
-                let damaged_rect_painted_straight = rect_painted_straight.intersected(damage_rect);
+                let damaged_rect_painted_straight = rect_painted_straight.intersected(damage_rect_in_raster);
                 if damaged_rect_painted_straight.is_empty() {
                     continue;
                 }
@@ -1830,12 +1919,17 @@ impl ContextPresenting {
                 replay_into(env, surface, frame, selection_painting_straight);
                 raster.restore_to_count(surface, save_count);
             }
-            if paints_ui_overlays {
-                self.apply_raster_transform(raster, surface);
-                self.paint_overlays(env, surface, frame.frame_inputs);
-            }
+        }
+        raster.restore_to_count(surface, save_count_outside_raster_to_frame);
+        if !window_server_shows_layers && paints_ui_overlays {
+            self.apply_raster_transform(raster, surface);
+            self.paint_overlays(env, surface, frame.frame_inputs);
         }
         raster.restore_to_count(surface, save_count);
+        if !window_server_shows_layers {
+            self.layers.window_server.did_paint_compositor_overlays_into_store();
+        }
+        damage_rect
     }
 
     /// Composites the layers that the window server showed by itself with the latest frame into the surface, which
@@ -1848,27 +1942,32 @@ impl ContextPresenting {
         damage_rect: IntRect,
         painted: &PaintedLayers,
     ) {
+        let raster = env.raster;
+        let save_count = raster.save(surface);
+        let (damage_rect_in_raster, sampling) =
+            draw_from_pixels_of_raster(raster, surface, painted.raster_to_frame, damage_rect);
         if let Some(base_layer_compositing) = painted
             .compositing_of_layers
             .first()
             .filter(|base_layer_compositing| base_layer_compositing.shown_by_window_server)
         {
-            env.raster.clear(surface, frame.surface_clear_color());
+            raster.clear(surface, frame.surface_clear_color());
             if !self.layer_overlay.hides_layer(&base_layer_compositing.identity) {
                 self.layers
                     .tiles
-                    .copy_into(env.raster, surface, damage_rect, base_layer_compositing);
+                    .copy_into(raster, surface, damage_rect_in_raster, base_layer_compositing, sampling);
             }
         }
         self.composite_layers_above_base_of_stack(
             env,
             surface,
             frame,
-            damage_rect,
+            damage_rect_in_raster,
             painted,
             &[],
             LayersToComposite::ShownByWindowServer,
         );
+        raster.restore_to_count(surface, save_count);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1892,43 +1991,35 @@ impl ContextPresenting {
             return;
         }
         debug_assert!(self.raster_transform() == FloatMatrix4x4::identity());
+        let layers = compositing_of_layers
+            .iter()
+            .skip(1)
+            .filter(|compositing| compositing.shown_by_window_server == composites_layers_the_window_server_shows)
+            .filter(|compositing| !self.layer_overlay.hides_layer(&compositing.identity));
         composite_inside_effects_of_frame(env, surface, frame, |compositing_session| {
-            let mut entered_composited_bands: Vec<BandIndex> = Vec::new();
-            let mut composited_bands_around_layer: Vec<BandIndex> = Vec::new();
-            for compositing in compositing_of_layers
-                .iter()
-                .skip(1)
-                .filter(|compositing| compositing.shown_by_window_server == composites_layers_the_window_server_shows)
-                .filter(|compositing| !self.layer_overlay.hides_layer(&compositing.identity))
-            {
-                let layer_index = compositing.layer_index;
+            walk_composition(stack, layers, |step| {
+                let compositing = match step {
+                    CompositionStep::EnterBandOfCompositedEffect(band_index) => {
+                        let effect = stack.nodes[stack.bands[band_index.0].placement_node_index.0]
+                            .composited_effect
+                            .expect("a composited band is of a composited node");
+                        compositing_session.enter_effect(effect);
+                        return;
+                    }
+                    CompositionStep::LeaveInnermostBandEntered => {
+                        compositing_session.leave_effect();
+                        return;
+                    }
+                    CompositionStep::Layer(compositing) => compositing,
+                };
                 let layer = compositing.layer_in(stack);
                 let damage_grown_by_filter_reads = inflated(
                     damage_rect,
                     composited_filter_read_reach_by_layer
-                        .get(layer_index.0)
+                        .get(compositing.layer_index.0)
                         .copied()
                         .unwrap_or(0),
                 );
-                composited_bands_around_layer.clear();
-                composited_bands_around_layer.extend(stack.composited_bands_around_layer_innermost_first(layer_index));
-                composited_bands_around_layer.reverse();
-                let count_of_bands_still_entered = entered_composited_bands
-                    .iter()
-                    .zip(&composited_bands_around_layer)
-                    .take_while(|(entered, around_layer)| entered == around_layer)
-                    .count();
-                while entered_composited_bands.len() > count_of_bands_still_entered {
-                    compositing_session.leave_effect();
-                    entered_composited_bands.pop();
-                }
-                for &band_index in &composited_bands_around_layer[count_of_bands_still_entered..] {
-                    let effect = stack.nodes[stack.bands[band_index.0].placement_node_index.0]
-                        .composited_effect
-                        .expect("a composited band is of a composited node");
-                    compositing_session.enter_effect(effect);
-                    entered_composited_bands.push(band_index);
-                }
                 if let LayerContent::Media { record_span } | LayerContent::OwnSurface { record_span } = &layer.content {
                     if !compositing
                         .rect_in_frame(layer.reach, damage_grown_by_filter_reads)
@@ -1936,7 +2027,7 @@ impl ContextPresenting {
                     {
                         compositing_session.replay_records(*record_span);
                     }
-                    continue;
+                    return;
                 }
                 let clips_of_layer = CompositeClipsOfRaster {
                     rect: compositing.composite_clip,
@@ -1955,10 +2046,11 @@ impl ContextPresenting {
                         TileDraw::TileSurface {
                             surface,
                             rect_in_layer_space,
+                            rect_in_surface,
                             ..
                         } => compositing_session.draw_raster(
                             surface.painting_surface().as_ffi().cast_mut().cast(),
-                            rect_of_size(size_of(rect_in_layer_space)),
+                            rect_in_surface,
                             rect_in_layer_space.translated(layer_to_frame_offset.x, layer_to_frame_offset.y),
                             clips_of_layer,
                             layer_to_frame_transform,
@@ -1977,10 +2069,7 @@ impl ContextPresenting {
                         TileDraw::FillOfJoinedOneColorTiles { .. } => {}
                     }
                 }
-            }
-            for _ in entered_composited_bands {
-                compositing_session.leave_effect();
-            }
+            });
         });
     }
 }
@@ -2050,7 +2139,7 @@ mod tests {
         display_list: &Rc<DisplayList>,
         one_layer: LayerStack,
     ) -> bool {
-        !layers.take_stack_of_frame(layer_plan, display_list, |_| one_layer, FloatMatrix4x4::identity())
+        !layers.take_stack_of_frame(layer_plan, display_list, |_| one_layer, FloatMatrix4x4::identity(), 1)
     }
 
     // A plan received again is another plan, even where it holds what the plan before held.
@@ -2110,7 +2199,13 @@ mod tests {
         let identity = FloatMatrix4x4::identity();
         let resized_viewport = IntRect::new(0, 0, 400, 300);
         let mut layers = ContextLayers::default();
-        layers.take_stack_of_frame(None, &display_list, |_| one_layer_of(&display_list, VIEWPORT), identity);
+        layers.take_stack_of_frame(
+            None,
+            &display_list,
+            |_| one_layer_of(&display_list, VIEWPORT),
+            identity,
+            1,
+        );
         let stack_of_frames = layers.stack_of_frames.as_mut().expect("the frame took a stack");
         let geometry = stack_of_frames.geometries_of_spaces(&tree, &[]).remove(0);
 
@@ -2118,7 +2213,8 @@ mod tests {
             None,
             &display_list,
             |_| one_layer_of(&display_list, resized_viewport),
-            identity
+            identity,
+            1
         ));
         let resized = layers.stack_of_frames.as_mut().expect("the frame took a stack");
         assert!(Rc::ptr_eq(&resized.geometries_of_spaces(&tree, &[])[0], &geometry));
@@ -2128,6 +2224,7 @@ mod tests {
             &display_list,
             |_| one_layer_of(&display_list, resized_viewport),
             scaled_twice(),
+            1,
         );
         let scaled = layers.stack_of_frames.as_ref().expect("the frame took a stack");
         assert!(scaled.geometry_by_space.iter().all(Option::is_none));
@@ -2200,17 +2297,31 @@ mod tests {
             .as_mut()
             .expect("the obstacles of the list and the tree are kept")
             .obstacles
-            .mask_declared_under_effects_its_mask_is_not_under = true;
+            .sorts_planes_by_depth = false;
         let stack_of_next_frame = layers.one_layer_stack_of_frame(&display_list, &tree, VIEWPORT, not_as_planned);
-        assert!(
-            stack_of_next_frame
-                .layering_obstacles
-                .mask_declared_under_effects_its_mask_is_not_under
-        );
+        assert!(!stack_of_next_frame.layering_obstacles.sorts_planes_by_depth);
         let another_tree = Arc::new((*tree).clone());
         let stack_of_another_tree =
             layers.one_layer_stack_of_frame(&display_list, &another_tree, VIEWPORT, not_as_planned);
         assert_eq!(stack_of_another_tree.layering_obstacles, obstacles_of_list_and_tree);
+    }
+
+    // A frame of a pinch that zooms twice as far in as the raster, and pans by 100 by 50 device pixels of the frame.
+    #[test]
+    fn a_frame_that_scales_the_raster_shows_and_keeps_the_tiles_of_what_it_shows_of_the_raster() {
+        let raster_to_frame = AffineTransform::new(2.0, 0.0, 0.0, 2.0, -100.0, -50.0);
+        let shown = SpaceToFrame::Transform(raster_to_frame).rect_in_space(VIEWPORT);
+        assert_eq!(shown, IntRect::new(50, 25, 400, 300));
+        assert_eq!(
+            rect_of_kept_tiles(RasterSpaceIndex::VIEWPORT, shown, VIEWPORT, shown, 0),
+            shown
+        );
+        // A space that the frame composites at an offset goes through the scale of the frame as well.
+        let space_to_frame = space_to_frame_through(raster_to_frame, SpaceToFrame::Offset(IntPoint { x: 10, y: 20 }));
+        assert_eq!(
+            space_to_frame.rect_in_frame(IntRect::new(0, 0, 10, 10)),
+            IntRect::new(-80, -10, 20, 20)
+        );
     }
 
     // A spinner that the compositor rotates, whose label a new list makes shorter.
@@ -2259,11 +2370,13 @@ mod tests {
                 window_server_placements_of_media: WindowServerPlacementsOfMedia::default(),
                 window_server_placements_of_effects: WindowServerPlacementsOfEffects::default(),
                 window_server_compositing: WindowServerCompositing::default(),
+                raster_to_frame: None,
                 content_hash_by_composited_node: HashMap::new(),
                 media_replayed_by_identity: HashMap::new(),
             },
             read_reaches_of_composited_effects_in_frame,
             frame_allows_lcd_text: false,
+            media_shown_by_window_server_changed: false,
             work_counts: FrameWorkCounts::default(),
         }
     }
@@ -2337,14 +2450,14 @@ mod tests {
     // Many layers that each hold a fill of the whole viewport, of one color or not, or many small fills.
     #[test]
     fn a_frame_drawn_with_a_plan_shows_tiles_of_any_color_up_to_a_budget_of_pixels_and_of_tiles() {
-        // A viewport of 800 by 600 pixels touches at most 3 by 3 cells.
-        let cells_shown_most = MAXIMUM_LAYERS_OF_TILES_A_PLAN_SHOWS * 9;
+        // A viewport of 800 by 600 pixels touches at most 2 by 3 cells.
+        let cells_shown_most = MAXIMUM_LAYERS_OF_TILES_A_PLAN_SHOWS * 6;
         let whole_cell = TileCoord::new(0, 0).cell_rect();
         let one_pixel = IntRect::new(0, 0, 1, 1);
         let mut budget_of_whole_cells = TileBudgetOfFrame::within(VIEWPORT);
         assert!((0..cells_shown_most).all(|_| budget_of_whole_cells.takes_tile(whole_cell)));
         assert!(!budget_of_whole_cells.takes_tile(one_pixel));
-        let tiles_shown_most = MAXIMUM_TILES_A_PLAN_SHOWS_PER_CELL_ONE_LAYER_SHOWS * 9;
+        let tiles_shown_most = MAXIMUM_TILES_A_PLAN_SHOWS_PER_CELL_ONE_LAYER_SHOWS * 6;
         let mut budget_of_small_tiles = TileBudgetOfFrame::within(VIEWPORT);
         assert!((0..tiles_shown_most).all(|_| budget_of_small_tiles.takes_tile(one_pixel)));
         assert!(!budget_of_small_tiles.takes_tile(one_pixel));
@@ -2361,11 +2474,13 @@ mod tests {
             &display_list,
             |_| unreachable!("a frame drawn with a plan takes its stack"),
             FloatMatrix4x4::identity(),
+            1,
         );
-        assert!(!layers.plan_shows_too_many_tiles(&plan));
+        assert!(!layers.plan_shows_too_many_tiles(&plan, 1));
         layers.draw_plan_of_frames_as_one_layer();
-        assert!(layers.plan_shows_too_many_tiles(&plan));
-        assert!(!layers.plan_shows_too_many_tiles(&plan_received_again));
+        assert!(layers.plan_shows_too_many_tiles(&plan, 1));
+        assert!(!layers.plan_shows_too_many_tiles(&plan, 2));
+        assert!(!layers.plan_shows_too_many_tiles(&plan_received_again, 1));
     }
 
     // An iframe smaller than a cell shows a whole cell of each layer whose space it scrolls.
@@ -2373,8 +2488,8 @@ mod tests {
     fn the_tiles_of_a_viewport_smaller_than_a_cell_are_counted_in_whole_cells() {
         assert_eq!(cells_one_layer_shows_at_most(IntRect::new(0, 0, 1, 1)), 1);
         assert_eq!(cells_one_layer_shows_at_most(IntRect::new(0, 0, 100, 40)), 4);
-        assert_eq!(cells_one_layer_shows_at_most(IntRect::new(0, 0, 800, 1)), 3);
-        assert_eq!(cells_one_layer_shows_at_most(VIEWPORT), 9);
-        assert_eq!(cells_one_layer_shows_at_most(IntRect::new(0, 0, 1025, 513)), 6);
+        assert_eq!(cells_one_layer_shows_at_most(IntRect::new(0, 0, 1500, 1)), 3);
+        assert_eq!(cells_one_layer_shows_at_most(VIEWPORT), 6);
+        assert_eq!(cells_one_layer_shows_at_most(IntRect::new(0, 0, 2049, 513)), 6);
     }
 }

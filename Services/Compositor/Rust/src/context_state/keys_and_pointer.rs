@@ -97,7 +97,7 @@ impl ContextState {
         }
         let result_of_pan = |viewport_rect| ContextUpdateResult {
             accepted: true,
-            frame_to_present: Some(PendingFrame::repainting_changes(viewport_rect)),
+            frame_to_present: Some(PendingFrame::within(viewport_rect)),
             should_request_rendering_update: true,
             ..Default::default()
         };
@@ -310,10 +310,7 @@ impl ContextState {
         if self.async_scrolling_viewport_rect.is_empty() {
             return None;
         }
-        Some(PendingFrame {
-            viewport_rect: self.async_scrolling_viewport_rect,
-            forced_damage_rect: Default::default(),
-        })
+        Some(PendingFrame::within(self.async_scrolling_viewport_rect))
     }
 
     /// The pointer left the scrollbar it was over here for a context nested in this one, or for the one around it.
@@ -325,6 +322,7 @@ impl ContextState {
     }
 
     fn scrollbar_under_pointer(&mut self, position: FloatPoint) -> Option<usize> {
+        self.prepare_wheel_hit_test_targets();
         self.scrollbar_controller.hit_test_scrollbar(
             &self.async_scroll_tree,
             self.scene.visual_context_tree_for_compositing(),
@@ -336,11 +334,14 @@ impl ContextState {
     // A nested context only takes the pointer where no scrollbar comes after the nested context's content in paint order.
     // The scrollbars of the viewport come after all else. A scrollbar that has faded out takes no pointer.
     fn nested_context_taking_mouse_event_at(&mut self, position: FloatPoint) -> Option<NestedContextHit> {
+        self.prepare_wheel_hit_test_targets();
         if !self.has_async_scrolling_state {
             return None;
         }
         let tree = self.scene.visual_context_tree_for_compositing();
-        let hit = self.async_scroll_tree.nested_context_at(tree, position)?;
+        let hit = self
+            .async_scroll_tree
+            .nested_context_at(tree, &self.scroll_state_snapshot, position)?;
         if let Some(index) = self.scrollbar_controller.hit_test_scrollbar(
             &self.async_scroll_tree,
             tree,
@@ -368,6 +369,7 @@ impl ContextState {
         self.async_scroll_tree.position_in_content_of_nested_context(
             nested_context_id,
             self.scene.visual_context_tree_for_compositing(),
+            &self.scroll_state_snapshot,
             position,
         )
     }
@@ -402,6 +404,7 @@ impl ContextState {
                 if let Some(hit) = self.nested_context_taking_mouse_event_at(position) {
                     return hand_to_nested_context(self, hit);
                 }
+                self.prepare_wheel_hit_test_targets();
                 let Some(drag) = self.scrollbar_controller.begin_drag(
                     &self.async_scroll_tree,
                     self.scene.visual_context_tree_for_compositing(),

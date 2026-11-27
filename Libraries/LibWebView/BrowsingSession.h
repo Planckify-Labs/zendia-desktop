@@ -6,11 +6,16 @@
 
 #pragma once
 
+#include <AK/ByteString.h>
+#include <AK/HashMap.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/OwnPtr.h>
 #include <AK/RefCounted.h>
+#include <AK/Time.h>
 #include <AK/Types.h>
+#include <AK/Vector.h>
 #include <AK/Weakable.h>
+#include <LibRequests/CertificateError.h>
 #include <LibWebView/Export.h>
 #include <LibWebView/Forward.h>
 
@@ -41,6 +46,28 @@ public:
     OwnPtr<BlobURLStore> blob_url_store;
     OwnPtr<HSTSStore> hsts_store;
     OwnPtr<PermissionManager> permission_manager;
+
+    struct CertificateException {
+        ByteString host;
+        u16 port { 0 };
+        ByteString fingerprint;
+        // Trust covers only the errors the user reviewed.
+        Requests::CertificateError errors { Requests::CertificateError::None };
+        // RequestServer's description of unnamed errors.
+        ByteString error_details;
+
+        bool operator==(CertificateException const&) const = default;
+    };
+
+    // Keep recent rejections until their warnings arrive, so users can only trust certificates actually presented.
+    struct RejectedCertificate {
+        CertificateException certificate;
+        MonotonicTime rejected_at;
+    };
+    HashMap<ByteString, Vector<RejectedCertificate>> rejected_certificates;
+
+    // Every RequestServer of the session accepts these, including those launched after the user trusted them.
+    Vector<CertificateException> trusted_certificates;
 
 private:
     explicit BrowsingSession(IsPrivate);

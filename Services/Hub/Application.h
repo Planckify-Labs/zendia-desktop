@@ -38,6 +38,7 @@ public:
     virtual bool platform_reports_scroll_momentum() const = 0;
     virtual bool platform_scrolls_elastically() const = 0;
     virtual bool platform_scrollbar_track_press_jumps() const = 0;
+    virtual bool platform_scrollbars_always_shown() const = 0;
     virtual bool platform_prefers_reduced_motion() const = 0;
     virtual bool platform_prefers_more_contrast() const = 0;
     virtual Vector<String> platform_preferred_languages() const = 0;
@@ -92,6 +93,7 @@ private:
     virtual NonnullRefPtr<Core::Promise<ByteString>> ask_user_for_download_path(ByteString const& file) const override;
     virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const override;
     virtual void display_error_dialog(StringView error_message) const override;
+    virtual void display_openssl_mismatch(PlatformFeatures::OpenSSLFacts const&) override;
 #if defined(LADYBIRD_HAS_UPDATE_CHECK)
     virtual void display_update_check_result(WebView::UpdateCheckResult const&, WebView::UpdateCheckTrigger) override;
 #endif
@@ -127,6 +129,7 @@ private:
     virtual bool platform_reports_scroll_momentum() const override;
     virtual bool platform_scrolls_elastically() const override;
     virtual bool platform_scrollbar_track_press_jumps() const override;
+    virtual bool platform_scrollbars_always_shown() const override;
     virtual bool platform_prefers_reduced_motion() const override;
     virtual bool platform_prefers_more_contrast() const override;
     virtual Vector<String> platform_preferred_languages() const override;
@@ -142,6 +145,8 @@ private:
     Optional<u64> m_active_view_id;
     bool m_ui_did_start { false };
     Vector<String> m_webdriver_windows_awaiting_ui;
+    // The system probe reports while the UI may still be opening its windows.
+    Optional<PlatformFeatures::OpenSSLFacts> m_openssl_mismatch_awaiting_ui;
 
     // What the Hub waits to hear from the UI.
     mutable HashMap<u64, Function<void(Utf16String)>> m_pending_clipboard_text_reads;

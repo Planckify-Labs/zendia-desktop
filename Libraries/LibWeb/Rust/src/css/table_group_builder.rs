@@ -141,8 +141,33 @@ pub(crate) enum LonghandSource<'a> {
 /// The gathered entries of one group, which has at most `MAX_GROUP_FIELD_COUNT` fields.
 type GroupValueEntries<'a> = smallvec::SmallVec<[GroupValueEntry<'a>; MAX_GROUP_FIELD_COUNT]>;
 
+/// The first value of a gap decoration list: the multicol column rule paints with a single width, style and color.
+fn first_gap_decoration_value(mut value: &RetainedStyleValueData) -> &RetainedStyleValueData {
+    loop {
+        value = match value.optional_data() {
+            Some(StyleValueData::ValueList { values, .. }) => &values.as_slice()[0],
+            // A repeat()'s arguments are its count followed by its values.
+            Some(StyleValueData::Function(function_payload)) => match function_payload.value.data() {
+                StyleValueData::ValueList { values, .. } => &values.as_slice()[1],
+                _ => unreachable!("a repeat() of gap decoration values holds a list"),
+            },
+            _ => return value,
+        };
+    }
+}
+
 impl<'a> LonghandSource<'a> {
     fn handle(&self, property_id: u16) -> &'a RetainedStyleValueData {
+        let handle = self.unmapped_handle(property_id);
+        match property_id {
+            property_id::COLUMN_RULE_COLOR | property_id::COLUMN_RULE_STYLE | property_id::COLUMN_RULE_WIDTH => {
+                first_gap_decoration_value(handle)
+            }
+            _ => handle,
+        }
+    }
+
+    fn unmapped_handle(&self, property_id: u16) -> &'a RetainedStyleValueData {
         match self {
             Self::Longhands {
                 longhands,
@@ -1983,6 +2008,12 @@ fn build_mask_group(
             payload.mask_origin = retained(property_id::MASK_ORIGIN);
             payload.mask_size = retained(property_id::MASK_SIZE);
             payload.mask_composite = retained(property_id::MASK_COMPOSITE);
+            payload.mask_border_source = retained(property_id::MASK_BORDER_SOURCE);
+            payload.mask_border_slice = retained(property_id::MASK_BORDER_SLICE);
+            payload.mask_border_width = retained(property_id::MASK_BORDER_WIDTH);
+            payload.mask_border_outset = retained(property_id::MASK_BORDER_OUTSET);
+            payload.mask_border_repeat = retained(property_id::MASK_BORDER_REPEAT);
+            payload.mask_border_mode = retained(property_id::MASK_BORDER_MODE);
         },
         parent,
     )

@@ -16,10 +16,11 @@ use crate::painting::record::{PaintPhase, PaintRecorder};
 use crate::painting::visual_context::build::{
     BoxFacts, compute_svg_viewport_transform_data, svg_viewport_transform_of,
 };
-use crate::painting::visual_context::node_values::{MaskLayerPresenceEntry, border_radii_data, mask_layer_presence};
+use crate::painting::visual_context::node_values::border_radii_data;
 use crate::painting::visual_context::{ClipData, EffectNodeData, EffectNodeIndex, MaskData, MaskLayerOrigin};
 use libgfx_rust::path::Path;
 use libgfx_rust::{AffineTransform, CompositingAndBlendingOperator, FloatPoint, FloatRect, MaskKind, multiply_affine};
+use smallvec::SmallVec;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MaskLayerSet {
@@ -107,61 +108,52 @@ fn transformed_int_rect_clip(transform: AffineTransform, rect: libgfx_rust::IntR
 }
 
 impl<O: Observer> PaintRecorder<'_, O> {
-    fn mask_layer_presence(&self, paintable: NodeSlotId, set: MaskLayerSet) -> Vec<MaskLayerPresenceEntry> {
-        mask_layer_presence(self.source, paintable, set == MaskLayerSet::CssAndSvg)
-    }
-
-    fn mask_effect_of_layer(
-        &self,
-        paintable: NodeSlotId,
-        origin: MaskLayerOrigin,
-    ) -> Option<(EffectNodeIndex, MaskData)> {
-        let tree = self.paint_state.visual_context_tree.as_deref()?;
+    /// The masks the visual context update gave `paintable` that are in `set`, each with the effect node that
+    /// composites its content, outermost first.
+    fn mask_effects_of(&self, paintable: NodeSlotId, set: MaskLayerSet) -> SmallVec<[(EffectNodeIndex, MaskData); 3]> {
+        let Some(tree) = self.paint_state.visual_context_tree.as_deref() else {
+            return SmallVec::new();
+        };
         self.source
             .with_paintable_visual_context_node_handles(paintable, |handles| {
                 handles
                     .effects
                     .iter()
-                    .find_map(|effect| match &tree.effect_nodes[effect.0 as usize].data {
-                        EffectNodeData::Mask(mask) if mask.origin == origin => Some((*effect, *mask)),
+                    .filter_map(|effect| match &tree.effect_nodes[effect.0 as usize].data {
+                        EffectNodeData::Mask(mask)
+                            if set == MaskLayerSet::CssAndSvg || mask.origin != MaskLayerOrigin::CssMaskLayers =>
+                        {
+                            Some((*effect, *mask))
+                        }
                         _ => None,
                     })
+                    .collect()
             })
     }
 
+    /// Declares the content of the masks of `paintable` that are in `set`. Returns whether an SVG mask or clip path
+    /// that covers no area leaves nothing of an SVG box, whose masks then declare no content.
     pub(crate) fn declare_mask_contents(&mut self, paintable: NodeSlotId, set: MaskLayerSet) -> bool {
-        let presence = self.mask_layer_presence(paintable, set);
-        if presence.is_empty() {
-            return false;
-        }
-        if set == MaskLayerSet::SvgOnly && presence.iter().any(|layer| layer.area.is_empty()) {
+        let masks = self.mask_effects_of(paintable, set);
+        if set == MaskLayerSet::SvgOnly && masks.iter().any(|(_, mask)| mask.rect.is_empty()) {
             return true;
         }
-        let stacking_context_site_consumes_the_layer = set == MaskLayerSet::CssAndSvg
-            && crate::painting::style_queries::establishes_stacking_context(self.source, paintable);
-        for layer in &presence {
-            if set == MaskLayerSet::SvgOnly && layer.origin == MaskLayerOrigin::CssMaskLayers {
-                continue;
-            }
-            let Some((effect, mask)) = self.mask_effect_of_layer(paintable, layer.origin) else {
-                continue;
-            };
+        for (effect, mask) in masks {
             let group = self.recorder.begin_mask_content();
-            match layer.origin {
+            match mask.origin {
                 MaskLayerOrigin::CssMaskLayers => {
+                    let area = crate::painting::paintable_geometry::absolute_border_box_rect(self.source, paintable);
                     self.trace_paint(Operation::Named(Some(paintable), "css-mask"), |this| {
-                        this.paint_css_mask_layers(paintable, layer.area);
+                        this.paint_css_mask_layers(paintable, area);
                     });
                 }
                 MaskLayerOrigin::SvgMask | MaskLayerOrigin::SvgClip => {
-                    if !layer.area.is_empty() || stacking_context_site_consumes_the_layer {
-                        self.record_referenced_svg_mask_or_clip_content(
-                            paintable,
-                            layer.origin,
-                            AffineTransform::identity(),
-                            mask.rect.to_float(),
-                        );
-                    }
+                    self.record_referenced_svg_mask_or_clip_content(
+                        paintable,
+                        mask.origin,
+                        AffineTransform::identity(),
+                        mask.rect.to_float(),
+                    );
                 }
             }
             self.recorder.finish_mask_content(group, effect, mask.rect);
@@ -181,10 +173,6 @@ impl<O: Observer> PaintRecorder<'_, O> {
 
     fn first_child_paintable_of_kind(&self, paintable: NodeSlotId, kind: NodeKind) -> Option<NodeSlotId> {
         crate::painting::svg_masking::first_child_paintable_of_kind(self.source, paintable, kind)
-    }
-
-    fn object_bounding_box_content_units_transform(&self, target: NodeSlotId) -> AffineTransform {
-        crate::painting::svg_masking::object_bounding_box_content_units_transform(self.source, target)
     }
 
     fn record_referenced_svg_mask_or_clip_content(
@@ -208,7 +196,7 @@ impl<O: Observer> PaintRecorder<'_, O> {
                 resource_box,
             );
         let mut content_units_transform_in_recorded_space = if content_units_object_bbox {
-            self.object_bounding_box_content_units_transform(target)
+            crate::painting::svg_masking::object_bounding_box_content_units_transform(self.source, resource_box)
         } else {
             AffineTransform::identity()
         };
@@ -254,7 +242,44 @@ impl<O: Observer> PaintRecorder<'_, O> {
             visible_device_rect: None,
         };
         crate::painting::record::paint::background::paint_resolved_background(self, paintable, &inputs);
+        if crate::painting::style_queries::mask_border_has_image(style.mask()) {
+            self.paint_mask_border(paintable, style);
+        }
         self.recorder.restore_force_dark(suspended_force_dark);
+    }
+
+    // https://drafts.csswg.org/css-masking-1/#masking-with-the-mask-border-image
+    fn paint_mask_border(
+        &mut self,
+        paintable: NodeSlotId,
+        style: crate::css::computed_value_views::ComputedValuesView<'_>,
+    ) {
+        use crate::painting::record::paint::{border, border_image};
+        // INTEROP: The spec masks the element by the mask layers and the mask border image one after the other, but
+        //          engines that support a mask border paint it into the same mask as the mask layers, so content that
+        //          either of them covers stays visible.
+        // INTEROP: The spec has a mask border image that can't be displayed not mask the element, but engines that
+        //          support a mask border mask the element by it as by an image that paints nothing, which also keeps
+        //          an element whose mask border image is still loading from flashing unmasked.
+        // INTEROP: The spec leaves the content under the middle part of a mask border image whose slice has no fill
+        //          unmasked, but engines that support a mask border paint nothing there, like for a border image, so
+        //          it masks that content out.
+        // FIXME: Respect mask-border-mode: luminance.
+        let border_widths = border::present_css_border_widths(
+            style,
+            crate::painting::paintable_geometry::committed_border(self.source, paintable),
+            border::ALL_PIECE_EDGES,
+        );
+        let border_box_rect = crate::painting::paintable_geometry::absolute_border_box_rect(self.source, paintable);
+        border_image::paint_nine_piece_image(
+            self,
+            paintable,
+            style,
+            border_image::mask_border_values(style),
+            border_widths,
+            border::ALL_PIECE_EDGES,
+            border_box_rect,
+        );
     }
 
     pub(crate) fn walk_svg_resource(
@@ -325,15 +350,11 @@ impl<O: Observer> PaintRecorder<'_, O> {
         let walk = self
             .svg_resource_walk
             .expect("resource content paints inside a resource walk");
-        if self
-            .mask_layer_presence(svg_box, MaskLayerSet::SvgOnly)
-            .iter()
-            .any(|layer| layer.area.is_empty())
-        {
-            return;
-        }
         let (facts, svg_filter_bounds) =
             BoxFacts::gather_for_resource_content(self.source, svg_box, self.inputs.device_pixels_per_css_pixel);
+        if facts.is_hidden_by_empty_svg_mask_or_clip() {
+            return;
+        }
         self.recorder.set_accumulated_visual_context(walk.enclosing_context);
 
         let effects_group = facts

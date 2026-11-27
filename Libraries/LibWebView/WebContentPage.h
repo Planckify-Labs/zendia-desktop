@@ -162,6 +162,7 @@ public:
     // The user activation the UI process gives a page when it delivers input the user produced. Unlike the activation
     // a renderer reports, a compromised renderer cannot claim it.
     void give_user_activation();
+    void give_sticky_activation_to_window_of(Web::HTML::CrossProcessId document_id);
     void notify_about_user_activation(Web::HTML::CrossProcessId document_id);
     bool has_transient_user_activation() const;
     // Consumes the activation of every page of the tab, as consuming a window's activation does for the windows of its
@@ -237,6 +238,7 @@ private:
     virtual void did_set_device_pixel_ratio_for_testing(double device_pixel_ratio) override;
     virtual void did_find_in_page(size_t current_match_index, Optional<size_t> total_match_count) override;
     virtual void did_reply_embedder_message(u64 request_id, bool ok, String result_json) override;
+    virtual void did_request_certificate_warning(URL::URL url, Web::HTML::CrossProcessId document_state_id) override;
     virtual void did_request_cursor_change(Gfx::Cursor cursor) override;
     virtual void did_update_editing_history_state(bool can_undo, bool can_redo) override;
     virtual void did_set_text_fragment_indication_visibility(bool visible) override;
@@ -429,6 +431,7 @@ private:
     Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints, Web::HTML::CrossProcessId current_navigable_id, Utf16String name, bool no_opener, Optional<URL::URL> current_document_base_url);
     void did_close_browsing_context();
     virtual void did_complete_close_preflight(u64 request_id, bool approved) override;
+    virtual void did_show_validation_message(Web::HTML::CrossProcessId local_root_id, Gfx::IntPoint position, Utf16String message) override;
     virtual void did_request_select_dropdown(Web::HTML::CrossProcessId local_root_id, Gfx::IntPoint content_position, i32 minimum_width, Vector<Web::HTML::SelectItem> items) override;
     virtual void did_request_primary_paste() override;
     virtual void did_update_primary_selection(String text) override;

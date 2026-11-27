@@ -9,17 +9,17 @@ use crate::display_list::builder::{
     inline_transform_of, read_command,
 };
 use crate::display_list::commands::{
-    ClipMode, ClipNodeIndex, DeclareMaskContent, DisplayListCommandHeader, DisplayListCommandRun,
-    DisplayListCommandType, DisplayListPaintStyleType, DrawCompositedContext, DrawIsolatedGroup, DrawRepeatedTile,
-    EffectNodeIndex, FillPath, FillRect, FillRectWithRoundedCorners, InlineClipKind, OptionalFloatRect, PaintCaret,
-    PaintScrollBar, PaintVectorImage, PathPaintKind, ReplayClip, ReplayLayer, ReplayMask, SpatialNodeIndex, StrokePath,
+    ClipMode, ClipNodeIndex, DisplayListCommandHeader, DisplayListCommandRun, DisplayListCommandType,
+    DisplayListPaintStyleType, DrawCompositedContext, DrawIsolatedGroup, DrawRepeatedTile, EffectNodeIndex, FillPath,
+    FillRect, FillRectWithRoundedCorners, InlineClipKind, OptionalFloatRect, PaintCaret, PaintScrollBar,
+    PaintVectorImage, PathPaintKind, ReplayClip, ReplayLayer, ReplayMask, SpatialNodeIndex, StrokePath,
 };
 use crate::display_list::depth_sorted_plan::{DepthSortedReplayStepKind, build_depth_sorted_replay_plan};
 use crate::display_list::effect_clip_plan::EffectClipPlan;
 use crate::display_list::effect_geometry::{
     EffectGeometry, Extent, compute_effect_geometry, nearest_effects_at_or_above_where,
 };
-use crate::display_list::nested_records::{replays_nested_records_where_it_plays, span_bytes};
+use crate::display_list::nested_records::{holds_nested_records, span_bytes};
 use crate::display_list::storage::{ChunkIndexInList, DisplayListStorage, ListSpan};
 use crate::host::{
     CompositedContextDraw, IsolatedGroup, PresentedScrollbar, ResolvedFillRect, ResolvedFillRectWithRoundedCorners,
@@ -37,7 +37,6 @@ use libgfx_rust::{
     FloatVector3, IntRect, IntSize, MaskKind, WindingRule, enclosing_int_rect, multiply_affine,
 };
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::hash::Hasher;
 
 /// The raster primitives a replay draws through. Everything a painter is handed is resolved for the frame: it never
@@ -46,6 +45,8 @@ pub trait ReplayPainter {
     fn canvas_matrix(&mut self) -> FloatMatrix4x4;
     fn set_matrix(&mut self, matrix: &FloatMatrix4x4);
     fn would_be_fully_clipped_by_painter(&mut self, rect: IntRect) -> bool;
+    /// The bounds of the area the clips leave the next draw, in the pixels of the canvas.
+    fn device_clip_bounds(&mut self) -> IntRect;
     fn push_clip(&mut self, clip: &ReplayClip);
     fn push_clip_path(&mut self, path: &Path, winding_rule: WindingRule);
     fn push_layer(&mut self, layer: &ReplayLayer);
@@ -114,17 +115,21 @@ pub fn scrollbar_shown_by_frame<'a>(
 pub struct ResolvedCompositedContext {
     pub surface: *mut std::ffi::c_void,
     pub content_rect: FloatRect,
+    /// The part of `content_rect` the surface holds, which is less than all of it where the frame was too large to
+    /// raster whole.
+    pub held_content_rect: FloatRect,
 }
 
 /// Where a replay finds the frames of the contexts the list draws.
 pub trait CompositedContexts {
-    /// The frame of the child context as it is drawn into `destination_rect` under `canvas_matrix`, none where the
-    /// context shows nothing there.
+    /// The frame of the child context as it is drawn into `destination_rect` under `canvas_matrix`, where the clips
+    /// leave it `visible_device_rect` of the canvas; none where the context shows nothing there.
     fn resolve(
         &self,
         child_context_id: u64,
         destination_rect: FloatRect,
         canvas_matrix: &FloatMatrix4x4,
+        visible_device_rect: IntRect,
     ) -> Option<ResolvedCompositedContext>;
 }
 
@@ -137,6 +142,7 @@ impl CompositedContexts for NoCompositedContexts {
         _child_context_id: u64,
         _destination_rect: FloatRect,
         _canvas_matrix: &FloatMatrix4x4,
+        _visible_device_rect: IntRect,
     ) -> Option<ResolvedCompositedContext> {
         None
     }
@@ -179,35 +185,10 @@ impl ReplayFrame<'_> {
     }
 }
 
-/// What one display list holds for the streams of records it plays: the tree it was recorded against, and the
-/// content that each of its masks declared.
-pub struct ListReplay<'t> {
-    pub tree: &'t VisualContextTree,
-    declared_mask_content_by_effect: RefCell<HashMap<EffectNodeIndex, &'t [u8]>>,
-}
-
-impl<'t> ListReplay<'t> {
-    pub fn new(tree: &'t VisualContextTree) -> Self {
-        Self {
-            tree,
-            declared_mask_content_by_effect: RefCell::new(HashMap::new()),
-        }
-    }
-
-    fn declare_mask_content(&self, effect: EffectNodeIndex, content: &'t [u8]) {
-        self.declared_mask_content_by_effect
-            .borrow_mut()
-            .insert(effect, content);
-    }
-
-    fn declared_mask_content(&self, effect: EffectNodeIndex) -> Option<&'t [u8]> {
-        self.declared_mask_content_by_effect.borrow().get(&effect).copied()
-    }
-}
-
 /// What playing a stream of records needs besides the records.
 pub struct RecordsContext<'c, 't> {
-    pub list_replay: &'c ListReplay<'t>,
+    /// The tree the records were recorded against.
+    pub tree: &'t VisualContextTree,
     pub frame: &'c ReplayFrame<'c>,
     pub to_root_matrix_of_inline_clip_space: &'c dyn Fn(SpatialNodeIndex) -> Option<FloatMatrix4x4>,
 }
@@ -302,12 +283,71 @@ fn presented_scrollbar_with_colors(
     }
 }
 
-fn tile_raster_cache_key(tile_records: &[u8], tile_size: IntSize) -> u64 {
+fn tile_raster_cache_key(tile_records: &[u8], tile_size: IntSize, raster_scale: i32) -> u64 {
     let mut hasher = crate::fast_hash::fast_hasher();
     hasher.write(tile_records);
     hasher.write_i32(tile_size.width);
     hasher.write_i32(tile_size.height);
+    hasher.write_i32(raster_scale);
     hasher.finish()
+}
+
+/// The largest raster scale of content that is rastered once and shown scaled: that of frames that zoom the page most.
+const LARGEST_RASTER_SCALE: i32 = 8;
+
+/// The power of two, from 1 to `LARGEST_RASTER_SCALE`, at which a raster of content recorded at `recorded_size` and
+/// drawn at `shown_width` x `shown_height` under `canvas_matrix` has a pixel for each pixel of the canvas. Content that
+/// the canvas rotates, skews, mirrors or projects is rastered at 1.
+fn raster_scale_to_show(
+    canvas_matrix: &FloatMatrix4x4,
+    shown_width: f32,
+    shown_height: f32,
+    recorded_size: IntSize,
+) -> i32 {
+    let m = &canvas_matrix.elements;
+    if !canvas_matrix.is_2d_affine()
+        || m[0][1] != 0.0
+        || m[1][0] != 0.0
+        || !(m[0][0] > 0.0 && m[1][1] > 0.0)
+        || recorded_size.is_empty()
+    {
+        return 1;
+    }
+    let device_width = m[0][0] * shown_width;
+    let device_height = m[1][1] * shown_height;
+    // NB: The recorded size is rounded to whole pixels, so a raster one pixel smaller than the canvas shows it is not
+    //     magnified.
+    let raster_covers = |scale: i32| {
+        (recorded_size.width as f32 + 1.0) * scale as f32 >= device_width
+            && (recorded_size.height as f32 + 1.0) * scale as f32 >= device_height
+    };
+    let mut scale = 1;
+    while scale < LARGEST_RASTER_SCALE && !raster_covers(scale) {
+        scale *= 2;
+    }
+    scale
+}
+
+/// The raster scale of a repeated tile, which is rastered whole: that which shows it sharp, lowered until the raster
+/// fits in one surface of at most 16 MiB.
+fn raster_scale_of_repeated_tile(
+    canvas_matrix: &FloatMatrix4x4,
+    shown_width: f32,
+    shown_height: f32,
+    tile_size: IntSize,
+) -> i32 {
+    const LARGEST_DIMENSION: i64 = 16384;
+    const LARGEST_BYTE_SIZE: i64 = 16 * 1024 * 1024;
+    let fits = |scale: i32| {
+        let width = i64::from(tile_size.width) * i64::from(scale);
+        let height = i64::from(tile_size.height) * i64::from(scale);
+        width <= LARGEST_DIMENSION && height <= LARGEST_DIMENSION && width * height * 4 <= LARGEST_BYTE_SIZE
+    };
+    let mut scale = raster_scale_to_show(canvas_matrix, shown_width, shown_height, tile_size);
+    while scale > 1 && !fits(scale) {
+        scale /= 2;
+    }
+    scale
 }
 
 fn rasterize_tile_if_pattern<'t, Painter: ReplayPainter + ?Sized>(
@@ -329,9 +369,11 @@ fn rasterize_tile_if_pattern<'t, Painter: ReplayPainter + ?Sized>(
     if tile_size.is_empty() {
         return;
     }
+    // NB: The paint style maps the pattern's raster by its tile size.
     let tile = TileRaster {
         key: 0,
         size: tile_size,
+        raster_scale: 1,
         cacheable: false,
     };
     if painter.begin_tile_raster(&tile) {
@@ -339,7 +381,7 @@ fn rasterize_tile_if_pattern<'t, Painter: ReplayPainter + ?Sized>(
         replay_records(
             span_bytes(payload, paint_style.pattern_tile),
             &RecordsContext {
-                list_replay: context.list_replay,
+                tree: context.tree,
                 frame: &tile_frame,
                 to_root_matrix_of_inline_clip_space: &|_| None,
             },
@@ -355,7 +397,7 @@ fn play_record_resolving_frame_state<'t, Painter: ReplayPainter + ?Sized>(
     context: &RecordsContext<'_, 't>,
     painter: &mut Painter,
 ) {
-    let tree = context.list_replay.tree;
+    let tree = context.tree;
     match header.command_type {
         DisplayListCommandType::FillRect => {
             let command = read_command::<FillRect>(payload);
@@ -442,29 +484,34 @@ fn play_record_resolving_frame_state<'t, Painter: ReplayPainter + ?Sized>(
                 dst_rect.y = dst_rect.y.round();
             }
             let canvas_matrix = painter.canvas_matrix();
-            let Some(resolved_context) =
-                context
-                    .frame
-                    .composited_contexts
-                    .resolve(command.child_context_id.0, dst_rect, &canvas_matrix)
-            else {
+            let visible_device_rect = painter.device_clip_bounds();
+            let Some(resolved_context) = context.frame.composited_contexts.resolve(
+                command.child_context_id.0,
+                dst_rect,
+                &canvas_matrix,
+                visible_device_rect,
+            ) else {
                 return;
             };
-            if resolved_context.surface.is_null() || resolved_context.content_rect.is_empty() {
+            let (content_rect, held_rect) = (resolved_context.content_rect, resolved_context.held_content_rect);
+            if resolved_context.surface.is_null() || content_rect.is_empty() || held_rect.is_empty() {
                 return;
             }
+            // Only the part of the destination that shows the held part of the frame is drawn.
+            let horizontal_scale = dst_rect.width / content_rect.width;
+            let vertical_scale = dst_rect.height / content_rect.height;
+            let held_dst_rect = FloatRect::new(
+                dst_rect.x + (held_rect.x - content_rect.x) * horizontal_scale,
+                dst_rect.y + (held_rect.y - content_rect.y) * vertical_scale,
+                held_rect.width * horizontal_scale,
+                held_rect.height * vertical_scale,
+            );
             painter.draw_composited_context(&CompositedContextDraw {
                 surface: resolved_context.surface,
-                src_rect: resolved_context.content_rect,
-                dst_rect,
+                src_rect: held_rect,
+                dst_rect: held_dst_rect,
                 scaling_mode: command.scaling_mode,
             });
-        }
-        DisplayListCommandType::DeclareMaskContent => {
-            let command = read_command::<DeclareMaskContent>(payload);
-            context
-                .list_replay
-                .declare_mask_content(command.effect, span_bytes(payload, command.content));
         }
         DisplayListCommandType::DrawIsolatedGroup => {
             let command = read_command::<DrawIsolatedGroup>(payload);
@@ -477,7 +524,7 @@ fn play_record_resolving_frame_state<'t, Painter: ReplayPainter + ?Sized>(
                 filter_bytes_size: filter.len(),
             });
             let nested_records_context = RecordsContext {
-                list_replay: context.list_replay,
+                tree: context.tree,
                 frame: context.frame,
                 to_root_matrix_of_inline_clip_space: &|_| None,
             };
@@ -495,9 +542,16 @@ fn play_record_resolving_frame_state<'t, Painter: ReplayPainter + ?Sized>(
                 return;
             }
             let tile_records = span_bytes(payload, command.tile);
+            let raster_scale = raster_scale_of_repeated_tile(
+                &painter.canvas_matrix(),
+                command.dst_rect.width,
+                command.dst_rect.height,
+                command.tile_size,
+            );
             let tile = TileRaster {
-                key: tile_raster_cache_key(tile_records, command.tile_size),
+                key: tile_raster_cache_key(tile_records, command.tile_size, raster_scale),
                 size: command.tile_size,
+                raster_scale,
                 cacheable: true,
             };
             if painter.begin_tile_raster(&tile) {
@@ -505,7 +559,7 @@ fn play_record_resolving_frame_state<'t, Painter: ReplayPainter + ?Sized>(
                 replay_records(
                     tile_records,
                     &RecordsContext {
-                        list_replay: context.list_replay,
+                        tree: context.tree,
                         frame: &tile_frame,
                         to_root_matrix_of_inline_clip_space: &|_| None,
                     },
@@ -531,6 +585,12 @@ fn play_record_resolving_frame_state<'t, Painter: ReplayPainter + ?Sized>(
                 vector_image_id: command.vector_image_id.0,
                 rect: command.rect,
                 recorded_size: command.recorded_size,
+                raster_scale: raster_scale_to_show(
+                    &painter.canvas_matrix(),
+                    command.rect.width,
+                    command.rect.height,
+                    command.recorded_size,
+                ),
             };
             if painter.begin_vector_image(&placement, command.requires_direct_replay) == VectorImageReplay::Skipped {
                 return;
@@ -539,7 +599,7 @@ fn play_record_resolving_frame_state<'t, Painter: ReplayPainter + ?Sized>(
             replay_records(
                 span_bytes(payload, command.records),
                 &RecordsContext {
-                    list_replay: context.list_replay,
+                    tree: context.tree,
                     frame: &vector_image_frame,
                     to_root_matrix_of_inline_clip_space: &|_| None,
                 },
@@ -562,10 +622,13 @@ pub fn replay_records<'t, Painter: ReplayPainter + ?Sized>(
 ) {
     let to_root_matrix_of_inline_clip_space = context.to_root_matrix_of_inline_clip_space;
     for_each_command(records, |header, _, payload| {
-        if header.command_type.is_compositor_metadata() {
+        // NB: A mask composites the content it declares where the mask is, whatever the declaration is recorded under.
+        if header.command_type.is_compositor_metadata()
+            || header.command_type == DisplayListCommandType::DeclareMaskContent
+        {
             return;
         }
-        if replays_nested_records_where_it_plays(header.command_type, payload) {
+        if holds_nested_records(header.command_type, payload) {
             let bounding_rect = bounding_rect_computed_from_payload(header, payload).unwrap_or_default();
             if bounding_rect.is_empty() || painter.would_be_fully_clipped_by_painter(bounding_rect) {
                 return;
@@ -713,7 +776,6 @@ enum SwitchResult {
 struct ReplayDriver<'a, Painter: ReplayPainter + ?Sized> {
     tree: &'a VisualContextTree,
     display_list: &'a DisplayListStorage,
-    list_replay: ListReplay<'a>,
     frame: &'a ReplayFrame<'a>,
     effect_clips: &'a EffectClipPlan,
     root_group_color: Color,
@@ -770,7 +832,7 @@ fn replay_clip_of(clip: &crate::visual_context::ClipData) -> ReplayClip {
 }
 
 // An effect keeps its filters for as long as the tree keeps its structure.
-fn layer_filter_cache_key(tree: &VisualContextTree, effect: EffectNodeIndex) -> u64 {
+pub fn layer_filter_cache_key(tree: &VisualContextTree, effect: EffectNodeIndex) -> u64 {
     let mut hasher = crate::fast_hash::fast_hasher();
     hasher.write_u64(tree.structural_epoch);
     hasher.write_u32(effect.0);
@@ -996,7 +1058,11 @@ impl<Painter: ReplayPainter + ?Sized> ReplayDriver<'_, Painter> {
         };
         let effect_space_to_root = self.world.draw_matrix(effect_space);
         if !effect_space_to_root.is_2d_affine() {
-            return None;
+            let content_in_root = self.world.bounds_in_root_of_rect_drawn_in(effect_space, content)?;
+            let margin = 2.0 * LAYER_CONTENT_MARGIN_IN_DEVICE_PIXELS;
+            return self
+                .world
+                .bounds_in_space_of_root_rect(effect_space, content_in_root.inflated(margin, margin));
         }
         let root_to_layer = effect_space_to_root.extract_2d_affine().inverse()?;
         let margin_x = LAYER_CONTENT_MARGIN_IN_DEVICE_PIXELS * (root_to_layer.a().abs() + root_to_layer.c().abs());
@@ -1219,9 +1285,9 @@ impl<Painter: ReplayPainter + ?Sized> ReplayDriver<'_, Painter> {
                         EffectNodeData::Mask(mask) => {
                             self.ensure_canvas_matrix_in_draw_space_of(node.spatial);
                             self.painter.begin_mask_content(&replay_mask_of(mask));
-                            if let Some(content) = self.list_replay.declared_mask_content(effect) {
+                            if let Some(content) = self.display_list.records_of_mask_content(effect) {
                                 let records_context = RecordsContext {
-                                    list_replay: &self.list_replay,
+                                    tree,
                                     frame: self.frame,
                                     to_root_matrix_of_inline_clip_space: &|_| None,
                                 };
@@ -1400,7 +1466,7 @@ impl<Painter: ReplayPainter + ?Sized> ReplayDriver<'_, Painter> {
         let world = &self.world;
         let to_root_matrix_of_inline_clip_space = |space: SpatialNodeIndex| world.draw_matrix_if_known(space);
         let records_context = RecordsContext {
-            list_replay: &self.list_replay,
+            tree: self.tree,
             frame: self.frame,
             to_root_matrix_of_inline_clip_space: &to_root_matrix_of_inline_clip_space,
         };
@@ -1556,7 +1622,6 @@ impl<'a, Painter: ReplayPainter + ?Sized> ReplayDriver<'a, Painter> {
         let mut driver = ReplayDriver {
             tree,
             display_list,
-            list_replay: ListReplay::new(tree),
             frame,
             effect_clips,
             root_group_color,
@@ -1596,17 +1661,6 @@ impl<'a, Painter: ReplayPainter + ?Sized> ReplayDriver<'a, Painter> {
             target_canvas_stack: std::mem::take(&mut self.target_canvas_stack),
             effect_geometry_by_effect_index: std::mem::take(&mut self.effect_geometry_by_effect_index),
         });
-    }
-
-    // Compositing enters masks without replaying the declarations of their content ahead of them.
-    fn declare_every_mask_content_of_list(&mut self) {
-        let display_list = self.display_list;
-        for declaration in &display_list.summary().mask_declarations {
-            let (_, payload) = display_list.record_at(declaration.record.position);
-            let command = read_command::<DeclareMaskContent>(payload);
-            self.list_replay
-                .declare_mask_content(command.effect, span_bytes(payload, command.content));
-        }
     }
 }
 
@@ -1659,12 +1713,13 @@ impl<Painter: ReplayPainter + ?Sized> CompositingInsideEffects<'_, '_, Painter> 
         clips: CompositeClipsOfRaster<'_>,
         target_to_surface: Option<AffineTransform>,
     ) {
+        let filtered = target_to_surface.is_some() || !moves_by_whole_pixels_only(&self.canvas_matrix_of_raster_pixels);
         self.draw_at_raster_pixels_inside_innermost_effect(clips, target_to_surface, |painter| {
             painter.draw_surface(&SurfaceDraw {
                 surface,
                 source_rect,
                 target_rect,
-                filtered: target_to_surface.is_some(),
+                filtered,
             });
         });
     }
@@ -1731,6 +1786,10 @@ impl<Painter: ReplayPainter + ?Sized> CompositingInsideEffects<'_, '_, Painter> 
     }
 }
 
+fn moves_by_whole_pixels_only(matrix: &FloatMatrix4x4) -> bool {
+    matrix.is_2d_affine() && matrix.extract_2d_affine().is_whole_pixel_translation()
+}
+
 /// The clips a raster is composited within, in the pixels of the surface it is composited into: a rect, and rounded
 /// rects within it.
 #[derive(Clone, Copy, Default)]
@@ -1762,7 +1821,6 @@ pub fn composite_inside_effects<Painter: ReplayPainter + ?Sized>(
         },
         painter,
     );
-    driver.declare_every_mask_content_of_list();
     let mut compositing = CompositingInsideEffects {
         driver: &mut driver,
         canvas_matrix_of_raster_pixels,
@@ -1787,7 +1845,8 @@ mod tests {
     };
     use ak::math;
     use libgfx_rust::{
-        CompositingAndBlendingOperator, CornerRadii, FloatRect, MaskKind, scale_matrix, translation_matrix,
+        CompositingAndBlendingOperator, CornerRadii, FloatRect, MaskKind, perspective_matrix, scale_matrix,
+        translation_matrix,
     };
 
     #[test]
@@ -1928,6 +1987,9 @@ mod tests {
         }
         fn would_be_fully_clipped_by_painter(&mut self, rect: IntRect) -> bool {
             rect.x == self.fully_clipped_x
+        }
+        fn device_clip_bounds(&mut self) -> IntRect {
+            IntRect::new(i32::MIN / 2, i32::MIN / 2, i32::MAX, i32::MAX)
         }
         fn push_clip(&mut self, clip: &ReplayClip) {
             self.events.push(PainterEvent::PushClip(clip.rect));
@@ -2087,12 +2149,11 @@ mod tests {
         painter: &mut RecordingPainter,
     ) {
         let tree = identity_tree();
-        let list = ListReplay::new(&tree);
         let frame = ReplayFrame::unscrolled(0);
         replay_records(
             records,
             &RecordsContext {
-                list_replay: &list,
+                tree: &tree,
                 frame: &frame,
                 to_root_matrix_of_inline_clip_space,
             },
@@ -2797,15 +2858,50 @@ mod tests {
         );
     }
 
+    fn assert_layer_bounds_are_approximately(layer_content_bounds: &[Option<FloatRect>], expected: &[FloatRect]) {
+        assert_eq!(layer_content_bounds.len(), expected.len(), "{layer_content_bounds:?}");
+        let edges = |rect: FloatRect| [rect.x, rect.y, rect.right(), rect.bottom()];
+        for (bounds, expected) in layer_content_bounds.iter().zip(expected) {
+            let bounds = bounds.unwrap_or_else(|| panic!("a layer has no bounds, not {expected:?}"));
+            for (edge, expected_edge) in edges(bounds).into_iter().zip(edges(*expected)) {
+                assert!((edge - expected_edge).abs() < 0.001, "{bounds:?} is not {expected:?}");
+            }
+        }
+    }
+
     #[test]
-    fn a_layer_whose_content_can_land_anywhere_has_no_bounds() {
+    fn a_layer_over_or_in_a_tilted_space_is_bounded_where_its_content_projects() {
         let mut tree = identity_tree();
-        let tilted = tree.append_spatial(transform(rotate_y(30.0), None), VISUAL_VIEWPORT_NODE_INDEX);
+        let tilted = tree.append_spatial(transform(rotate_y(60.0), None), VISUAL_VIEWPORT_NODE_INDEX);
         let flat_layer = effect_under(&mut tree, effects(0.5), EffectNodeIndex::NONE, ClipNodeIndex::NONE);
         let tilted_layer = tree.append_effect(effects(0.5), EffectNodeIndex::NONE, tilted, ClipNodeIndex::NONE);
         let runs = [
             run(tilted, effect_context(flat_layer), IntRect::new(0, 0, 10, 10)),
             run(tilted, effect_context(tilted_layer), IntRect::new(0, 0, 10, 10)),
+        ];
+        let mut painter = RecordingPainter::new();
+        replay(&tree, &runs, &mut painter);
+        assert_layer_bounds_are_approximately(
+            &painter.layer_content_bounds,
+            &[
+                inflated_by_margin(FloatRect::new(0.0, 0.0, 5.0, 10.0), 2.0),
+                FloatRect::new(-4.0, -2.0, 18.0, 14.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_layer_whose_content_lies_partly_behind_the_eye_has_no_bounds() {
+        let mut tree = identity_tree();
+        let tilted = tree.append_spatial(
+            transform(perspective_matrix(100.0).multiplied(rotate_y(60.0)), None),
+            VISUAL_VIEWPORT_NODE_INDEX,
+        );
+        let flat_layer = effect_under(&mut tree, effects(0.5), EffectNodeIndex::NONE, ClipNodeIndex::NONE);
+        let tilted_layer = tree.append_effect(effects(0.5), EffectNodeIndex::NONE, tilted, ClipNodeIndex::NONE);
+        let runs = [
+            run(tilted, effect_context(flat_layer), IntRect::new(-1000, 0, 2000, 10)),
+            run(tilted, effect_context(tilted_layer), IntRect::new(-1000, 0, 2000, 10)),
         ];
         let mut painter = RecordingPainter::new();
         replay(&tree, &runs, &mut painter);
@@ -3535,5 +3631,79 @@ mod tests {
         assert!(plane_clip_pushes > 0);
         assert_eq!(depth, 0);
         assert_eq!(painter.events.last(), Some(&PainterEvent::SetMatrix(base)));
+    }
+
+    #[test]
+    fn rasters_drawn_at_a_fraction_of_a_pixel_or_scaled_are_filtered() {
+        assert!(moves_by_whole_pixels_only(&FloatMatrix4x4::identity()));
+        assert!(moves_by_whole_pixels_only(&translation_matrix(3.0, -4.0, 0.0)));
+        assert!(!moves_by_whole_pixels_only(&translation_matrix(0.5, 0.0, 0.0)));
+        assert!(!moves_by_whole_pixels_only(&scale_matrix(2.0, 2.0, 1.0)));
+    }
+
+    fn size(width: i32, height: i32) -> IntSize {
+        IntSize { width, height }
+    }
+
+    #[test]
+    fn a_raster_at_the_scale_of_the_canvas_is_not_magnified() {
+        let at = |scale: f32| translation_matrix(10.0, 20.0, 0.0).multiplied(scale_matrix(scale, scale, 1.0));
+        // A recorded size rounded from the size the image is drawn at stays at 1.
+        assert_eq!(raster_scale_to_show(&at(1.0), 100.4, 50.0, size(100, 50)), 1);
+        assert_eq!(raster_scale_to_show(&at(1.0), 100.0, 50.0, size(100, 50)), 1);
+        assert_eq!(raster_scale_to_show(&at(0.5), 100.0, 50.0, size(100, 50)), 1);
+        assert_eq!(raster_scale_to_show(&at(2.0), 100.4, 50.0, size(100, 50)), 2);
+        assert_eq!(raster_scale_to_show(&at(3.0), 100.0, 50.0, size(100, 50)), 4);
+        assert_eq!(raster_scale_to_show(&at(4.0), 100.0, 50.0, size(100, 50)), 4);
+        assert_eq!(raster_scale_to_show(&at(8.0), 100.4, 50.0, size(100, 50)), 8);
+        assert_eq!(raster_scale_to_show(&at(32.0), 100.0, 50.0, size(100, 50)), 8);
+        // The axis that the canvas magnifies most decides.
+        assert_eq!(
+            raster_scale_to_show(&scale_matrix(1.0, 4.0, 1.0), 100.0, 50.0, size(100, 50)),
+            4
+        );
+        // Content recorded at the scale of a transform above it is drawn at that scale already.
+        assert_eq!(raster_scale_to_show(&at(2.0), 50.0, 25.0, size(100, 50)), 1);
+        assert_eq!(raster_scale_to_show(&at(4.0), 50.0, 25.0, size(100, 50)), 2);
+    }
+
+    #[test]
+    fn a_raster_that_the_canvas_does_not_only_scale_and_move_stays_at_its_recorded_size() {
+        let rotated = scale_matrix(4.0, 4.0, 1.0).multiplied(libgfx_rust::rotation_matrix(
+            [0.0, 0.0, 1.0],
+            std::f32::consts::FRAC_PI_4,
+        ));
+        assert_eq!(raster_scale_to_show(&rotated, 100.0, 50.0, size(100, 50)), 1);
+        assert_eq!(
+            raster_scale_to_show(&scale_matrix(-4.0, 4.0, 1.0), 100.0, 50.0, size(100, 50)),
+            1
+        );
+        assert_eq!(
+            raster_scale_to_show(
+                &perspective_matrix(100.0).multiplied(scale_matrix(4.0, 4.0, 1.0)),
+                100.0,
+                50.0,
+                size(100, 50)
+            ),
+            1
+        );
+        assert_eq!(
+            raster_scale_to_show(&scale_matrix(4.0, 4.0, 1.0), 100.0, 50.0, size(0, 50)),
+            1
+        );
+    }
+
+    #[test]
+    fn a_repeated_tile_is_rastered_at_a_lower_scale_where_it_would_not_fit_in_one_surface() {
+        let at_8 = scale_matrix(8.0, 8.0, 1.0);
+        assert_eq!(raster_scale_of_repeated_tile(&at_8, 16.0, 16.0, size(16, 16)), 8);
+        // 1024 x 512 is 32 MiB at 4 and 8 MiB at 2. 4096 x 1024 is 64 MiB at 2 and 16 MiB at 1.
+        assert_eq!(raster_scale_of_repeated_tile(&at_8, 1024.0, 512.0, size(1024, 512)), 2);
+        assert_eq!(
+            raster_scale_of_repeated_tile(&at_8, 4096.0, 1024.0, size(4096, 1024)),
+            1
+        );
+        // A tile wider than one surface stays at 1.
+        assert_eq!(raster_scale_of_repeated_tile(&at_8, 20000.0, 1.0, size(20000, 1)), 1);
     }
 }

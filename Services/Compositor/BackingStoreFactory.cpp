@@ -79,21 +79,42 @@ static Vector<u64> shared_backing_store_drm_format_modifiers(Gfx::VulkanContext 
         return { DRM_FORMAT_MOD_LINEAR };
 
     auto modifiers = Gfx::renderable_drm_format_modifiers(vulkan_context, VK_FORMAT_B8G8R8A8_UNORM);
-    // NB: The presentation can still show frames that it cannot import, after the view reads them back.
+    // NB: The presentation can still show frames that it cannot import, after the view reads them back. One that only
+    //     takes dma-bufs without a modifier, such as a compositor that draws with virgl in a virtual machine, reads them
+    //     as linear.
     auto const& importable_modifiers = presentation_drm_format_modifiers();
     if (any_of(modifiers, [&](u64 modifier) { return importable_modifiers.contains_slow(modifier); }))
         modifiers.remove_all_matching([&](u64 modifier) { return !importable_modifiers.contains_slow(modifier); });
+    else if (importable_modifiers.contains_slow(DRM_FORMAT_MOD_INVALID) && modifiers.contains_slow(DRM_FORMAT_MOD_LINEAR))
+        return { DRM_FORMAT_MOD_LINEAR };
     // NB: A linear layout is the slowest to paint into, so it is only used when there is nothing else.
     if (any_of(modifiers, [](u64 modifier) { return modifier != DRM_FORMAT_MOD_LINEAR; }))
         modifiers.remove_all_matching([](u64 modifier) { return modifier == DRM_FORMAT_MOD_LINEAR; });
     return modifiers;
 }
 
+static ErrorOr<NonnullRefPtr<Gfx::VulkanImage>> create_shared_backing_store_image(Gfx::VulkanContext const& vulkan_context, Gfx::IntSize size)
+{
+    auto const modifiers = shared_backing_store_drm_format_modifiers(vulkan_context);
+    // NB: The compositor of the desktop can scan a store out to the display, which is only safe when the memory was
+    //     allocated for that. A presentation on another GPU only composites the store.
+    if (vulkan_context.is_preferred_device) {
+        auto image = Gfx::create_scanout_capable_shared_vulkan_image(vulkan_context, size.width(), size.height(), VK_FORMAT_B8G8R8A8_UNORM, modifiers.span());
+        if (!image.is_error())
+            return image.release_value();
+        static bool reported_failure = false;
+        if (!reported_failure) {
+            dbgln("Failed to allocate a shared GPU backing store that a display can scan out ({}), allocating it through Vulkan", image.error());
+            reported_failure = true;
+        }
+    }
+    return Gfx::create_shared_vulkan_image(vulkan_context, size.width(), size.height(), VK_FORMAT_B8G8R8A8_UNORM, modifiers.span());
+}
+
 static ErrorOr<GpuBackingStore> create_shared_gpu_backing_store(Gfx::IntSize size, Gfx::SkiaBackendContext& skia_backend_context)
 {
     auto const& vulkan_context = skia_backend_context.vulkan_context();
-    auto const modifiers = shared_backing_store_drm_format_modifiers(vulkan_context);
-    auto image = TRY(Gfx::create_shared_vulkan_image(vulkan_context, size.width(), size.height(), VK_FORMAT_B8G8R8A8_UNORM, modifiers.span()));
+    auto image = TRY(create_shared_backing_store_image(vulkan_context, size));
     auto shared_image = Gfx::duplicate_shared_image(*image);
 
     return GpuBackingStore {
@@ -155,7 +176,7 @@ static ErrorOr<NewBackingStore> create_shared_gpu_image_backing_store([[maybe_un
 #endif
 }
 
-ErrorOr<NewBackingStore> create_backing_store(RustFFI::StoreKind kind, Gfx::IntSize size, RefPtr<Gfx::SkiaBackendContext> const& skia_backend_context, WindowServer* window_server_showing_stores)
+ErrorOr<NewBackingStore> create_backing_store(RustFFI::StoreKind kind, Gfx::IntSize size, RefPtr<Gfx::SkiaBackendContext> const& skia_backend_context)
 {
     switch (kind) {
     case RustFFI::StoreKind::Offscreen:
@@ -170,9 +191,7 @@ ErrorOr<NewBackingStore> create_backing_store(RustFFI::StoreKind kind, Gfx::IntS
     case RustFFI::StoreKind::SharedGpuImage:
         return create_shared_gpu_image_backing_store(size, skia_backend_context);
     case RustFFI::StoreKind::ShownByWindowServer: {
-        if (!window_server_showing_stores)
-            return Error::from_string_literal("No window server shows the stores");
-        auto surface = TRY(window_server_showing_stores->try_create_presentable_surface(size, skia_backend_context));
+        auto surface = TRY(PresentableSurface::try_create_for_stores(size, skia_backend_context));
         return NewBackingStore {
             .surface = surface->painting_surface(),
             .window_server_surface = move(surface),

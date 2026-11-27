@@ -891,6 +891,15 @@ static char const* syscall_name(long syscall_number)
 #ifdef __NR_mknodat
         CASE_SYSCALL_NAME(mknodat);
 #endif
+#ifdef __NR_mlock
+        CASE_SYSCALL_NAME(mlock);
+#endif
+#ifdef __NR_mlock2
+        CASE_SYSCALL_NAME(mlock2);
+#endif
+#ifdef __NR_mlockall
+        CASE_SYSCALL_NAME(mlockall);
+#endif
 #ifdef __NR_mmap
         CASE_SYSCALL_NAME(mmap);
 #endif
@@ -905,6 +914,12 @@ static char const* syscall_name(long syscall_number)
 #endif
 #ifdef __NR_mremap
         CASE_SYSCALL_NAME(mremap);
+#endif
+#ifdef __NR_munlock
+        CASE_SYSCALL_NAME(munlock);
+#endif
+#ifdef __NR_munlockall
+        CASE_SYSCALL_NAME(munlockall);
 #endif
 #ifdef __NR_munmap
         CASE_SYSCALL_NAME(munmap);
@@ -2295,6 +2310,8 @@ void SeccompPolicy::allow_ipc()
 {
     // LibIPC's Rust transports shut their socket down when they stop, so the peer sees them go at once.
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, shutdown);
+    // NB: The IO thread that every transport of a process shares waits on all of their sockets with epoll.
+    allow_epoll();
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, eventfd2);
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, poll);
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, ppoll);
@@ -2598,6 +2615,28 @@ void SeccompPolicy::allow_memory_without_executable_mappings()
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, munmap);
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, madvise);
     SECCOMP_APPEND_ALLOW_SYSCALL_IF_DEFINED(*this, brk);
+
+    // libgcrypt locks its secure memory pool when it first needs it, and carries on unlocked when it may not.
+#ifdef __NR_mlock
+    append(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mlock, 0, 1));
+    append(SECCOMP_ERRNO(EPERM));
+#endif
+#ifdef __NR_mlock2
+    append(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mlock2, 0, 1));
+    append(SECCOMP_ERRNO(EPERM));
+#endif
+#ifdef __NR_mlockall
+    append(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mlockall, 0, 1));
+    append(SECCOMP_ERRNO(EPERM));
+#endif
+#ifdef __NR_munlock
+    append(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_munlock, 0, 1));
+    append(SECCOMP_ERRNO(EPERM));
+#endif
+#ifdef __NR_munlockall
+    append(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_munlockall, 0, 1));
+    append(SECCOMP_ERRNO(EPERM));
+#endif
 }
 
 void SeccompPolicy::allow_executable_memory_mappings()
@@ -2744,6 +2783,17 @@ void SeccompPolicy::allow_gpu_device_operations()
 #endif
 #ifdef __NR_fchmodat2
     append(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fchmodat2, 0, 1));
+    append(SECCOMP_ERRNO(EPERM));
+#endif
+
+    // NVIDIA also tries to make its device nodes when they are missing, as they are on a machine without an NVIDIA
+    // GPU. Refuse mknod() the same way, whatever it would make.
+#ifdef __NR_mknod
+    append(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mknod, 0, 1));
+    append(SECCOMP_ERRNO(EPERM));
+#endif
+#ifdef __NR_mknodat
+    append(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mknodat, 0, 1));
     append(SECCOMP_ERRNO(EPERM));
 #endif
 

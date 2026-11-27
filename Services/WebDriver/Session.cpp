@@ -682,14 +682,6 @@ void Session::remove_window(StringView window_handle)
 
 ErrorOr<void> Session::create_server()
 {
-#if defined(AK_OS_WINDOWS)
-    static_assert(IsSame<IPC::Transport, IPC::TransportWindows>, "Need to handle other IPC transports here");
-#elif defined(AK_OS_MACOS)
-    static_assert(IsSame<IPC::Transport, IPC::TransportMachPort>, "Need to handle other IPC transports here");
-#else
-    static_assert(IsSame<IPC::Transport, IPC::TransportSocket>, "Need to handle other IPC transports here");
-#endif
-
     dbgln("Listening for WebDriver connection on {}", m_browser_endpoint);
 
 #if defined(AK_OS_MACOS)
@@ -716,7 +708,12 @@ ErrorOr<void> Session::create_server()
                     auto session = weak_session.strong_ref();
                     if (!session)
                         return;
-                    if (auto result = session->accept_browser_transport(make<IPC::Transport>(move(transport.receive_right), move(transport.send_right))); result.is_error())
+                    auto browser_transport = IPC::Transport::create(move(transport.receive_right), move(transport.send_right));
+                    if (browser_transport.is_error()) {
+                        session->reject_start_promise(browser_transport.release_error());
+                        return;
+                    }
+                    if (auto result = session->accept_browser_transport(browser_transport.release_value()); result.is_error())
                         session->reject_start_promise(result.release_error());
                 });
             });

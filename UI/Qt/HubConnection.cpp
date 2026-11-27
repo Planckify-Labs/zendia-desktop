@@ -348,6 +348,11 @@ void HubConnection::app_display_error_dialog(String message)
     Application::the().display_error_dialog(message);
 }
 
+void HubConnection::app_display_openssl_mismatch(String curl_openssl_version, String linked_openssl_version)
+{
+    Application::the().display_openssl_mismatch(curl_openssl_version, linked_openssl_version);
+}
+
 void HubConnection::app_display_update_check_result([[maybe_unused]] WebView::UpdateCheckResult::Kind kind, [[maybe_unused]] Optional<String> version, [[maybe_unused]] WebView::InstallMethod install_method, [[maybe_unused]] WebView::UpdateCheckTrigger trigger)
 {
 #if defined(LADYBIRD_HAS_UPDATE_CHECK)
@@ -1123,6 +1128,12 @@ void HubConnection::view_request_file_picker(u64 view_id, Web::HTML::FileFilter 
 {
     if (auto* view = RemoteView::find(view_id); view && view->on_request_file_picker)
         view->on_request_file_picker(move(accepted_file_types), move(allow_multiple_files));
+}
+
+void HubConnection::view_show_validation_message(u64 view_id, Gfx::IntPoint position, Utf16String message)
+{
+    if (auto* view = RemoteView::find(view_id); view && view->on_show_validation_message)
+        view->on_show_validation_message(position, message);
 }
 
 void HubConnection::view_request_select_dropdown(u64 view_id, Gfx::IntPoint content_position, i32 minimum_width, Vector<Web::HTML::SelectItem> items)
