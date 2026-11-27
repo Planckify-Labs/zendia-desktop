@@ -14,7 +14,7 @@ jobs:
     name: Changes to upstream files are listed in Zendia/FORK.md
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -30,7 +30,7 @@ jobs:
     name: Linked crates are under licenses we allow
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check the licenses
         run: Zendia/Meta/check-licenses.py
@@ -42,7 +42,7 @@ jobs:
       run:
         working-directory: Zendia
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the libraries Freya builds against
         run: |
