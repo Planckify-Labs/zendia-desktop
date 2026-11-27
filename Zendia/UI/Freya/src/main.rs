@@ -35,6 +35,7 @@ fn ui_info(locale: &str) -> Hub_UIInfo {
         microphone_authorization: None,
         location_authorization: None,
         supports_selection_clipboard: false,
+        scrollbars_always_shown: !cfg!(target_os = "macos"),
         supports_system_menu_bar: false,
         supports_vertical_tabs: false,
         supports_private_browsing_windows: false,

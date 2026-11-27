@@ -11,7 +11,7 @@ pub mod ipc_types;
 pub mod location;
 
 use libipc_rust::Attachment;
-use libipc_rust::transport_socket::TransportSocket;
+use libipc_rust::transport::TransportSocket;
 use libipc_rust::wire::{self, Decoder, EndpointMessage, SyncMessage};
 use std::io;
 use std::os::fd::AsRawFd;
@@ -93,7 +93,7 @@ impl HubConnection {
     /// Starts reading what the Hub sends on a thread of its own. Each message the UI handles goes to `on_message`,
     /// which must hand it to the UI thread, and the answers to synchronous messages go to whoever awaits them.
     pub fn new(socket: UnixStream, on_message: impl Fn(Incoming) + Send + 'static) -> Result<Arc<Self>, Error> {
-        let transport = Arc::new(TransportSocket::new(socket)?);
+        let transport = Arc::new(TransportSocket::new(socket.into())?);
         let (response_sender, responses) = mpsc::channel();
         let connection = Arc::new(Self {
             transport: Arc::clone(&transport),
