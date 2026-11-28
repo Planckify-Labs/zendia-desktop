@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/JsonObject.h>
 #include <AK/JsonObjectSerializer.h>
 #include <AK/JsonValue.h>
 #include <AK/Math.h>
@@ -27,6 +28,8 @@
 #include <LibJS/Runtime/ConsoleObject.h>
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibJS/Runtime/PrimitiveString.h>
+#include <LibJS/Runtime/Promise.h>
+#include <LibJS/Runtime/PromiseCapability.h>
 #include <LibMedia/Sinks/AudioOutputFactory.h>
 #include <LibMediaClient/RemotePlaybackManager.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
@@ -237,6 +240,10 @@ void PageClient::visit_edges(JS::Cell::Visitor& visitor)
         visitor.visit(pending_mouse_event.value);
     if (m_web_ui)
         m_web_ui->visit_edges(visitor);
+    for (auto& [_, pending] : m_pending_embedder_frame_evals) {
+        visitor.visit(pending.promise);
+        visitor.visit(pending.world);
+    }
 }
 
 ConnectionFromClient& PageClient::client() const
@@ -1969,6 +1976,11 @@ void PageClient::page_did_close()
 
     // The heap sweeps a closed page in slices, so its timers can still fire once the cells they would use are gone.
     m_is_closed = true;
+    for (auto& [_, pending] : m_pending_embedder_frame_evals) {
+        if (pending.timeout)
+            pending.timeout->stop();
+    }
+    m_pending_embedder_frame_evals.clear();
 
     // A closed page has no DevTools client.
     if (exchange(m_has_devtools_client, false)) {
@@ -3051,29 +3063,144 @@ GC::Ref<Web::Internals::ExtensionWorld> PageClient::ensure_embedder_world(Web::H
         &realm);
     realm.global_object().define_direct_property("__zendiaShadowRoot"_utf16_fly_string, shadow_fn, JS::Attribute::Configurable | JS::Attribute::Writable);
 
+    auto doc_info_fn = JS::NativeFunction::create(
+        realm,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(world),
+            [](GC::Ref<Web::Internals::ExtensionWorld>& world, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                auto& doc = world->window().associated_document();
+                auto navigable = doc.navigable();
+                bool is_top = !navigable || navigable->is_top_level_traversable();
+                u64 frame_id = (navigable && !is_top) ? navigable->id().local_id : 0;
+                JsonObject obj;
+                obj.set("frameId"sv, frame_id);
+                obj.set("top"sv, is_top);
+                obj.set("url"sv, doc.url().serialize());
+                return JS::PrimitiveString::create(vm, Utf16String::from_utf8(obj.serialized()));
+            }),
+        0,
+        "__zendiaDocInfo"_utf16_fly_string,
+        &realm);
+    realm.global_object().define_direct_property("__zendiaDocInfo"_utf16_fly_string, doc_info_fn, JS::Attribute::Configurable | JS::Attribute::Writable);
+
+    auto frame_info_fn = JS::NativeFunction::create(
+        realm,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(world),
+            [](GC::Ref<Web::Internals::ExtensionWorld>&, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                if (vm.argument_count() == 0 || !vm.argument(0).is_object())
+                    return JS::js_null();
+                auto* container = Web::Bindings::impl_from<Web::HTML::NavigableContainer>(&vm.argument(0).as_object());
+                auto navigable = container ? container->content_navigable() : nullptr;
+                if (!navigable)
+                    return JS::js_null();
+                JsonObject obj;
+                obj.set("id"sv, navigable->id().local_id);
+                obj.set("remote"sv, is<Web::HTML::RemoteNavigable>(*navigable));
+                obj.set("url"sv, navigable->active_document_url().map([](auto const& url) { return url.serialize(); }).value_or(String {}));
+                return JS::PrimitiveString::create(vm, Utf16String::from_utf8(obj.serialized()));
+            }),
+        1,
+        "__zendiaFrameInfo"_utf16_fly_string,
+        &realm);
+    realm.global_object().define_direct_property("__zendiaFrameInfo"_utf16_fly_string, frame_info_fn, JS::Attribute::Configurable | JS::Attribute::Writable);
+
     auto eval_frame_fn = JS::NativeFunction::create(
         realm,
         GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
             realm.heap(),
-            GC::captures(*this, world_name),
-            [](PageClient& self, String const& world_name, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+            GC::captures(*this, world, world_name),
+            [](PageClient& self, GC::Ref<Web::Internals::ExtensionWorld>& world, String const& world_name, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                auto& caller_realm = world->realm();
                 if (self.m_is_closed || vm.argument_count() < 2 || !vm.argument(0).is_object() || !vm.argument(1).is_string())
-                    return JS::js_null();
+                    return Web::WebIDL::create_resolved_promise(caller_realm, JS::js_null())->promise();
                 auto* container = Web::Bindings::impl_from<Web::HTML::NavigableContainer>(&vm.argument(0).as_object());
                 if (!container)
-                    return JS::js_null();
-                auto* child_doc = const_cast<Web::DOM::Document*>(container->content_document_without_origin_check());
-                if (!child_doc || !child_doc->window() || !child_doc->browsing_context())
-                    return JS::js_null();
-                auto child_world = self.ensure_embedder_world(*child_doc->window(), world_name);
-                auto& child_settings = child_world->settings();
-                auto filename = ByteString::formatted("zendia://{}/frame", world_name);
-                auto source = vm.argument(1).as_string().utf16_string();
-                auto script = Web::HTML::ClassicScript::create(filename, move(source), child_settings, child_doc->url());
-                auto completion = script->run(Web::HTML::ClassicScript::RethrowErrors::Yes);
-                if (completion.is_error() || !completion.value().is_string())
-                    return JS::js_null();
-                return JS::PrimitiveString::create(vm, completion.value().as_string().utf16_string());
+                    return Web::WebIDL::create_resolved_promise(caller_realm, JS::js_null())->promise();
+                if (auto* child_doc = const_cast<Web::DOM::Document*>(container->content_document_without_origin_check()); child_doc && child_doc->window() && child_doc->browsing_context()) {
+                    auto child_world = self.ensure_embedder_world(*child_doc->window(), world_name);
+                    auto& child_settings = child_world->settings();
+                    auto filename = ByteString::formatted("zendia://{}/frame", world_name);
+                    auto source = vm.argument(1).as_string().utf16_string();
+                    auto script = Web::HTML::ClassicScript::create(filename, move(source), child_settings, child_doc->url());
+                    auto completion = script->run(Web::HTML::ClassicScript::RethrowErrors::Yes);
+                    if (completion.is_error())
+                        return Web::WebIDL::create_resolved_promise(caller_realm, JS::js_null())->promise();
+                    auto value = completion.value();
+                    if (value.is_string())
+                        return Web::WebIDL::create_resolved_promise(caller_realm, JS::PrimitiveString::create(vm, value.as_string().utf16_string()))->promise();
+                    if (value.is_object() && is<JS::Promise>(value.as_object())) {
+                        auto& child_promise = as<JS::Promise>(value.as_object());
+                        if (child_promise.state() == JS::Promise::State::Fulfilled) {
+                            auto result = child_promise.result();
+                            JS::Value resolved = result.is_string()
+                                ? JS::Value(JS::PrimitiveString::create(vm, result.as_string().utf16_string()))
+                                : JS::js_null();
+                            return Web::WebIDL::create_resolved_promise(caller_realm, resolved)->promise();
+                        }
+                        if (child_promise.state() == JS::Promise::State::Rejected)
+                            return Web::WebIDL::create_resolved_promise(caller_realm, JS::js_null())->promise();
+
+                        auto result_promise = Web::WebIDL::create_promise(caller_realm);
+                        auto& child_realm = child_world->realm();
+                        Web::HTML::TemporaryExecutionContext child_ctx { child_settings, Web::HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+                        auto on_fulfilled = JS::NativeFunction::create(
+                            child_realm,
+                            GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+                                child_realm.heap(),
+                                GC::captures(world, result_promise),
+                                [](GC::Ref<Web::Internals::ExtensionWorld>& caller_world, GC::Ref<Web::WebIDL::Promise>& promise, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                                    if (caller_world->is_detached())
+                                        return JS::js_undefined();
+                                    Web::HTML::TemporaryExecutionContext caller_ctx { caller_world->settings(), Web::HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+                                    auto arg = vm.argument(0);
+                                    JS::Value resolved = arg.is_string()
+                                        ? JS::Value(JS::PrimitiveString::create(vm, arg.as_string().utf16_string()))
+                                        : JS::js_null();
+                                    Web::WebIDL::resolve_promise(caller_world->realm(), *promise, resolved);
+                                    return JS::js_undefined();
+                                }),
+                            1);
+                        auto on_rejected = JS::NativeFunction::create(
+                            child_realm,
+                            GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+                                child_realm.heap(),
+                                GC::captures(world, result_promise),
+                                [](GC::Ref<Web::Internals::ExtensionWorld>& caller_world, GC::Ref<Web::WebIDL::Promise>& promise, JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
+                                    if (!caller_world->is_detached()) {
+                                        Web::HTML::TemporaryExecutionContext caller_ctx { caller_world->settings(), Web::HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+                                        Web::WebIDL::resolve_promise(caller_world->realm(), *promise, JS::js_null());
+                                    }
+                                    return JS::js_undefined();
+                                }),
+                            1);
+                        child_promise.perform_then(on_fulfilled, on_rejected, nullptr);
+                        return result_promise->promise();
+                    }
+                    return Web::WebIDL::create_resolved_promise(caller_realm, JS::js_null())->promise();
+                }
+
+                auto navigable = container->content_navigable();
+                if (!navigable)
+                    return Web::WebIDL::create_resolved_promise(caller_realm, JS::js_null())->promise();
+
+                auto result_promise = Web::WebIDL::create_promise(caller_realm);
+                auto frame_request_id = self.m_next_embedder_frame_request_id++;
+                auto timeout = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(1000), [self_root = GC::make_root(&self), frame_request_id] {
+                    if (self_root && !self_root->m_is_closed)
+                        self_root->did_reply_embedder_frame_eval(frame_request_id, false, {});
+                });
+                timeout->start();
+                self.m_pending_embedder_frame_evals.set(frame_request_id, PendingEmbedderFrameEval {
+                    .promise = result_promise.ptr(),
+                    .world = world.ptr(),
+                    .timeout = move(timeout),
+                });
+                auto source_utf8 = vm.argument(1).as_string().utf16_string().to_well_formed_utf8();
+                self.client().async_did_request_embedder_frame_eval(self.m_id, frame_request_id, navigable->id(), world_name, move(source_utf8));
+                return result_promise->promise();
             }),
         2,
         "__zendiaEvalFrame"_utf16_fly_string,
@@ -3115,18 +3242,17 @@ GC::Ref<Web::Internals::ExtensionWorld> PageClient::ensure_embedder_world(Web::H
     return world;
 }
 
-void PageClient::deliver_embedder_message(u64 request_id, String world_name, String script_source)
+void PageClient::deliver_embedder_message_in_document(Web::DOM::Document& document, u64 request_id, String const& world_name, String const& script_source)
 {
-    auto active_document = page().local_traversable()->active_document();
-    if (!active_document || !active_document->window()) {
-        client().async_did_reply_embedder_message(m_id, request_id, false, "{\"kind\":\"message\",\"text\":\"No active document\"}"_string);
+    if (!document.window() || !document.browsing_context()) {
+        client().async_did_reply_embedder_message(m_id, request_id, false, "{\"kind\":\"message\",\"text\":\"No active window\"}"_string);
         return;
     }
 
-    auto world = ensure_embedder_world(*active_document->window(), world_name);
+    auto world = ensure_embedder_world(*document.window(), world_name);
     auto& settings = world->settings();
     auto filename = ByteString::formatted("zendia://{}", world_name);
-    auto script = Web::HTML::ClassicScript::create(filename, Utf16String::from_utf8(script_source), settings, active_document->url());
+    auto script = Web::HTML::ClassicScript::create(filename, Utf16String::from_utf8(script_source), settings, document.url());
     auto completion = script->run(Web::HTML::ClassicScript::RethrowErrors::Yes);
     if (completion.is_error()) {
         client().async_did_reply_embedder_message(m_id, request_id, false, "{\"kind\":\"message\",\"text\":\"Automation script failed\"}"_string);
@@ -3136,9 +3262,99 @@ void PageClient::deliver_embedder_message(u64 request_id, String world_name, Str
     auto value = completion.value();
     if (value.is_string()) {
         client().async_did_reply_embedder_message(m_id, request_id, true, value.as_string().utf16_string().to_well_formed_utf8());
+    } else if (value.is_object() && is<JS::Promise>(value.as_object())) {
+        auto& promise = as<JS::Promise>(value.as_object());
+        if (promise.state() == JS::Promise::State::Fulfilled) {
+            auto result = promise.result();
+            if (result.is_string()) {
+                client().async_did_reply_embedder_message(m_id, request_id, true, result.as_string().utf16_string().to_well_formed_utf8());
+            } else {
+                client().async_did_reply_embedder_message(m_id, request_id, true, "{\"kind\":\"ok\"}"_string);
+            }
+            return;
+        }
+        if (promise.state() == JS::Promise::State::Rejected) {
+            client().async_did_reply_embedder_message(m_id, request_id, false, "{\"kind\":\"message\",\"text\":\"Automation script failed\"}"_string);
+            return;
+        }
+
+        auto& realm = world->realm();
+        Web::HTML::TemporaryExecutionContext execution_context { settings, Web::HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+        auto on_fulfilled = JS::NativeFunction::create(
+            realm,
+            GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+                realm.heap(),
+                GC::captures(*this, request_id),
+                [](PageClient& self, u64 request_id, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                    if (self.m_is_closed)
+                        return JS::js_undefined();
+                    auto arg = vm.argument(0);
+                    if (arg.is_string()) {
+                        self.client().async_did_reply_embedder_message(self.m_id, request_id, true, arg.as_string().utf16_string().to_well_formed_utf8());
+                    } else {
+                        self.client().async_did_reply_embedder_message(self.m_id, request_id, true, "{\"kind\":\"ok\"}"_string);
+                    }
+                    return JS::js_undefined();
+                }),
+            1);
+        auto on_rejected = JS::NativeFunction::create(
+            realm,
+            GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+                realm.heap(),
+                GC::captures(*this, request_id),
+                [](PageClient& self, u64 request_id, JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
+                    if (!self.m_is_closed)
+                        self.client().async_did_reply_embedder_message(self.m_id, request_id, false, "{\"kind\":\"message\",\"text\":\"Automation script failed\"}"_string);
+                    return JS::js_undefined();
+                }),
+            1);
+        promise.perform_then(on_fulfilled, on_rejected, nullptr);
     } else {
         client().async_did_reply_embedder_message(m_id, request_id, true, "{\"kind\":\"ok\"}"_string);
     }
+}
+
+void PageClient::deliver_embedder_message(u64 request_id, String world_name, String script_source)
+{
+    auto active_document = page().local_traversable()->active_document();
+    if (!active_document) {
+        client().async_did_reply_embedder_message(m_id, request_id, false, "{\"kind\":\"message\",\"text\":\"No active document\"}"_string);
+        return;
+    }
+
+    deliver_embedder_message_in_document(*active_document, request_id, world_name, script_source);
+}
+
+void PageClient::deliver_embedder_frame_message(Web::HTML::CrossProcessId document_id, u64 request_id, String world_name, String script_source)
+{
+    for (auto const& navigable : page().hosted_navigables()) {
+        if (auto document = navigable->active_document(); document && document->id() == document_id) {
+            deliver_embedder_message_in_document(*document, request_id, world_name, script_source);
+            return;
+        }
+    }
+
+    client().async_did_reply_embedder_message(m_id, request_id, false, "{\"kind\":\"message\",\"text\":\"Frame document not available\"}"_string);
+}
+
+void PageClient::did_reply_embedder_frame_eval(u64 frame_request_id, bool ok, String result_json)
+{
+    auto pending = m_pending_embedder_frame_evals.take(frame_request_id);
+    if (!pending.has_value())
+        return;
+    if (pending->timeout)
+        pending->timeout->stop();
+    if (m_is_closed || !pending->promise || !pending->world || pending->world->is_detached())
+        return;
+
+    auto& settings = pending->world->settings();
+    Web::HTML::TemporaryExecutionContext execution_context { settings, Web::HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+    auto& realm = pending->world->realm();
+    auto& vm = realm.vm();
+    JS::Value resolved = ok
+        ? JS::Value(JS::PrimitiveString::create(vm, Utf16String::from_utf8(result_json)))
+        : JS::js_null();
+    Web::WebIDL::resolve_promise(realm, *pending->promise, resolved);
 }
 
 void PageClient::did_output_js_console_message(WebView::ConsoleOutput console_output)

@@ -147,7 +147,10 @@ impl StubBackend {
     pub fn feed_automation_response(&self, tab_id: TabId, response: AutomationResponse) {
         if !matches!(
             response,
-            AutomationResponse::PageMoved { .. } | AutomationResponse::PageYank { .. }
+            AutomationResponse::PageMoved { .. }
+                | AutomationResponse::PageYank { .. }
+                | AutomationResponse::CaptchaWatchReport { .. }
+                | AutomationResponse::CaptchaWatchGone { .. }
         ) {
             self.set_mode_transition_pending(tab_id, false);
         }
@@ -271,6 +274,58 @@ impl StubBackend {
             AutomationResponse::PageYank { text, host } => {
                 if !text.trim().is_empty() {
                     self.record_yank_from_page(&text, tab_id, Some(host));
+                }
+            }
+            AutomationResponse::CaptchaWatchReport {
+                frame_id,
+                top,
+                url,
+                detections,
+                state,
+            } => {
+                let now_ms = crate::yank_webchat_actions::now_unix_ms();
+                let published = {
+                    let mut st = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let (record, _changed) =
+                        st.captcha_watch
+                            .report(tab_id, &url, &detections, &state, frame_id, top, now_ms);
+                    let next_finding = record.as_ref().map(|r| r.text.clone());
+                    let prev_finding = st.model.tab_captcha_findings.get(&tab_id).cloned();
+                    if next_finding != prev_finding {
+                        if let Some(ref text) = next_finding {
+                            st.model.tab_captcha_findings.insert(tab_id, text.clone());
+                        } else {
+                            st.model.tab_captcha_findings.remove(&tab_id);
+                        }
+                        Some(next_finding)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(finding) = published {
+                    self.bus.publish(Event::TabCaptchaFindingChanged { tab_id, finding });
+                }
+            }
+            AutomationResponse::CaptchaWatchGone { frame_id } => {
+                let now_ms = crate::yank_webchat_actions::now_unix_ms();
+                let published = {
+                    let mut st = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let (record, _changed) = st.captcha_watch.drop_frame(tab_id, frame_id, now_ms);
+                    let next_finding = record.as_ref().map(|r| r.text.clone());
+                    let prev_finding = st.model.tab_captcha_findings.get(&tab_id).cloned();
+                    if next_finding != prev_finding {
+                        if let Some(ref text) = next_finding {
+                            st.model.tab_captcha_findings.insert(tab_id, text.clone());
+                        } else {
+                            st.model.tab_captcha_findings.remove(&tab_id);
+                        }
+                        Some(next_finding)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(finding) = published {
+                    self.bus.publish(Event::TabCaptchaFindingChanged { tab_id, finding });
                 }
             }
             AutomationResponse::ReaderMode { active: _, message } => {
@@ -546,6 +601,34 @@ impl StubBackend {
             current.viewport = vp;
         }
         current.captcha_areas = areas.clone();
+        if let Some(drag) = current.pending_cursor_drag.take() {
+            let found = !areas.is_empty();
+            let staying = current.staying;
+            let init_steps = current.open_cursor_pad(PointerPadOptions {
+                areas,
+                viewport: current.viewport,
+                drag,
+                grab: None,
+                grab_rect: None,
+                slider: false,
+                track: None,
+                piece: None,
+                lattice: None,
+                banner: if found {
+                    String::new()
+                } else {
+                    NO_CAPTCHA_CURSOR_BANNER.to_string()
+                },
+                can_verify: staying || found,
+                watches_captcha: staying || found,
+                standalone: false,
+                click_order: false,
+            });
+            self.set_page_hints_for_tab(tab_id, session);
+            let _ = self.ask_page_for_tab(tab_id, AutomationRequest::RefocusTop);
+            self.dispatch_pointer_for_tab(tab_id, &init_steps);
+            return;
+        }
         if current.staying && current.tokens_recorded && captcha_tokens > current.initial_tokens {
             self.set_page_hints_for_tab(tab_id, None);
             return;
@@ -653,6 +736,7 @@ impl StubBackend {
                 can_verify: found,
                 watches_captcha: found,
                 standalone: true,
+                click_order: false,
             });
             self.set_page_hints_for_tab(tab_id, session);
             self.dispatch_pointer_for_tab(tab_id, &init_steps);
@@ -823,6 +907,37 @@ impl StubBackend {
                         let mut a = shown_pictures;
                         a.push(item.rect);
                         a
+                    } else if slider {
+                        let around_handle = session.captcha_areas.iter().copied().find(|a| {
+                            let c = middle(item.rect);
+                            c.0 >= a.x && c.0 <= a.x + a.width && c.1 >= a.y && c.1 <= a.y + a.height
+                        });
+                        if around_handle.is_some_and(|a| a.y < item.rect.y - 40.0) {
+                            session.captcha_areas.clone()
+                        } else {
+                            let along = item.track.unwrap_or(item.rect);
+                            let puzzle_above = shown_pictures.into_iter().find(|p| {
+                                p.y + p.height <= item.rect.y + 24.0
+                                    && p.x < along.x + along.width
+                                    && p.x + p.width > along.x
+                            });
+                            let mut left = item.rect.x.min(along.x);
+                            let mut right = (item.rect.x + item.rect.width).max(along.x + along.width);
+                            let mut top = item.rect.y.min(along.y);
+                            let mut bottom = (item.rect.y + item.rect.height).max(along.y + along.height);
+                            if let Some(p) = puzzle_above {
+                                left = left.min(p.x);
+                                right = right.max(p.x + p.width);
+                                top = top.min(p.y);
+                                bottom = bottom.max(p.y + p.height);
+                            }
+                            vec![ViewportRect {
+                                x: left,
+                                y: top,
+                                width: right - left,
+                                height: bottom - top,
+                            }]
+                        }
                     } else if !session.captcha_areas.is_empty() {
                         session.captcha_areas.clone()
                     } else {
@@ -843,6 +958,7 @@ impl StubBackend {
                         can_verify: true,
                         watches_captcha: true,
                         standalone: false,
+                        click_order: false,
                     }));
                 } else {
                     open_pad_steps = Some(session.open_cursor_pad(PointerPadOptions {
@@ -859,6 +975,7 @@ impl StubBackend {
                         can_verify: true,
                         watches_captcha: true,
                         standalone: false,
+                        click_order: true,
                     }));
                 }
             } else {
@@ -962,30 +1079,45 @@ impl StubBackend {
     }
 
     fn open_cursor_from_labels(&self, tab_id: TabId, drag: bool) -> CommandResult {
-        let steps = {
+        let (steps, need_areas_scan) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let Some(session) = state.vim.pages.get_mut(&tab_id).and_then(|p| p.page_hints.as_mut()) else {
                 return Ok(());
             };
-            let areas = session.captcha_areas.clone();
-            let staying = session.staying;
-            session.open_cursor_pad(PointerPadOptions {
-                areas,
-                viewport: session.viewport,
-                drag,
-                grab: None,
-                grab_rect: None,
-                slider: false,
-                track: None,
-                piece: None,
-                lattice: None,
-                banner: String::new(),
-                can_verify: staying,
-                watches_captcha: staying,
-                standalone: false,
-            })
+            if session.captcha_areas.is_empty() && !session.staying {
+                session.pending_cursor_drag = Some(drag);
+                (Vec::new(), true)
+            } else {
+                let areas = session.captcha_areas.clone();
+                let staying = session.staying;
+                let found = !areas.is_empty();
+                let steps = session.open_cursor_pad(PointerPadOptions {
+                    areas,
+                    viewport: session.viewport,
+                    drag,
+                    grab: None,
+                    grab_rect: None,
+                    slider: false,
+                    track: None,
+                    piece: None,
+                    lattice: None,
+                    banner: if found {
+                        String::new()
+                    } else {
+                        NO_CAPTCHA_CURSOR_BANNER.to_string()
+                    },
+                    can_verify: staying || found,
+                    watches_captcha: staying || found,
+                    standalone: false,
+                    click_order: false,
+                });
+                (steps, false)
+            }
         };
         self.sync_published_vim_state();
+        if need_areas_scan {
+            return self.ask_page_for_tab(tab_id, AutomationRequest::CaptchaAreas);
+        }
         let _ = self.ask_page_for_tab(tab_id, AutomationRequest::RefocusTop);
         self.dispatch_pointer_for_tab(tab_id, &steps);
         Ok(())
@@ -1631,5 +1763,155 @@ mod tests {
             "dropping on board place returns to labels"
         );
         assert_eq!(src.steps.lock().unwrap().last().unwrap().kind, PointerEventKind::Up);
+    }
+
+    #[test]
+    fn live_captcha_watch_updates_model_and_on_demand_cursor_fetches_areas() {
+        use zendia_automation::{CaptchaWatchDetection, CaptchaWatchStateReading};
+
+        struct MockWatchSource {
+            requests: Mutex<Vec<AutomationRequest>>,
+        }
+        impl TabSource for MockWatchSource {
+            fn new_tab(&self, _: Option<&str>, _: Option<TabId>, _: bool) -> CommandResult {
+                Ok(())
+            }
+            fn close_tab(&self, _: TabId, _: bool) -> CommandResult {
+                Ok(())
+            }
+            fn activate_tab(&self, _: TabId) -> CommandResult {
+                Ok(())
+            }
+            fn navigate_back(&self, _: TabId) -> CommandResult {
+                Ok(())
+            }
+            fn navigate_forward(&self, _: TabId) -> CommandResult {
+                Ok(())
+            }
+            fn reload(&self, _: TabId, _: bool) -> CommandResult {
+                Ok(())
+            }
+            fn stop_loading(&self, _: TabId) -> CommandResult {
+                Ok(())
+            }
+            fn load_url(&self, _: TabId, _: &str) -> CommandResult {
+                Ok(())
+            }
+            fn run_automation(&self, _: TabId, req: AutomationRequest) -> CommandResult {
+                self.requests.lock().unwrap().push(req);
+                Ok(())
+            }
+        }
+
+        let (core, tab_id) = vim_core();
+        let src = Arc::new(MockWatchSource {
+            requests: Mutex::new(Vec::new()),
+        });
+        core.attach_tab_source(Arc::clone(&src) as Arc<dyn TabSource>);
+
+        // 1. Unsolicited `CaptchaWatchReport` populates `model.tab_captcha_findings` live.
+        core.feed_automation_response(
+            tab_id,
+            AutomationResponse::CaptchaWatchReport {
+                frame_id: 0,
+                top: true,
+                url: "https://2captcha.com/demo/recaptcha-v2".to_string(),
+                detections: vec![CaptchaWatchDetection {
+                    signal: "frame".to_string(),
+                    name: Some("reCAPTCHA".to_string()),
+                    kind: Some("checkbox".to_string()),
+                    challenge: false,
+                    hidden: false,
+                    detail: Some("https://www.google.com/recaptcha/enterprise/anchor".to_string()),
+                }],
+                state: CaptchaWatchStateReading::default(),
+            },
+        );
+        assert_eq!(
+            core.model().tab_captcha_findings.get(&tab_id).map(String::as_str),
+            Some("reCAPTCHA (checkbox)")
+        );
+
+        // Navigating away clears live findings.
+        core.on_tab_navigated(tab_id, Some("https://example.com/"));
+        assert!(!core.model().tab_captcha_findings.contains_key(&tab_id));
+
+        // 2. Pressing `.` from `s` (`JumpKind::Hints`) fetches `CaptchaAreas` on demand and scopes `PointerPad`.
+        core.invoke(Command::from_name_and_args("jump.hints", &[]).unwrap())
+            .unwrap();
+        core.feed_automation_response(
+            tab_id,
+            AutomationResponse::Targets {
+                jump: JumpKind::Hints,
+                pattern: String::new(),
+                targets: vec![target("btn", 40.0)],
+                captcha_tokens: 0,
+                captcha_areas: Vec::new(),
+                viewport: Some((1000.0, 700.0)),
+            },
+        );
+        send_hint_key(&core, ".");
+        assert!(
+            src.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| matches!(r, AutomationRequest::CaptchaAreas)),
+            "`.` from `s` should request CaptchaAreas on demand"
+        );
+        let box_rect = ViewportRect {
+            x: 200.0,
+            y: 120.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        core.feed_automation_response(
+            tab_id,
+            AutomationResponse::CaptchaAreas {
+                areas: vec![box_rect],
+                captcha_tokens: 0,
+                viewport: Some((1000.0, 700.0)),
+            },
+        );
+        let pad = core
+            .model()
+            .page_hints
+            .unwrap()
+            .cursor_pad
+            .expect("PointerPad opens after CaptchaAreas arrives");
+        assert_eq!(pad.areas, vec![box_rect]);
+
+        // 3. Picking a `picture: true` challenge target opens `PointerPad` in click-order mode (`FineGrid`).
+        send_hint_key(&core, "<Esc>");
+        send_hint_key(&core, "<Esc>");
+        core.invoke(Command::from_name_and_args("jump.captcha", &[]).unwrap())
+            .unwrap();
+        let mut pic = challenge_target("pic1", 100.0, 100.0, None);
+        pic.width = 300.0;
+        pic.height = 200.0;
+        pic.picture = true;
+        core.feed_automation_response(
+            tab_id,
+            AutomationResponse::Targets {
+                jump: JumpKind::Captcha,
+                pattern: String::new(),
+                targets: vec![pic],
+                captcha_tokens: 0,
+                captcha_areas: vec![box_rect],
+                viewport: Some((1000.0, 700.0)),
+            },
+        );
+        send_hint_key(&core, "a");
+        let pad = core
+            .model()
+            .page_hints
+            .unwrap()
+            .cursor_pad
+            .expect("picking CAPTCHA picture opens PointerPad");
+        assert!(
+            pad.click_on_jump,
+            "click-order mode should activate on CAPTCHA pictures"
+        );
+        assert_eq!(pad.shown_layout().unwrap().kind, PadLayoutKind::FineGrid);
     }
 }

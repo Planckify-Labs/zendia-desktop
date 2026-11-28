@@ -348,6 +348,7 @@ endpoint WebContentClient routed by Web::PageId page_id
 
     did_find_in_page(Web::PageId page_id, size_t current_match_index, Optional<size_t> total_match_count) =|
     did_reply_embedder_message(Web::PageId page_id, u64 request_id, bool ok, String result_json) =|
+    did_request_embedder_frame_eval(Web::PageId page_id, u64 frame_request_id, Web::HTML::CrossProcessId target_navigable_id, String world, String script) =|
 
     [NotRouted] start_worker_agent(Web::PageId page_id, Web::HTML::WorkerAgentStartRequest request) => (Web::HTML::WorkerAgentId agent_id, Optional<IPC::TransportHandle> thread_transport, bool is_hosted_in_caller_process)
     [NotRouted] close_worker_agent(Web::PageId page_id, Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token) =|

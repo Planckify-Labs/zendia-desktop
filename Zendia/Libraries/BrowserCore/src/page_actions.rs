@@ -102,6 +102,8 @@ pub struct PageHintSession {
     pub poll_delay_ms: Option<u64>,
     /// Purpose list waiting on a fresh re-read before flashing `"no <purpose> here"` (`CAP-04`).
     pub pending_purpose: Option<Vec<String>>,
+    /// Pending `.` (`false`) or `,` (`true`) cursor open waiting for an on-demand `CaptchaAreas` scan.
+    pub pending_cursor_drag: Option<bool>,
 }
 
 /// A key given to a jump.
@@ -191,6 +193,7 @@ impl PageHintSession {
             poll_seq: 0,
             poll_delay_ms: staying.then_some(CHALLENGE_POLL_MS),
             pending_purpose: None,
+            pending_cursor_drag: None,
         }
     }
 

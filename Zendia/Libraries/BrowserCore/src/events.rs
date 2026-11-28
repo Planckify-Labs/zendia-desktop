@@ -320,6 +320,11 @@ pub enum Event {
         tab_id: TabId,
         seq: u64,
     },
+    /// Live CAPTCHA detection finding for `tab_id` changed (`None` when cleared or gone).
+    TabCaptchaFindingChanged {
+        tab_id: TabId,
+        finding: Option<String>,
+    },
     /// Top-document jump targets scanned for an extension popup's automatic keyboard hints (`EXT-01`).
     PopupTargetsUpdated {
         tab_id: TabId,

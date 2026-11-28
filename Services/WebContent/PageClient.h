@@ -146,6 +146,8 @@ public:
     ErrorOr<WebView::DebuggerObjectProperties> console_object_properties(u64 object_id);
     void run_javascript(StringView js_source);
     void deliver_embedder_message(u64 request_id, String world, String script_source);
+    void deliver_embedder_frame_message(Web::HTML::CrossProcessId document_id, u64 request_id, String world, String script_source);
+    void did_reply_embedder_frame_eval(u64 frame_request_id, bool ok, String result_json);
     GC::Ref<Web::Internals::ExtensionWorld> ensure_embedder_world(Web::HTML::Window&, String const& world_name);
     void did_output_js_console_message(WebView::ConsoleOutput);
 
@@ -553,8 +555,18 @@ private:
     // asks, so it sees what the page output before.
     WebView::ConsoleOutputBuffer m_console_output_buffer;
 
+    void deliver_embedder_message_in_document(Web::DOM::Document&, u64 request_id, String const& world_name, String const& script_source);
+
+    struct PendingEmbedderFrameEval {
+        GC::Ptr<Web::WebIDL::Promise> promise;
+        GC::Ptr<Web::Internals::ExtensionWorld> world;
+        RefPtr<Core::Timer> timeout;
+    };
+
     // Cached isolated worlds per window for Zendia's generic embedder channel (e.g. "zendia-automation").
     HashMap<String, Vector<GC::Ptr<Web::Internals::ExtensionWorld>>> m_embedder_worlds;
+    HashMap<u64, PendingEmbedderFrameEval> m_pending_embedder_frame_evals;
+    u64 m_next_embedder_frame_request_id { 1 };
 };
 
 }

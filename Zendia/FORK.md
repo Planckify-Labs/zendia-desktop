@@ -68,7 +68,7 @@ Generic embedder channel (`view_embedder_message` / `view_embedder_reply` for Au
 resent with the other preferences when a view gets a new page; `PageClient` reports the input method state and
 editable-element focus (`email`, `number`, `date`, `select`, `textarea`, `contenteditable`, `designMode`) after each
 rendering update that moved focus; and `PageClient`'s isolated embedder worlds expose unsolicited event posting,
-closed-shadow-root inspection, user-triggered selection copying, and same-process child-frame evaluation over the
+closed-shadow-root inspection, user-triggered selection copying, and same- and cross-process child-frame evaluation over the
 generic embedder channel.
 
 - `Libraries/LibWebView/Application.cpp`

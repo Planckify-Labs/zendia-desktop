@@ -238,6 +238,7 @@ private:
     virtual void did_set_device_pixel_ratio_for_testing(double device_pixel_ratio) override;
     virtual void did_find_in_page(size_t current_match_index, Optional<size_t> total_match_count) override;
     virtual void did_reply_embedder_message(u64 request_id, bool ok, String result_json) override;
+    virtual void did_request_embedder_frame_eval(u64 frame_request_id, Web::HTML::CrossProcessId target_navigable_id, String world, String script) override;
     virtual void did_request_certificate_warning(URL::URL url, Web::HTML::CrossProcessId document_state_id) override;
     virtual void did_request_cursor_change(Gfx::Cursor cursor) override;
     virtual void did_update_editing_history_state(bool can_undo, bool can_redo) override;

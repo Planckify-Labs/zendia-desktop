@@ -155,6 +155,37 @@ impl PageTarget {
     }
 }
 
+/// A single CAPTCHA detection signal reported by a frame (`ZendiaCaptchaWatchChild.scanPage`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptchaWatchDetection {
+    pub signal: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub challenge: bool,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// Live CAPTCHA state reported by a frame (`ZendiaCaptchaWatchChild.captchaState`).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CaptchaWatchStateReading {
+    #[serde(default = "default_state_none")]
+    pub state: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub how: Option<String>,
+}
+
+fn default_state_none() -> String {
+    "none".to_string()
+}
+
 /// A request from the browser core to a page's Automation World.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -253,6 +284,8 @@ pub enum AutomationRequest {
     },
     /// Queries the bounding areas of recognised CAPTCHAs on screen (`captchaAreas`) and solved token count.
     CaptchaAreas,
+    /// Forces a fresh `ZendiaCaptchaWatchChild` scan across the top document and all child frames.
+    CaptchaWatchScan,
     /// Fills a local CAPTCHA answer field with `text` as user input (`captcha.fill`).
     CaptchaFill {
         text: String,
@@ -273,6 +306,10 @@ pub enum AutomationRequest {
 
 fn default_count() -> u32 {
     1
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// An answer from the Automation World.
@@ -358,6 +395,24 @@ pub enum AutomationResponse {
         text: String,
         #[serde(default)]
         host: String,
+    },
+    /// Unsolicited CAPTCHA watch report from one frame of a tab (`ZendiaCaptchaWatchChild`).
+    CaptchaWatchReport {
+        #[serde(default)]
+        frame_id: u64,
+        #[serde(default = "default_true")]
+        top: bool,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        detections: Vec<CaptchaWatchDetection>,
+        #[serde(default)]
+        state: CaptchaWatchStateReading,
+    },
+    /// Unsolicited notice that a frame left or unloaded (`Zendia:CaptchaWatch:Gone`).
+    CaptchaWatchGone {
+        #[serde(default)]
+        frame_id: u64,
     },
     /// Result of toggling reader view (`<leader>uz`).
     ReaderMode {

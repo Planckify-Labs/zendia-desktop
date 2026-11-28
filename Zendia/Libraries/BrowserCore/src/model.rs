@@ -1383,6 +1383,7 @@ impl BrowserModel {
                 self.pinned_urls.remove(tab_id);
                 self.unloaded_tabs.remove(tab_id);
                 self.tab_zoom.remove(tab_id);
+                self.tab_captcha_findings.remove(tab_id);
                 if self.keyed_page == Some(*tab_id) {
                     self.keyed_page = None;
                 }
@@ -1823,6 +1824,14 @@ impl BrowserModel {
             }
             Event::PageFindChanged { find } => {
                 self.page_find = find.clone();
+                true
+            }
+            Event::TabCaptchaFindingChanged { tab_id, finding } => {
+                if let Some(text) = finding {
+                    self.tab_captcha_findings.insert(*tab_id, text.clone());
+                } else {
+                    self.tab_captcha_findings.remove(tab_id);
+                }
                 true
             }
             Event::AgentRosterChanged

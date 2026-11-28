@@ -102,6 +102,7 @@ struct StubState {
     popup_keyboard_until_ms: Option<u64>,
     user_keymap_json: Option<String>,
     vim: vim::VimState,
+    captcha_watch: crate::captcha::CaptchaWatchService,
 }
 
 type ClipboardReader = Arc<dyn Fn() -> Option<String> + Send + Sync>;
@@ -172,6 +173,7 @@ impl StubBackend {
                 popup_keyboard_until_ms: None,
                 user_keymap_json: None,
                 vim: vim::VimState::default(),
+                captcha_watch: crate::captcha::CaptchaWatchService::default(),
             }),
             tab_source: Mutex::new(None),
             extension_source: Mutex::new(None),
@@ -682,6 +684,8 @@ impl StubBackend {
             state.model.pinned_tabs.retain(|item| item.tab_id != tab_id);
             normalize_pinned_orders(&mut state.model.pinned_tabs);
             state.model.tab_zoom.remove(&tab_id);
+            state.model.tab_captcha_findings.remove(&tab_id);
+            state.captcha_watch.clear_tab(tab_id);
             for folder in &mut state.model.folders {
                 folder.tab_ids.retain(|id| *id != tab_id);
             }

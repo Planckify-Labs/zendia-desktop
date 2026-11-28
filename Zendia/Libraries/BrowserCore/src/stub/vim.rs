@@ -482,7 +482,7 @@ impl StubBackend {
 
     /// Resets document-scoped vim state (`Visual`, `I`, hints, caret, pending keys) on navigation or unload (`MD-02`, `MD-03`).
     pub fn on_tab_navigated(&self, tab_id: TabId, new_url: Option<&str>) {
-        let changed = {
+        let (changed, cleared_captcha) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let page = state.vim.pages.entry(tab_id).or_default();
             if let Some(url) = new_url {
@@ -501,8 +501,14 @@ impl StubBackend {
             page.page_hints = None;
             page.visual_caret = None;
             page.mode_transition_pending = false;
-            true
+            state.captcha_watch.clear_tab(tab_id);
+            let cleared_captcha = state.model.tab_captcha_findings.remove(&tab_id).is_some();
+            (true, cleared_captcha)
         };
+        if cleared_captcha {
+            self.bus
+                .publish(Event::TabCaptchaFindingChanged { tab_id, finding: None });
+        }
         if changed {
             self.sync_published_vim_state();
         }

@@ -117,6 +117,22 @@
     }
   }
 
+  // Text nodes in document order within a single DOM root (without crossing into child shadow roots).
+  function* rootTextNodes(root) {
+    if (!root) return;
+    const stack = [root];
+    while (stack.length) {
+      const node = stack.pop();
+      if (node.nodeType === 3) {
+        yield node;
+        continue;
+      }
+      if (node.nodeType === 1 && isNotTextElement(node)) continue;
+      const children = node.childNodes;
+      for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+    }
+  }
+
   // Text nodes in document order, those of a shadow root before its host's own children, skipping non-text subtrees.
   function* deepTextNodes(root) {
     if (!root) return;
@@ -257,16 +273,40 @@
     return id;
   }
 
-  function evalInFrame(frame, requestObj) {
+  function docInfo() {
+    if (typeof globalThis.__zendiaDocInfo === "function") {
+      try {
+        const raw = globalThis.__zendiaDocInfo();
+        if (typeof raw === "string") return JSON.parse(raw);
+      } catch (_) {}
+    }
+    return {
+      frameId: window.top === window ? 0 : 1,
+      top: window.top === window,
+      url: String(document.documentURI || location.href || ""),
+    };
+  }
+
+  function frameInfoOf(frame) {
+    if (typeof globalThis.__zendiaFrameInfo === "function" && frame && frame.nodeType === 1) {
+      try {
+        const raw = globalThis.__zendiaFrameInfo(frame);
+        if (typeof raw === "string") return JSON.parse(raw);
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  async function evalInFrame(frame, requestObj) {
     if (typeof globalThis.__zendiaEvalFrame !== "function" || !frame || frame.nodeType !== 1) return null;
     const payload = JSON.stringify(JSON.stringify(requestObj));
     try {
-      let raw = globalThis.__zendiaEvalFrame(
+      let raw = await globalThis.__zendiaEvalFrame(
         frame,
         "typeof __zendiaAutomation === 'function' ? __zendiaAutomation(" + payload + ") : '__NEED_RUNTIME__'"
       );
       if (raw === "__NEED_RUNTIME__") {
-        raw = globalThis.__zendiaEvalFrame(frame, RUNTIME_SOURCE + "\n__zendiaAutomation(" + payload + ")");
+        raw = await globalThis.__zendiaEvalFrame(frame, RUNTIME_SOURCE + "\n__zendiaAutomation(" + payload + ")");
       }
       return typeof raw === "string" ? JSON.parse(raw) : null;
     } catch (_) {
@@ -305,10 +345,23 @@
     return allFrames().filter(frame => frameVisible(frame) && isInWindow(frame.getBoundingClientRect()));
   }
 
-  function initChildFrames() {
-    for (const frame of allFrames()) {
-      evalInFrame(frame, { op: "init" });
-    }
+  const initializedFrames = new WeakMap();
+
+  async function initChildFrames(forceAll) {
+    const frames = allFrames().filter(frame => {
+      if (forceAll) return true;
+      const src = frameSrcOf(frame);
+      const prev = initializedFrames.get(frame);
+      return prev === undefined || (src && prev !== src);
+    });
+    if (!frames.length) return;
+    await Promise.all(
+      frames.map(async frame => {
+        const src = frameSrcOf(frame);
+        const res = await evalInFrame(frame, { op: "init" });
+        if (res && res.kind === "ok") initializedFrames.set(frame, src || "");
+      })
+    );
   }
 
   function frameBox(frame) {
@@ -510,6 +563,80 @@
     "awswaf-captcha",
   ].join(",");
 
+  const NOT_OPENED = [
+    ".frc-captcha",
+    "altcha-widget",
+    ".altcha",
+    ".mcaptcha__widget-container",
+    ".cf-turnstile",
+    "#cf-challenge-running",
+    "#challenge-stage",
+    "#challenge-form",
+    ".mtcaptcha",
+    "#mtcaptcha",
+    ".g-recaptcha",
+    ".grecaptcha-badge",
+    ".h-captcha",
+  ].join(",");
+
+  const SCRIPTS = [
+    {
+      name: "reCAPTCHA",
+      script: /recaptcha\/[^?]*\.js\?[^#]*\brender=(?!(?:explicit|onload)\b)/,
+      kind: "score",
+    },
+    {
+      name: "reCAPTCHA",
+      script: /google\.com\/recaptcha\/|recaptcha\.net\/|gstatic\.com\/recaptcha\//,
+      kind: "checkbox",
+    },
+    {
+      name: "hCaptcha",
+      script: /(?:js\.)?hcaptcha\.com\/1\/api\.js/,
+      kind: "checkbox",
+    },
+    {
+      name: "Cloudflare Turnstile",
+      script: /challenges\.cloudflare\.com\/turnstile\//,
+      kind: "managed",
+    },
+    {
+      name: "Arkose",
+      script: /arkoselabs\.com\/|funcaptcha\.com\//,
+      kind: "game",
+    },
+    {
+      name: "GeeTest",
+      script: /geetest\.(?:com|cn)\/|geevisit\.com\/|\/gt4[\w.-]*\.js(?:[?#]|$)/,
+      kind: "slider",
+    },
+    {
+      name: "DataDome",
+      script: /js\.datadome\.co\/tags\.js/,
+      kind: "behavioral",
+    },
+    {
+      name: "HUMAN",
+      script: /px-cdn\.net\/|px-cloud\.net\//,
+      kind: "behavioral",
+    },
+    { name: "AWS WAF", script: /awswaf\.com\//, kind: "puzzle" },
+    {
+      name: "Friendly Captcha",
+      script: /@friendlycaptcha\/sdk|friendly-challenge|\bfrcapi\.com\/|\b(?:eu-)?api\.friendlycaptcha\.(?:com|eu)\//,
+      kind: "proof-of-work",
+    },
+    { name: "Lemin", script: /leminnow\.com\//, kind: "puzzle" },
+    { name: "ALTCHA", script: /\/altcha[@/.]/, kind: "proof-of-work" },
+    { name: "MTCaptcha", script: /mtcaptcha\.com\//, kind: "text" },
+    {
+      name: "Yandex SmartCaptcha",
+      script: /smartcaptcha\.yandexcloud\.net\/|captcha\.yandex\./,
+      kind: "puzzle",
+    },
+    { name: "Kasada", script: /\/ips\.js(?:[?#]|$)/, kind: "sensor" },
+  ];
+
   const TOKEN_FIELDS = [
     "g-recaptcha-response",
     "h-captcha-response",
@@ -525,6 +652,13 @@
     "geetest_seccode",
     "lemin_answer",
   ];
+  const TOKEN_PLACEHOLDER = /^\.([A-Z][A-Z_]*)$/;
+  const PLACEHOLDER_FAILED = /(?:^|_)(?:EXPIRED|ERROR|TIMEOUT|RESET|DESTROYED|FAILED)$/;
+  const PLACEHOLDER_RUNNING = /^(?:FETCHING|UNFINISHED|SOLVING|REQUESTING|VERIFYING|ACTIVATED)$/;
+  const NOT_A_TOKEN = /^(?:null|undefined|false|0)$/i;
+  const HONEYPOT_NAMES =
+    /^(?:hp|honeypot|honey|sweet|website|homepage|url|link|email2|e-?mail2|fax|company|leave_?blank|do_?not_?fill|keep_?empty|comment_?hp)$/i;
+  const STATES = ["open", "unchecked", "failed", "shown", "checking", "solved", "none"];
 
   const OWN_CAPTCHA_NAMES =
     /captcha|security[\s_-]?code|verification[\s_-]?code|verify[\s_-]?code|anti[\s_-]?bot|human[\s_-]?check|enter (?:the )?(?:characters|code|text|letters|numbers) (?:you see|shown|above|below|in the (?:image|picture))/i;
@@ -548,7 +682,7 @@
     ["rotate", /^(?:please )?(?:rotate|turn) the (?:image|picture|object)\b/i],
     [
       "click",
-      /^(?:please )?(?:click|tap|select)(?: on)?(?: the)?(?: (?:icons?|characters?|symbols?|letters?|objects?))? in (?:the |this )?(?:following |given )?order\b/i,
+      /^(?:please )?(?:click|tap|select|pick)(?: on)?(?: the)?(?: (?:icons?|characters?|symbols?|letters?|objects?|images?))? (?:in|with) (?:the |this )?(?:following |given )?order\b/i,
     ],
     ["math", /^(?:what is|solve|calculate|how much is) \d+ ?[-+x×*÷/] ?\d+/i],
     ["behavioral", /^press (?:&|and) hold\b/i],
@@ -602,6 +736,11 @@
     return SERVICE_SITES.test(s) ? null : CAPTCHAS.find(c => c.frame.test(s)) || null;
   }
 
+  function loaderOfUrl(url) {
+    const s = String(url || "");
+    return SERVICE_SITES.test(s) ? null : SCRIPTS.find(c => c.script.test(s)) || null;
+  }
+
   function nameOfUrl(url) {
     const svc = serviceOfUrl(url);
     return svc ? svc.name : null;
@@ -612,8 +751,54 @@
     return !!(svc && svc.challenge && svc.challenge.test(String(url || "")));
   }
 
+  function nameOfScriptUrl(url) {
+    const loader = loaderOfUrl(url);
+    return loader ? loader.name : null;
+  }
+
+  function kindOfScriptUrl(url) {
+    const loader = loaderOfUrl(url);
+    return loader ? loader.kind : null;
+  }
+
+  function kindOfUrl(url) {
+    const s = String(url || "");
+    const captcha = serviceOfUrl(s);
+    if (!captcha) return kindOfScriptUrl(s);
+    if (captcha.score && captcha.score.test(s)) return "score";
+    if (!captcha.challenge) return captcha.kind;
+    return captcha.challenge.test(s) ? captcha.kind : captcha.widgetKind || captcha.kind;
+  }
+
+  function strongerState(a, b) {
+    const rank = state => {
+      const index = STATES.indexOf(state);
+      return index < 0 ? STATES.length : index;
+    };
+    return rank(b) < rank(a) ? b : a;
+  }
+
+  function tokenStateOf(value) {
+    const token = String(value == null ? "" : value).trim();
+    if (!token || NOT_A_TOKEN.test(token)) return null;
+    const match = TOKEN_PLACEHOLDER.exec(token);
+    const placeholder = match ? match[1] : null;
+    if (!placeholder) return "solved";
+    if (PLACEHOLDER_FAILED.test(placeholder)) return "failed";
+    return PLACEHOLDER_RUNNING.test(placeholder) ? "checking" : null;
+  }
+
+  function isHoneypotField(name, visible) {
+    return !visible && HONEYPOT_NAMES.test(String(name || ""));
+  }
+
   function frameSrcOf(frame) {
-    return (frame && (frame.src || frame.getAttribute("src"))) || "";
+    if (!frame) return "";
+    const attr = frame.src || frame.getAttribute("src") || "";
+    if (attr && !/^about:blank(?:$|[?#])/i.test(attr)) return attr;
+    const info = frameInfoOf(frame);
+    if (info && info.url) return info.url;
+    return attr;
   }
 
   function promptKind(text) {
@@ -667,17 +852,20 @@
 
   function rawTrackOf(element) {
     const knob = element.getBoundingClientRect();
-    if (knob.height < 28 || knob.width < 28) return null;
+    if (knob.height < 20 || knob.width < 20) return null;
     let track = composedParent(element);
     for (let level = 0; track && level < 3; level++) {
       const box = track.getBoundingClientRect ? track.getBoundingClientRect() : null;
       if (
         box &&
-        box.width >= knob.width * 3 &&
-        box.height >= knob.height * 0.5 &&
-        box.height <= knob.height * 1.6 &&
-        (Math.abs(knob.left - box.left) < 12 || Math.abs(knob.right - box.right) < 12) &&
-        ![...track.querySelectorAll(CONTROLS)].some(other => other !== element && !element.contains(other))
+        box.width >= knob.width * 2.5 &&
+        box.width <= 640 &&
+        box.height >= knob.height * 0.45 &&
+        box.height <= Math.max(knob.height * 1.8, 72) &&
+        (Math.abs(knob.left - box.left) < 16 || Math.abs(knob.right - box.right) < 16) &&
+        ![...track.querySelectorAll(CONTROLS)].some(
+          other => other !== element && !element.contains(other) && !other.contains(element)
+        )
       ) {
         return box;
       }
@@ -709,10 +897,25 @@
   }
 
   function trackOf(element) {
-    const parent = composedParent(element);
-    const box = rawTrackOf(element) || (parent && parent.getBoundingClientRect ? parent.getBoundingClientRect() : null);
-    if (!box) return null;
-    return { x: box.left, y: box.top, left: box.left, top: box.top, width: box.width, height: box.height };
+    const direct = rawTrackOf(element);
+    if (direct) {
+      return { x: direct.left, y: direct.top, left: direct.left, top: direct.top, width: direct.width, height: direct.height };
+    }
+    const knob = element.getBoundingClientRect();
+    let parent = composedParent(element);
+    let fallback = null;
+    for (let level = 0; parent && level < 4; level++) {
+      const box = parent.getBoundingClientRect ? parent.getBoundingClientRect() : null;
+      if (box) {
+        if (!fallback) fallback = box;
+        if (box.width >= Math.max(knob.width * 2.5, 140) && box.width <= 640 && box.height <= Math.max(knob.height * 2.5, 90)) {
+          return { x: box.left, y: box.top, left: box.left, top: box.top, width: box.width, height: box.height };
+        }
+      }
+      parent = composedParent(parent);
+    }
+    if (!fallback) return null;
+    return { x: fallback.left, y: fallback.top, left: fallback.left, top: fallback.top, width: fallback.width, height: fallback.height };
   }
 
   function isInWindow(rect) {
@@ -869,7 +1072,7 @@
   }
 
   // ---------------------------------------------------------------------------------------------------------------
-  // Site-own CAPTCHAs, drawn challenges (`ownChallenges`), areas & controls (`CAP-01`..`CAP-07`)
+  // Full CAPTCHA detection layer (`ZendiaCaptchaWatchChild.sys.mjs`), drawn challenges, areas & controls (`CAP-01`..`CAP-09`)
   // ---------------------------------------------------------------------------------------------------------------
 
   const PICTURE_MIN = { width: 100, height: 60 };
@@ -883,13 +1086,28 @@
   let drawnChallengesCache = { at: 0, boxes: [] };
 
   const WATCH_MIN_SIDE = 20;
+  const WATCH_PICTURE_SIDE = 36;
+  const WATCH_OPEN_SIDE = 260;
+  const WATCH_FADED = 0.95;
+  const WATCH_PART_ROOM = 4;
+  const WATCH_ICON_SIDE = 64;
+  const WATCH_TASK_SIDE = 100;
+  const WATCH_SMALL_WIDTH = 200;
+  const WATCH_SMALL_HEIGHT = 50;
   const WATCH_BOX_MAX_WIDTH = 520;
   const WATCH_BOX_MAX_HEIGHT = 720;
   const WATCH_PROMPT_LEVELS = 6;
+  const WATCH_WIDGET_LEVELS = 4;
+  const WATCH_WIDGET_GROWTH = 4;
+  const WATCH_MOSTLY_VIEW = 0.9;
   const WATCH_LINE_MAX = 80;
   const WATCH_LINE_LEVELS = 2;
   const WATCH_MAX_PROMPT_TEXTS = 200;
   const WATCH_MAX_OWN = 5;
+  const WATCH_MAX_INLINE_SCRIPTS = 100;
+  const WATCH_MAX_INLINE_TEXT = 50000;
+  const WATCH_MAX_INLINE_URLS = 50;
+  const WATCH_MAX_EXTENT_ELEMENTS = 2000;
   const WATCH_CONTROLS =
     "img, canvas, svg, video, button, input:not([type=hidden]), select, [role=button], [role=checkbox], [role=slider], [draggable=true], [tabindex]";
   const WATCH_ANSWER_FIELDS =
@@ -908,6 +1126,16 @@
     return !!st && st.display !== "none" && st.visibility !== "hidden" && parseFloat(st.opacity || "1") > 0;
   }
 
+  function isCaptchaFrame() {
+    return window.parent !== window && nameOfUrl(document.documentURI || location.href || "") !== null;
+  }
+
+  function watchFramesOf() {
+    const frames = new Set(document.querySelectorAll("iframe, frame"));
+    for (const frame of allFrames()) frames.add(frame);
+    return [...frames];
+  }
+
   function watchIsShown(element) {
     if (!checkVisibleStrict(element)) return false;
     const rect = element.getBoundingClientRect();
@@ -917,6 +1145,65 @@
       rect.right + scrollX > 0 &&
       rect.bottom + scrollY > 0
     );
+  }
+
+  function watchVisibleRect(element, rect, opts) {
+    const box = rect || element.getBoundingClientRect();
+    const viewport = !opts || opts.viewport !== false;
+    let left = viewport ? Math.max(box.left, 0) : box.left;
+    let top = viewport ? Math.max(box.top, 0) : box.top;
+    let right = viewport ? Math.min(box.right, innerWidth) : box.right;
+    let bottom = viewport ? Math.min(box.bottom, innerHeight) : box.bottom;
+    let node = element;
+    while (node && right > left && bottom > top) {
+      const position = getComputedStyle(node) ? getComputedStyle(node).position : "";
+      if (position === "fixed") break;
+      const parent = position === "absolute" ? node.offsetParent : node.parentElement;
+      if (!parent || parent === document.body || parent === document.documentElement) break;
+      const style = getComputedStyle(parent);
+      if (style) {
+        const pbox = parent.getBoundingClientRect();
+        const innerLeft = pbox.left + (parent.clientLeft || 0);
+        const innerTop = pbox.top + (parent.clientTop || 0);
+        if (style.overflowX !== "visible") {
+          left = Math.max(left, innerLeft);
+          right = Math.min(right, innerLeft + parent.clientWidth);
+        }
+        if (style.overflowY !== "visible") {
+          top = Math.max(top, innerTop);
+          bottom = Math.min(bottom, innerTop + parent.clientHeight);
+        }
+      }
+      node = parent;
+    }
+    return right > left && bottom > top ? { left, top, width: right - left, height: bottom - top } : null;
+  }
+
+  function extentOf(element) {
+    let { left, top, right, bottom } = element.getBoundingClientRect();
+    const descendants = element.querySelectorAll("*");
+    if (descendants.length <= WATCH_MAX_EXTENT_ELEMENTS) {
+      for (const child of descendants) {
+        const rect = child.getBoundingClientRect();
+        if (
+          rect.width < 1 ||
+          rect.height < 1 ||
+          rect.width > WATCH_BOX_MAX_WIDTH ||
+          rect.height > WATCH_BOX_MAX_HEIGHT ||
+          (rect.left >= left && rect.top >= top && rect.right <= right && rect.bottom <= bottom) ||
+          !checkVisibleStrict(child)
+        ) {
+          continue;
+        }
+        const seen = watchVisibleRect(child, rect, { viewport: false });
+        if (!seen) continue;
+        left = Math.min(left, seen.left);
+        top = Math.min(top, seen.top);
+        right = Math.max(right, seen.left + seen.width);
+        bottom = Math.max(bottom, seen.top + seen.height);
+      }
+    }
+    return { left, top, right, bottom, width: right - left, height: bottom - top };
   }
 
   function boxAround(element, levels, growth) {
@@ -940,6 +1227,15 @@
       node = node.parentElement;
     }
     return box;
+  }
+
+  function widgetsOf(all) {
+    try {
+      const found = [...document.querySelectorAll(WIDGETS)];
+      return all ? found : found.filter(element => !(element.parentElement && element.parentElement.closest(WIDGETS)));
+    } catch (_) {
+      return [];
+    }
   }
 
   function promptTextNodes() {
@@ -976,7 +1272,7 @@
   }
 
   function ownChallenges() {
-    if (!document.body || nameOfUrl(location.href) !== null) return [];
+    if (!document.body || isCaptchaFrame()) return [];
     const found = [];
     for (const text of promptTextNodes()) {
       let element = text.parentElement;
@@ -1043,6 +1339,772 @@
     }
     return kept.filter(item => !kept.some(other => other !== item && other.box.contains(item.box))).slice(0, WATCH_MAX_OWN);
   }
+
+  const inlineScriptUrlsCache = new WeakMap();
+  const INLINE_URLS_RE = /https?:\/\/[^\s"'`<>()\\]+/g;
+
+  function scriptUrls() {
+    const urls = new Set();
+    for (const script of document.scripts || []) {
+      if (script.src) urls.add(script.src);
+    }
+    for (const link of document.querySelectorAll("link[rel=modulepreload][href], link[rel=preload][as=script][href]")) {
+      if (link.href) urls.add(link.href);
+    }
+    let read = 0;
+    for (const script of document.querySelectorAll("script:not([src])")) {
+      if (/json|template|html/i.test(script.type || "")) continue;
+      if (++read > WATCH_MAX_INLINE_SCRIPTS) break;
+      let found = inlineScriptUrlsCache.get(script);
+      if (!found) {
+        found = [...String(script.text || "").slice(0, WATCH_MAX_INLINE_TEXT).matchAll(INLINE_URLS_RE)]
+          .slice(0, WATCH_MAX_INLINE_URLS)
+          .map(match => match[0]);
+        inlineScriptUrlsCache.set(script, found);
+      }
+      for (const url of found) urls.add(url);
+    }
+    return [...urls];
+  }
+
+  function scanPage() {
+    const detections = [];
+    for (const frame of watchFramesOf()) {
+      const src = frameSrcOf(frame);
+      const name = src && nameOfUrl(src);
+      if (name) {
+        detections.push({
+          signal: "frame",
+          name,
+          kind: kindOfUrl(src),
+          challenge: isChallengeUrl(src),
+          hidden: !watchIsShown(frame),
+          detail: src.slice(0, 200),
+        });
+      }
+    }
+    for (const url of scriptUrls()) {
+      const name = nameOfScriptUrl(url);
+      if (name) {
+        detections.push({
+          signal: "script",
+          name,
+          kind: kindOfScriptUrl(url),
+          challenge: false,
+          hidden: false,
+          detail: url.slice(0, 200),
+        });
+      }
+    }
+    const widgets = widgetsOf(false).filter(element => watchIsShown(element)).length;
+    if (widgets) {
+      detections.push({ signal: "widget", detail: String(widgets) });
+    }
+    for (const { kind, prompt } of ownChallenges()) {
+      detections.push({ signal: "own", kind, detail: prompt.slice(0, 200) });
+    }
+    for (const field of document.querySelectorAll("input[name], textarea[name]")) {
+      const name = String(field.name || "").slice(0, 64);
+      if (isTokenField(name)) {
+        detections.push({ signal: "token", detail: name });
+        continue;
+      }
+      const visible = field.type !== "hidden" && isRendered(field);
+      if (isHoneypotField(name, visible)) {
+        detections.push({ signal: "honeypot", kind: "honeypot", detail: name });
+      }
+    }
+    return detections;
+  }
+
+  const backgroundProbes = new WeakMap();
+  const BACKGROUND_URLS = /url\(\s*(["']?)([^"')]+)\1\s*\)/g;
+  const LOADER_NAMES = /(?:^|[-_\s])(?:loading|loader|spinner|spin|skeleton)(?:$|[-_\s])/i;
+  const OVERLAY_NAMES = /(?:^|[-_\s])ai[-_]?detect(?:$|[-_\s])/i;
+  const CHECKBOX_NAMES = /(?:^|[-_])(?:check(?:box)?|cb|tick)(?:$|[-_])/i;
+  const CHECKED_NAMES = /(?:^|[-_])(?:checked|is-checked|done|success|verified|passed|solved)(?:$|[-_])/i;
+  const WATCH_CLICKABLE = "button, [role=button], [role=checkbox], label, [tabindex], [onclick]";
+  const MANAGED_PASSED = /^(?:success!?|verified|you are verified)$/i;
+  const MANAGED_FAILED = /^(?:verification (?:failed|expired)|failed|expired|error)\b/i;
+  const SELF_READ_KINDS = new Set(["checkbox", "managed", "proof-of-work", "score", "invisible"]);
+  const STATUS_TEXT_MAX = 80;
+  const EXPIRED_WORDS = /^(?:\S+\s+){0,3}?(?:expired|timed\s+out|time-?out)\b/i;
+  const FAILED_WORDS = /^(?:\S+\s+){0,3}?(?:failed|failure|error)\b/i;
+  const EXPIRED_NAMES = /(?:^|[-_])(?:expired?|expiry|timeout|timed-?out)(?:$|[-_])/i;
+  const FAILED_NAMES = /(?:^|[-_])(?:fail|failed|failure|error)(?:$|[-_])/i;
+  const PASSED_NAMES = /(?:^|[-_])(?:success|verified|passed|solved)(?:$|[-_])/i;
+  const EXPIRED_STATES = new Set(["expired", "timeout"]);
+  const FAILED_STATES = new Set(["error", "failed", "failure"]);
+  const STATUS_RANK = { expired: 0, failed: 1, passed: 2 };
+  const LOADING_NAMES = /(?:^|[-_])(?:loading|checking|busy)$/i;
+  const LOADING_MAX_MS = 10000;
+  let loadingSinceAt = null;
+  let lastChallengeTarget = null;
+
+  function elementNamesOf(element) {
+    return `${element.id || ""} ${(element.getAttribute && element.getAttribute("class")) || ""}`;
+  }
+
+  function isLoader(element) {
+    return LOADER_NAMES.test(elementNamesOf(element)) && checkVisibleStrict(element);
+  }
+
+  function backgroundsLoaded(root) {
+    let probes = backgroundProbes.get(document);
+    if (!probes) {
+      probes = new Map();
+      backgroundProbes.set(document, probes);
+    }
+    const elements = [root, ...root.querySelectorAll("*")];
+    if (elements.length > WATCH_MAX_EXTENT_ELEMENTS) return true;
+    for (const element of elements) {
+      const painted = getComputedStyle(element) ? getComputedStyle(element).backgroundImage : "";
+      if (!painted || !painted.includes("url(")) continue;
+      const { width, height } = element.getBoundingClientRect();
+      if (width < WATCH_MIN_SIDE || height < WATCH_MIN_SIDE) continue;
+      if (!checkVisibleStrict(element)) continue;
+      for (const match of painted.matchAll(BACKGROUND_URLS)) {
+        const url = match[2];
+        let probe = probes.get(url);
+        if (!probe) {
+          const image = new Image();
+          probe = { ready: false };
+          image.src = url;
+          if (typeof image.decode === "function") {
+            image.decode().then(
+              () => {
+                probe.ready = true;
+              },
+              () => {
+                probe.ready = true;
+              }
+            );
+          } else {
+            image.onload = () => {
+              probe.ready = true;
+            };
+            image.onerror = () => {
+              probe.ready = true;
+            };
+          }
+          probes.set(url, probe);
+        }
+        if (!probe.ready) return false;
+      }
+    }
+    return true;
+  }
+
+  function picturesLoaded(element) {
+    const images = [
+      ...(element.localName === "img" ? [element] : []),
+      ...element.querySelectorAll("img"),
+    ].filter(image => checkVisibleStrict(image));
+    return images.every(image => image.complete && image.naturalWidth > 0) && backgroundsLoaded(element);
+  }
+
+  function watchLoading(root) {
+    const elements = [root, ...root.querySelectorAll("*")];
+    if (elements.length > WATCH_MAX_EXTENT_ELEMENTS) return false;
+    for (const element of elements) {
+      if (element === root) continue;
+      const { width, height } = element.getBoundingClientRect();
+      if (width < WATCH_MIN_SIDE || height < WATCH_MIN_SIDE) continue;
+      if (isLoader(element)) return true;
+    }
+    return false;
+  }
+
+  function watchArriving(element) {
+    const ends = animation =>
+      animation.playState === "running" &&
+      animation.effect &&
+      Number.isFinite(animation.effect.getComputedTiming().endTime);
+    try {
+      if (typeof element.getAnimations === "function" && element.getAnimations({ subtree: true }).some(ends)) {
+        return true;
+      }
+      let opacity = 1;
+      for (let node = element; node; node = node.parentElement) {
+        if (node !== element && typeof node.getAnimations === "function" && node.getAnimations().some(ends)) {
+          return true;
+        }
+        const st = getComputedStyle(node);
+        opacity *= Number(st && st.opacity != null ? st.opacity : 1);
+      }
+      if (opacity < WATCH_FADED) return true;
+    } catch (_) {}
+    return false;
+  }
+
+  function picturesShown(element) {
+    let count = 0;
+    for (const picture of [element, ...element.querySelectorAll("*")]) {
+      const tag = picture.localName;
+      const mediaTag = tag === "img" || tag === "canvas" || tag === "video" || tag === "image";
+      const painted = !mediaTag && picture.childElementCount <= 1;
+      if (!mediaTag && !painted) continue;
+      const { width, height } = picture.getBoundingClientRect();
+      const bg = getComputedStyle(picture) ? getComputedStyle(picture).backgroundImage || "" : "";
+      if (
+        width < WATCH_PICTURE_SIDE ||
+        height < WATCH_PICTURE_SIDE ||
+        !checkVisibleStrict(picture) ||
+        (painted && !bg.startsWith("url("))
+      ) {
+        continue;
+      }
+      if (tag !== "img" || (picture.complete && picture.naturalWidth > 0)) count++;
+    }
+    return count;
+  }
+
+  function watchClickable(element) {
+    if (!checkVisibleStrict(element)) return false;
+    const { width, height } = element.getBoundingClientRect();
+    return width >= 8 && height >= 8;
+  }
+
+  function checkboxOf(root) {
+    const real = [...root.querySelectorAll("[role=checkbox], input[type=checkbox]")].find(watchClickable);
+    if (real) return real;
+    for (const element of root.querySelectorAll("[aria-label], [title]")) {
+      const label = element.getAttribute("aria-label") || element.getAttribute("title");
+      if (watchClickable(element) && promptKind(label) === "checkbox") return element;
+    }
+    const named = [root, ...root.querySelectorAll("[class], [id]")].filter(
+      element =>
+        (CHECKBOX_NAMES.test(element.id || "") || [...(element.classList || [])].some(name => CHECKBOX_NAMES.test(name))) &&
+        watchClickable(element)
+    );
+    const deepest = named.find(element => !named.some(other => other !== element && element.contains(other)));
+    if (deepest) return deepest;
+    for (const element of root.querySelectorAll("*")) {
+      if (element.childElementCount <= 2 && watchClickable(element) && promptKind(element.innerText) === "checkbox") {
+        const targetEl = element.closest(WATCH_CLICKABLE);
+        return targetEl && root.contains(targetEl) ? targetEl : element;
+      }
+    }
+    return null;
+  }
+
+  function isCheckedBox(control) {
+    if (control.getAttribute("aria-checked") === "true" || control.checked === true) return true;
+    return [control, control.parentElement].some(
+      element => element && [...(element.classList || [])].some(name => CHECKED_NAMES.test(name))
+    );
+  }
+
+  function managedCheckbox(peek, name) {
+    let control = null;
+    for (const element of deepElements(document)) {
+      if (element.localName === "input" && element.type === "checkbox" && !control) {
+        const holder = element.closest("label") || element;
+        if (watchClickable(holder)) control = holder;
+      } else if (element.childElementCount === 0 && checkVisibleStrict(element)) {
+        const words = cleanText(element.textContent);
+        if (MANAGED_PASSED.test(words)) return { passed: true };
+        if (MANAGED_FAILED.test(words)) return { done: true };
+      }
+    }
+    if (!control) return null;
+    if (peek) return { checkbox: true };
+    control.click();
+    return { opened: true, name };
+  }
+
+  function frameCheckbox(peek) {
+    if (window.parent === window) return null;
+    const url = document.documentURI || location.href || "";
+    const name = nameOfUrl(url);
+    const kind = kindOfUrl(url);
+    if (!name || isChallengeUrl(url) || (kind !== "checkbox" && kind !== "managed")) return null;
+    if (kind === "managed") return managedCheckbox(peek, name);
+    const control =
+      document.querySelector("#recaptcha-anchor") ||
+      document.querySelector("#checkbox") ||
+      document.querySelector("[role='checkbox']") ||
+      document.querySelector("input[type='checkbox']");
+    if (!control) return null;
+    if (control.getAttribute("aria-checked") === "true") return { passed: true };
+    if (peek) return { checkbox: true };
+    control.click();
+    return { opened: true, name };
+  }
+
+  function openWidget() {
+    const view = innerWidth * innerHeight;
+    return (
+      widgetsOf(true).find(widget => {
+        const { width, height } = widget.getBoundingClientRect();
+        return (
+          width >= WATCH_OPEN_SIDE &&
+          height >= WATCH_OPEN_SIDE &&
+          width * height < view * WATCH_MOSTLY_VIEW &&
+          watchIsShown(widget)
+        );
+      }) || null
+    );
+  }
+
+  function holdsFrame(element, frames) {
+    return frames.some(frame => {
+      for (let node = frame; node; node = node.parentNode || node.host) {
+        if (node === element) return true;
+      }
+      return false;
+    });
+  }
+
+  function pageCheckbox(peek) {
+    if (isCaptchaFrame()) return null;
+    const own = ownChallenges();
+    if (own.some(({ kind }) => kind !== "checkbox")) return null;
+    if (openWidget()) return null;
+    const roots = [
+      ...own.map(({ box }) => ({ root: box, name: "page" })),
+      ...widgetsOf(false)
+        .filter(widget => watchIsShown(widget) && !widget.matches(NOT_OPENED) && !widget.querySelector("iframe, frame"))
+        .map(widget => ({ root: widget, name: "widget" })),
+    ];
+    for (const { root, name } of roots) {
+      const control = root.matches("button, [role=button], input[type=button]") ? root : checkboxOf(root);
+      if (!control) continue;
+      if (isCheckedBox(control)) return { passed: true };
+      if (peek) return { checkbox: true };
+      control.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      control.click();
+      return { opened: true, name };
+    }
+    return null;
+  }
+
+  function ownText(element) {
+    let text = "";
+    for (const node of element.childNodes || []) {
+      if (node.nodeType === 3) text += " " + node.data;
+    }
+    return cleanText(text);
+  }
+
+  function* selfAndDeep(root) {
+    if (root.nodeType === 1) {
+      yield root;
+      const shadow = shadowRootOf(root);
+      if (shadow) yield* deepElements(shadow);
+    }
+    yield* deepElements(root);
+  }
+
+  function statusOfElement(element, passes) {
+    const state = element.dataset && element.dataset.state ? element.dataset.state.toLowerCase() : "";
+    if (state && EXPIRED_STATES.has(state)) return "expired";
+    if (state && FAILED_STATES.has(state)) return "failed";
+    const words = ownText(element);
+    if (words && words.length <= STATUS_TEXT_MAX) {
+      if (EXPIRED_WORDS.test(words)) return "expired";
+      if (FAILED_WORDS.test(words)) return "failed";
+      if (passes && MANAGED_PASSED.test(words)) return "passed";
+    }
+    const names = [element.id, ...(element.classList || [])].filter(Boolean);
+    if (!names.length) return null;
+    const rules = [
+      ["expired", EXPIRED_NAMES],
+      ["failed", FAILED_NAMES],
+      ...(passes ? [["passed", PASSED_NAMES]] : []),
+    ];
+    const hit = rules.find(([, rule]) => names.some(name => rule.test(name)));
+    const named = hit ? hit[0] : null;
+    return named && cleanText(element.textContent) ? named : null;
+  }
+
+  function statusOf(root, passes) {
+    let found = null;
+    for (const element of selfAndDeep(root)) {
+      const status = statusOfElement(element, !!passes);
+      if (status && (!found || STATUS_RANK[status] < STATUS_RANK[found]) && checkVisibleStrict(element)) {
+        found = status;
+        if (found === "expired") break;
+      }
+    }
+    return found;
+  }
+
+  function loadingFor() {
+    const control = document.querySelector("#recaptcha-anchor, #checkbox, [role=checkbox]");
+    const spinning =
+      !!control &&
+      (control.getAttribute("aria-busy") === "true" ||
+        [...(control.classList || [])].some(name => LOADING_NAMES.test(name)));
+    if (!spinning) {
+      loadingSinceAt = null;
+      return null;
+    }
+    if (loadingSinceAt === null) loadingSinceAt = Date.now();
+    return Date.now() - loadingSinceAt;
+  }
+
+  function frameState() {
+    const url = document.documentURI || location.href || "";
+    const name = nameOfUrl(url);
+    if (isChallengeUrl(url)) return { state: "none" };
+    const kind = kindOfUrl(url);
+    const answer = frameCheckbox(true);
+    if (kind === "checkbox" && answer && answer.passed) {
+      return { state: "solved", name, how: `${name}'s checkbox is ticked` };
+    }
+    const status = kind === "checkbox" || kind === "managed" ? statusOf(document, kind === "managed") : null;
+    if (status === "expired") return { state: "failed", name, how: `${name} says the check expired` };
+    if (status === "failed") return { state: "failed", name, how: `${name} says the check failed` };
+    if ((answer && answer.passed) || status === "passed") {
+      return { state: "solved", name, how: `${name} says the check passed` };
+    }
+    const spun = answer && answer.checkbox ? loadingFor() : null;
+    if (spun != null && spun < LOADING_MAX_MS) {
+      return { state: "checking", name, how: `${name} is checking the click` };
+    }
+    if (spun != null) {
+      return {
+        state: "unchecked",
+        name,
+        how: `${name}'s checkbox is stuck checking the click: click it again or reload`,
+      };
+    }
+    if (answer && answer.done) {
+      return { state: "failed", name, how: `${name} says the check failed or expired` };
+    }
+    if (answer && answer.checkbox) {
+      return { state: "unchecked", name, how: `${name}'s checkbox is not ticked` };
+    }
+    if (kind === "managed" && innerWidth >= WATCH_MIN_SIDE && innerHeight >= WATCH_MIN_SIDE) {
+      return { state: "checking", name, how: `${name} is checking on its own` };
+    }
+    return { state: "none" };
+  }
+
+  function pageState() {
+    let best = { state: "none" };
+    const take = reading => {
+      if (reading.state !== best.state && strongerState(best.state, reading.state) === reading.state) {
+        best = reading;
+      }
+    };
+    const frames = watchFramesOf();
+    for (const frame of frames) {
+      const src = frameSrcOf(frame);
+      const name = src && nameOfUrl(src);
+      if (!name || !watchIsShown(frame)) continue;
+      if (isChallengeUrl(src)) {
+        take({ state: "open", name, how: `${name}'s challenge is open` });
+      } else if (!SELF_READ_KINDS.has(kindOfUrl(src))) {
+        take({ state: "shown", name, how: `${name} is shown` });
+      }
+    }
+    const own = ownChallenges();
+    for (const { kind, prompt } of own) {
+      if (kind !== "checkbox") {
+        take({
+          state: "open",
+          name: "page",
+          how: `the page's challenge "${prompt.slice(0, 80)}" is shown`,
+        });
+      }
+    }
+    const popup = openWidget();
+    if (popup && !holdsFrame(popup, frames)) {
+      take({ state: "open", name: "widget", how: "a CAPTCHA's popup is open" });
+    }
+    const checkbox = pageCheckbox(true);
+    if (checkbox && checkbox.checkbox) {
+      take({ state: "unchecked", name: "page", how: "its checkbox is not ticked" });
+    } else if (checkbox && checkbox.passed) {
+      take({ state: "solved", name: "page", how: "its checkbox is ticked" });
+    }
+    for (const field of document.querySelectorAll("input[name], textarea[name]")) {
+      if (!isTokenField(field.name)) continue;
+      const fieldName = String(field.name || "").slice(0, 64);
+      const filled = tokenStateOf(field.value);
+      if (filled === "solved") {
+        take({ state: "solved", how: `its answer field ${fieldName} is filled` });
+      } else if (filled === "failed") {
+        take({ state: "failed", how: `its answer field ${fieldName} says the check expired or failed` });
+      } else if (filled === "checking") {
+        take({ state: "checking", how: `its answer field ${fieldName} says the check is running` });
+      }
+    }
+    for (const widget of widgetsOf(false)) {
+      if (!watchIsShown(widget) || holdsFrame(widget, frames)) continue;
+      const status = statusOf(widget, false);
+      if (status === "expired" || status === "failed") {
+        take({ state: "failed", name: "widget", how: `its widget says the check ${status}` });
+      }
+    }
+    const marked = [];
+    try {
+      for (const widget of document.querySelectorAll(SOLVED_MARKS)) {
+        const state = widget.dataset ? widget.dataset.state || "" : "";
+        if (marksSolved(widget.classList, state) && isRendered(widget)) {
+          marked.push(widget);
+          take({ state: "solved", how: "its widget shows the success mark" });
+        }
+      }
+    } catch (_) {}
+    if (best.state === "none") {
+      const shown = widgetsOf(false).some(
+        widget =>
+          watchIsShown(widget) &&
+          !holdsFrame(widget, frames) &&
+          !marked.some(mark => widget.contains(mark) || mark.contains(widget))
+      );
+      if (shown || own.length) {
+        take({ state: "shown", name: "page", how: "a CAPTCHA is shown" });
+      }
+    }
+    return best;
+  }
+
+  function captchaState() {
+    try {
+      if (!document.documentElement) return { state: "none" };
+      return isCaptchaFrame() ? frameState() : pageState();
+    } catch (_) {
+      return { state: "none" };
+    }
+  }
+
+  function openChallenge(peek) {
+    return frameCheckbox(!!peek) || pageCheckbox(!!peek);
+  }
+
+  function challengeRect(stay) {
+    if (!document.documentElement) return null;
+    const frames = watchFramesOf().filter(frame => nameOfUrl(frameSrcOf(frame)));
+    const own = ownChallenges();
+    const kinds = [
+      frames.filter(frame => isChallengeUrl(frameSrcOf(frame))),
+      frames.filter(frame => !isChallengeUrl(frameSrcOf(frame))),
+      widgetsOf(true),
+      own.filter(({ kind }) => kind !== "checkbox").map(({ box }) => box),
+      own.filter(({ kind }) => kind === "checkbox").map(({ box }) => box),
+    ];
+    const view = innerWidth * innerHeight;
+    for (let kind = 0; kind < kinds.length; kind++) {
+      const shown = kinds[kind]
+        .filter(element => watchIsShown(element))
+        .map(element => {
+          const { width, height } = element.getBoundingClientRect();
+          return { element, area: width * height };
+        })
+        .sort((a, b) => b.area - a.area);
+      const ordered = [
+        ...shown.filter(({ area }) => area < view * WATCH_MOSTLY_VIEW),
+        ...shown.filter(({ area }) => area >= view * WATCH_MOSTLY_VIEW),
+      ];
+      for (const { element } of ordered) {
+        let targetEl = element;
+        if (kind === 2) {
+          const { width, height } = element.getBoundingClientRect();
+          targetEl =
+            width < WATCH_SMALL_WIDTH || height < WATCH_SMALL_HEIGHT
+              ? boxAround(element, WATCH_WIDGET_LEVELS)
+              : boxAround(element, WATCH_WIDGET_LEVELS, WATCH_WIDGET_GROWTH);
+        }
+        const isFrame = kind <= 1;
+        lastChallengeTarget = targetEl;
+        const reach = () => (isFrame ? targetEl.getBoundingClientRect() : extentOf(targetEl));
+        let full = reach();
+        if (!stay) {
+          targetEl.scrollIntoView({
+            block: full.height > innerHeight ? "start" : "center",
+            inline: "nearest",
+            behavior: "instant",
+          });
+          full = reach();
+          if (full.top < 0 || full.bottom > innerHeight) {
+            scrollBy({ top: full.top - Math.max(0, (innerHeight - full.height) / 2), behavior: "instant" });
+            full = reach();
+          }
+        }
+        const rect = watchVisibleRect(targetEl, full);
+        if (!rect || rect.width < WATCH_MIN_SIDE || rect.height < WATCH_MIN_SIDE) continue;
+        const fInfo = isFrame ? frameInfoOf(element) : null;
+        return Object.assign({}, rect, {
+          fullWidth: full.width,
+          fullHeight: full.height,
+          viewWidth: innerWidth,
+          viewHeight: innerHeight,
+          scrollX,
+          scrollY,
+          challenge: kind === 0 || kind === 3,
+          frame: isFrame,
+          own: kind >= 3,
+          inside: isCaptchaFrame(),
+          drawn: isFrame || (picturesLoaded(targetEl) && !watchArriving(targetEl) && !watchLoading(targetEl)),
+          arriving: watchArriving(targetEl),
+          pictures: isFrame ? null : picturesShown(targetEl),
+          frameId: fInfo ? fInfo.id : null,
+        });
+      }
+    }
+    return null;
+  }
+
+  function challengeDrawn(any) {
+    const url = document.documentURI || location.href || "";
+    if (!(any ? nameOfUrl(url) : isChallengeUrl(url)) || window.parent === window) return null;
+    const body = document.body;
+    if (document.readyState !== "complete" || !body || watchArriving(document.documentElement) || watchLoading(body)) {
+      return { drawn: false };
+    }
+    const images = [...(document.images || [])].filter(image => checkVisibleStrict(image));
+    if (!backgroundsLoaded(body)) return { drawn: false };
+    if (images.length) {
+      return { drawn: images.every(image => image.complete && image.naturalWidth > 0) };
+    }
+    const content =
+      body.querySelector("canvas, button, [role='button'], input, table") ||
+      (body.textContent || "").trim() ||
+      [body, ...body.querySelectorAll("*")].some(element => shadowRootOf(element));
+    return { drawn: !!content };
+  }
+
+  // Live CAPTCHA watch lifecycle (`ZendiaCaptchaWatchChild`, lines 2176-2397)
+  const WATCH_RESCAN_DELAY_MS = 500;
+  const WATCH_RESHOW_DELAY_MS = 1000;
+  const WATCH_LATE_LOOKS_MS = [1500, 4000];
+  const WATCH_STATE_POLL_MS = 1500;
+  const WATCH_ADDED_TAGS = new Set(["iframe", "frame", "script", "input", "textarea"]);
+  const WATCH_SHOWN_BY = ["style", "class", "hidden", "open", "aria-hidden", "aria-checked", "data-state"];
+  const WATCH_NOTHING = JSON.stringify([[], { state: "none" }]);
+
+  let watchObserver = null;
+  let watchTimer = 0;
+  let watchReshowTimer = 0;
+  let watchLateTimers = [];
+  let watchStateTimer = 0;
+  let watchSent = WATCH_NOTHING;
+  let watchLastState = "";
+
+  function watchBringsCaptcha(records) {
+    for (const record of records) {
+      for (const node of record.addedNodes || []) {
+        if (
+          node.nodeType === 1 &&
+          (WATCH_ADDED_TAGS.has(node.localName) ||
+            (node.querySelector && node.querySelector("iframe, frame, script, input, textarea, img, canvas")))
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function watchShowsSomething(records) {
+    return records.some(
+      record => record.type === "attributes" || (record.type === "childList" && record.addedNodes && record.addedNodes.length)
+    );
+  }
+
+  function watchFollowState(found) {
+    if (!found) {
+      if (watchStateTimer) {
+        clearInterval(watchStateTimer);
+        watchStateTimer = 0;
+      }
+      return;
+    }
+    if (watchStateTimer) return;
+    watchStateTimer = setInterval(() => {
+      if (JSON.stringify(captchaState()) !== watchLastState) {
+        watchScan(false);
+      }
+    }, WATCH_STATE_POLL_MS);
+  }
+
+  function watchScan(force) {
+    if (!document) return;
+    const detections = scanPage();
+    const state = captchaState();
+    const found = detections.length > 0 || state.state !== "none";
+    const sent = JSON.stringify([detections, state]);
+    if (force ? found : sent !== watchSent) {
+      const info = docInfo();
+      postEvent({
+        kind: "captcha_watch_report",
+        frame_id: info.frameId,
+        top: !!info.top,
+        url: info.url || String(document.documentURI || location.href || ""),
+        detections,
+        state,
+      });
+    }
+    watchSent = sent;
+    watchLastState = JSON.stringify(state);
+    watchFollowState(found || isCaptchaFrame());
+  }
+
+  function watchStop() {
+    if (watchObserver) {
+      watchObserver.disconnect();
+      watchObserver = null;
+    }
+    if (watchTimer) {
+      clearTimeout(watchTimer);
+      watchTimer = 0;
+    }
+    if (watchReshowTimer) {
+      clearTimeout(watchReshowTimer);
+      watchReshowTimer = 0;
+    }
+    if (watchStateTimer) {
+      clearInterval(watchStateTimer);
+      watchStateTimer = 0;
+    }
+    for (const t of watchLateTimers) clearTimeout(t);
+    watchLateTimers = [];
+  }
+
+  function watchStart(forceScan) {
+    if (forceScan) watchScan(true);
+    if (watchObserver || typeof MutationObserver !== "function" || !document.documentElement) return;
+    watchObserver = new MutationObserver(records => {
+      if (watchBringsCaptcha(records)) {
+        initChildFrames(false);
+        clearTimeout(watchTimer);
+        watchTimer = setTimeout(() => watchScan(false), WATCH_RESCAN_DELAY_MS);
+      } else if (watchShowsSomething(records) && !watchReshowTimer) {
+        watchReshowTimer = setTimeout(() => {
+          watchReshowTimer = 0;
+          watchScan(false);
+        }, WATCH_RESHOW_DELAY_MS);
+      }
+    });
+    watchObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: WATCH_SHOWN_BY,
+    });
+    watchLateTimers = WATCH_LATE_LOOKS_MS.map(delay =>
+      setTimeout(() => {
+        initChildFrames(false);
+        watchScan(false);
+      }, delay)
+    );
+  }
+
+  window.addEventListener("pageshow", () => {
+    watchStart(true);
+    initChildFrames(false);
+  });
+  window.addEventListener("pagehide", () => {
+    watchStop();
+    watchSent = WATCH_NOTHING;
+    watchLastState = "";
+    const info = docInfo();
+    postEvent({ kind: "captcha_watch_gone", frame_id: info.frameId });
+  });
 
   function drawnChallenges() {
     const now = Date.now();
@@ -1173,6 +2235,36 @@
     return !hit || hit === element || composedContains(element, hit) || composedContains(hit, element);
   }
 
+  function findBackgroundPictures(root) {
+    const scope = root || document;
+    const found = [];
+    try {
+      const elements = scope === document ? deepElements(document.body || document.documentElement) : deepElements(scope);
+      let checked = 0;
+      for (const element of elements) {
+        if (++checked > DRAWN_MAX) break;
+        if (element.localName === "img" || element.localName === "canvas" || element.childElementCount > 2) continue;
+        const rect = element.getBoundingClientRect();
+        if (
+          rect.width < PICTURE_MIN.width ||
+          rect.height < PICTURE_MIN.height ||
+          rect.bottom <= 0 ||
+          rect.right <= 0 ||
+          rect.top >= innerHeight ||
+          rect.left >= innerWidth ||
+          !isRendered(element)
+        ) {
+          continue;
+        }
+        const bg = getComputedStyle(element).backgroundImage || "";
+        if (bg.startsWith("url(") && isUncoveredCenter(element, rect)) {
+          found.push(element);
+        }
+      }
+    } catch (_) {}
+    return found;
+  }
+
   function findPictures(selector, root) {
     const scope = root || document;
     const found = [];
@@ -1280,23 +2372,27 @@
     );
   }
 
-  function captchaAreas() {
+  async function captchaAreas() {
     const found = [];
-    for (const frame of visibleFrames()) {
-      const box = frameBox(frame);
-      if (nameOfUrl(frameSrcOf(frame)) !== null) {
-        found.push(box);
-        continue;
-      }
-      const sub = evalInFrame(frame, { op: "captcha_areas" });
-      if (!sub || !Array.isArray(sub.areas)) continue;
-      for (const area of sub.areas) {
-        const mapped = fromFrame(box, area);
-        if (mapped.right > box.left && mapped.left < box.right && mapped.bottom > box.top && mapped.top < box.bottom) {
-          found.push(mapped);
+    const frameResults = await Promise.all(
+      visibleFrames().map(async frame => {
+        const box = frameBox(frame);
+        if (nameOfUrl(frameSrcOf(frame)) !== null) {
+          return [box];
         }
-      }
-    }
+        const sub = await evalInFrame(frame, { op: "captcha_areas" });
+        if (!sub || !Array.isArray(sub.areas)) return [];
+        const nested = [];
+        for (const area of sub.areas) {
+          const mapped = fromFrame(box, area);
+          if (mapped.right > box.left && mapped.left < box.right && mapped.bottom > box.top && mapped.top < box.bottom) {
+            nested.push(mapped);
+          }
+        }
+        return nested;
+      })
+    );
+    for (const list of frameResults) found.push(...list);
     try {
       const all = [...document.querySelectorAll(WIDGETS), ...ownCaptchas()];
       const outer = all.filter(el => !all.some(other => other !== el && other.contains(el)));
@@ -1310,7 +2406,7 @@
     return outermostRects(found).map(r => ({ x: r.left, y: r.top, width: r.width, height: r.height }));
   }
 
-  function captchaTokens() {
+  async function captchaTokens() {
     let count = 0;
     try {
       for (const field of document.querySelectorAll("input[name], textarea[name]")) {
@@ -1321,15 +2417,18 @@
         if (marksSolved(widget.classList, state) && isRendered(widget)) count++;
       }
     } catch (_) {}
-    for (const frame of visibleFrames()) {
-      const sub = evalInFrame(frame, { op: "captcha_tokens" });
-      if (sub && typeof sub.tokens === "number") count += sub.tokens;
-    }
+    const subCounts = await Promise.all(
+      visibleFrames().map(async frame => {
+        const sub = await evalInFrame(frame, { op: "captcha_tokens" });
+        return sub && typeof sub.tokens === "number" ? sub.tokens : 0;
+      })
+    );
+    for (const n of subCounts) count += n;
     return count;
   }
 
   // Raw frame control collection (`ZendiaJumpContent.collectControls`), including bare `<canvas>` pictures for parent frames.
-  function collectControlsRaw() {
+  async function collectControlsRaw() {
     const own = ownCaptchas();
     const offered = new Map();
     const controls = findControls();
@@ -1360,11 +2459,17 @@
       });
     }
     const known = new Set(items.map(i => i.id));
-    for (const canvas of findPictures("canvas", document)) {
-      const id = controlId(canvas);
-      if (known.has(id)) continue;
-      offered.set(id, { pictureOnly: canvas });
-      const box = visibleElementRect(canvas);
+    const pictureCandidates = [
+      ...findPictures("canvas", document),
+      ...(isCaptchaFrame() ? findPictures("img", document) : []),
+      ...(isCaptchaFrame() ? findBackgroundPictures(document) : []),
+    ];
+    for (const pic of pictureCandidates) {
+      const id = controlId(pic);
+      if (known.has(id) || controls.some(each => each.contains(pic))) continue;
+      known.add(id);
+      offered.set(id, { pictureOnly: pic });
+      const box = visibleElementRect(pic);
       items.push({
         id,
         text: "",
@@ -1374,7 +2479,7 @@
         height: box.height,
         field: false,
         href: null,
-        captcha: inPageCaptcha(canvas, own),
+        captcha: isCaptchaFrame() || inPageCaptcha(pic, own),
         challenge: false,
         drag: false,
         slider: false,
@@ -1383,10 +2488,15 @@
         purpose: null,
       });
     }
-    for (const frame of visibleFrames()) {
-      const box = frameBox(frame);
-      const fSrc = frameSrcOf(frame);
-      const sub = evalInFrame(frame, { op: "collect_controls" });
+    const frameBatches = await Promise.all(
+      visibleFrames().map(async frame => {
+        const box = frameBox(frame);
+        const fSrc = frameSrcOf(frame);
+        const sub = await evalInFrame(frame, { op: "collect_controls" });
+        return { frame, box, fSrc, sub };
+      })
+    );
+    for (const { frame, box, fSrc, sub } of frameBatches) {
       if (!sub || !Array.isArray(sub.items)) continue;
       const prefix = frameId(frame) + "/";
       for (const item of sub.items) {
@@ -1420,7 +2530,7 @@
 
   // The controls of the page and its frames (`FRM-01`, `CAP-01`..`CAP-07`), with `scope` `"all" | "challenge" | "captcha"`
   // and `fields` `"include" | "exclude" | "only"`.
-  function controlTargets(fields, pattern, scope, topOnly) {
+  async function controlTargets(fields, pattern, scope, topOnly) {
     const modeScope = scope || "all";
     const from = center();
     const own = ownCaptchas();
@@ -1462,7 +2572,7 @@
         roots.push(...document.querySelectorAll(WIDGETS));
       } catch (_) {}
       for (const root of roots) {
-        for (const pic of findPictures("img, canvas", root)) {
+        for (const pic of [...findPictures("img, canvas", root), ...findBackgroundPictures(root)]) {
           if (seen.has(pic) || localControls.some(each => each.contains(pic))) continue;
           seen.add(pic);
           const rect = visibleElementRect(pic);
@@ -1482,10 +2592,17 @@
         }
       }
     }
-    for (const frame of topOnly ? [] : visibleFrames()) {
-      const box = frameBox(frame);
-      const fSrc = frameSrcOf(frame);
-      const sub = evalInFrame(frame, { op: "collect_controls" });
+    const frameBatches = topOnly
+      ? []
+      : await Promise.all(
+          visibleFrames().map(async frame => {
+            const box = frameBox(frame);
+            const fSrc = frameSrcOf(frame);
+            const sub = await evalInFrame(frame, { op: "collect_controls" });
+            return { frame, box, fSrc, sub };
+          })
+        );
+    for (const { frame, box, fSrc, sub } of frameBatches) {
       if (!sub || !Array.isArray(sub.items)) continue;
       const prefix = frameId(frame) + "/";
       for (const item of sub.items) {
@@ -1544,7 +2661,7 @@
   }
 
   // The places a pattern occurs in the text on screen (`S`), frames included (`FRM-01`), nearest the cursor first.
-  function textTargets(pattern) {
+  async function textTargets(pattern) {
     const from = caretPoint() || center();
     const visible = new Map();
     const ancVisible = new Map();
@@ -1578,10 +2695,15 @@
       }
     }
     if (targets.length < MAX_MATCHES) {
-      for (const frame of visibleFrames()) {
+      const frameBatches = await Promise.all(
+        visibleFrames().map(async frame => ({
+          frame,
+          box: frameBox(frame),
+          sub: await evalInFrame(frame, { op: "jump_scan", jump: "text", pattern }),
+        }))
+      );
+      for (const { frame, box, sub } of frameBatches) {
         if (targets.length >= MAX_MATCHES) break;
-        const box = frameBox(frame);
-        const sub = evalInFrame(frame, { op: "jump_scan", jump: "text", pattern });
         if (!sub || !Array.isArray(sub.targets)) continue;
         const prefix = frameId(frame) + "/";
         for (const item of sub.targets) {
@@ -1726,7 +2848,7 @@
   }
 
   // Every visible paragraph and word on screen (`VIS-04`, `FRM-01`).
-  function wordTargets() {
+  async function wordTargets() {
     const page = new PageText();
     const from = caretPoint() || center();
     const rangeOf = (start, end) => {
@@ -1775,9 +2897,14 @@
       offered.set(pid, { paragraph: lineRange });
       paragraphs.push(target(pid, pRect, "paragraph", { distance: distance(pRect, from) }));
     }
-    for (const frame of visibleFrames()) {
-      const box = frameBox(frame);
-      const sub = evalInFrame(frame, { op: "jump_scan", jump: "words", pattern: "" });
+    const frameBatches = await Promise.all(
+      visibleFrames().map(async frame => ({
+        frame,
+        box: frameBox(frame),
+        sub: await evalInFrame(frame, { op: "jump_scan", jump: "words", pattern: "" }),
+      }))
+    );
+    for (const { frame, box, sub } of frameBatches) {
       if (!sub || !Array.isArray(sub.targets)) continue;
       const prefix = frameId(frame) + "/";
       for (const item of sub.targets) {
@@ -1802,7 +2929,7 @@
   const MAX_TEXT_LENGTH = 2000000;
 
   class PageText {
-    constructor() {
+    constructor(rootNode) {
       this.nodes = [];
       this.bases = [];
       this.index = new Map();
@@ -1821,7 +2948,13 @@
       let previousBlock = null;
       const parts = [];
       let length = 0;
-      for (const node of deepTextNodes(document.body || document.documentElement)) {
+      const walkRoot = rootNode
+        ? rootNode === document
+          ? document.body || document.documentElement
+          : rootNode
+        : document.body || document.documentElement;
+      const iter = rootNode ? rootTextNodes(walkRoot) : deepTextNodes(walkRoot);
+      for (const node of iter) {
         const parent = composedParent(node);
         if (!node.data || !parent || !isTextRendered(parent, visible, ancVisible) || !node.data.trim()) continue;
         const block = blockOf(parent);
@@ -1877,6 +3010,12 @@
       const node = this.nodes[index];
       const inside = offset - this.bases[index];
       if (inside <= node.data.length) {
+        if (side === "end" && inside === 0 && index > 0) {
+          const prev = this.nodes[index - 1];
+          if (this.bases[index - 1] + prev.data.length === offset) {
+            return { node: prev, offset: prev.data.length };
+          }
+        }
         if (side === "start" && inside === node.data.length && this.nodes[index + 1]) {
           return { node: this.nodes[index + 1], offset: 0 };
         }
@@ -2042,6 +3181,13 @@
       pairs
         .map(({ open, close }) => (inner ? { start: open + 1, end: close } : { start: open, end: close + 1 }))
         .filter(range => range.end > range.start);
+    if (key === "b") {
+      return pairRanges([
+        ...bracketPairs(text, "(", ")"),
+        ...bracketPairs(text, "[", "]"),
+        ...bracketPairs(text, "{", "}"),
+      ]);
+    }
     if (BRACKETS[key]) return pairRanges(bracketPairs(text, BRACKETS[key][0], BRACKETS[key][1]));
     if (QUOTES[key]) return pairRanges(quotePairs(text, key));
     if (key === "q") return Object.keys(QUOTES).flatMap(each => pairRanges(quotePairs(text, each)));
@@ -2088,9 +3234,26 @@
   }
 
   // For a caret, the smallest candidate that covers it, else the next one; for a selection, the smallest that holds
-  // it and is bigger.
-  function chooseRange(ranges, selection) {
+  // it and is bigger. `next` (`an`/`in`) walks forward to the next object; `last` (`al`/`il`) walks backward.
+  function chooseRange(ranges, selection, scope) {
     const size = range => range.end - range.start;
+    if (scope === "next") {
+      const collapsed = selection.start === selection.end;
+      const after = ranges
+        .filter(range => (collapsed ? range.start > selection.start : range.start >= selection.end))
+        .sort((a, b) => a.start - b.start || size(a) - size(b));
+      return after[0] || null;
+    }
+    if (scope === "last") {
+      const before = ranges
+        .filter(range => range.end <= selection.start && (range.start !== selection.start || range.end !== selection.end))
+        .sort((a, b) => b.end - a.end || size(a) - size(b));
+      if (before.length) return before[0];
+      const earlier = ranges
+        .filter(range => range.start < selection.start)
+        .sort((a, b) => b.start - a.start || size(a) - size(b));
+      return earlier[0] || null;
+    }
     const collapsed = selection.start === selection.end;
     const containing = ranges
       .filter(range =>
@@ -2107,7 +3270,7 @@
     return next[0] || null;
   }
 
-  function findTextObject(text, kind, key, selection, times) {
+  function findTextObject(text, kind, key, selection, times, scope) {
     if (!OBJECT_KEYS.has(key) || (kind !== "a" && kind !== "i")) return null;
     // Only the lines near the selection: an unmatched bracket would otherwise pair with one a page away.
     const starts = lineStarts(text);
@@ -2118,13 +3281,14 @@
     };
     const first = Math.max(0, lineOf(selection.start) - SEARCH_LINES);
     const last = Math.min(starts.length - 1, lineOf(selection.end) + SEARCH_LINES);
-    const from = starts[first];
-    const to = starts[last + 1] === undefined ? text.length : starts[last + 1];
+    const from = key === "g" ? 0 : starts[first];
+    const to = key === "g" || starts[last + 1] === undefined ? text.length : starts[last + 1];
     const slice = text.slice(from, to);
     let current = { start: selection.start - from, end: selection.end - from };
     let result = null;
+    const all = candidates(slice, key, kind);
     for (let i = 0; i < times; i++) {
-      const range = chooseRange(candidates(slice, key, kind), current);
+      const range = chooseRange(all, current, scope || "cover_or_next");
       if (!range) break;
       result = range;
       current = range;
@@ -2135,7 +3299,7 @@
   // Where a paragraph motion goes: the end of the paragraph it is in (or the start going back), and from there the
   // next one's.
   function paragraphEdge(text, offset, forward) {
-    const start = text.lastIndexOf("\n", offset - 1) + 1;
+    const start = offset > 0 ? text.lastIndexOf("\n", offset - 1) + 1 : 0;
     let end = text.indexOf("\n", offset);
     if (end === -1) end = text.length;
     if (forward) {
@@ -2200,10 +3364,10 @@
     return vertical ? target.clientHeight : target.clientWidth;
   }
 
-  function scroll(request) {
+  async function scroll(request) {
     const activeEl = deepActiveElement();
     if (activeEl && (activeEl.localName === "iframe" || activeEl.localName === "frame")) {
-      const sub = evalInFrame(activeEl, Object.assign({ op: "scroll_if_able" }, request));
+      const sub = await evalInFrame(activeEl, Object.assign({ op: "scroll_if_able" }, request));
       if (sub && sub.scrolled) return { kind: "ok" };
     }
     const step = 60;
@@ -2234,13 +3398,13 @@
     return { kind: "ok" };
   }
 
-  function scrollIfAble(request) {
+  async function scrollIfAble(request) {
     const motion = request.motion;
     const vertical = motion !== "left" && motion !== "right";
     const target = scrollTarget(vertical);
     if (!target || !canScroll(target, vertical)) return { kind: "scroll_result", scrolled: false };
     const before = vertical ? target.scrollTop : target.scrollLeft;
-    scroll(Object.assign({}, request, { smooth: false }));
+    await scroll(Object.assign({}, request, { smooth: false }));
     const after = vertical ? target.scrollTop : target.scrollLeft;
     return { kind: "scroll_result", scrolled: Math.abs(after - before) > 0.5 };
   }
@@ -2250,6 +3414,22 @@
   // ---------------------------------------------------------------------------------------------------------------
 
   let activeVisualFrame = null;
+  let visualPreferredX = null;
+
+  function pageForSelection(selection) {
+    const anchor = (selection && (selection.anchorNode || selection.focusNode)) || null;
+    const root = anchor && typeof anchor.getRootNode === "function" ? anchor.getRootNode() : null;
+    const page = new PageText(root);
+    return page.nodes.length ? page : new PageText();
+  }
+
+  function extendSelectionTo(selection, node, offset) {
+    if (typeof selection.setBaseAndExtent === "function" && selection.anchorNode) {
+      selection.setBaseAndExtent(selection.anchorNode, selection.anchorOffset, node, offset);
+    } else {
+      selection.extend(node, offset);
+    }
+  }
 
   function focusRect() {
     const selection = getSelection();
@@ -2384,9 +3564,9 @@
 
   // `v`: the cursor stays where the selection is when it is on screen, else it starts at the first text on screen.
   // A collapsed cursor asks for labels on every word and paragraph, to say where to land.
-  function visualEnter() {
+  async function visualEnter() {
     if (activeVisualFrame && activeVisualFrame.isConnected && frameVisible(activeVisualFrame)) {
-      const sub = evalInFrame(activeVisualFrame, { op: "visual_enter" });
+      const sub = await evalInFrame(activeVisualFrame, { op: "visual_enter" });
       if (sub && sub.active) return mapFrameVisualState(activeVisualFrame, sub, false);
       activeVisualFrame = null;
     }
@@ -2397,7 +3577,7 @@
         selection.collapse(start.node, start.offset);
       } else {
         for (const frame of visibleFrames()) {
-          const sub = evalInFrame(frame, { op: "visual_enter" });
+          const sub = await evalInFrame(frame, { op: "visual_enter" });
           if (sub && sub.active) {
             activeVisualFrame = frame;
             return mapFrameVisualState(frame, sub, false);
@@ -2408,24 +3588,31 @@
     } else if (!selection) {
       return visualState(false);
     }
+    visualPreferredX = null;
     return visualState(true, { land: selection.isCollapsed });
   }
 
   // The cursor stays where the selection ended.
-  function visualExit() {
+  async function visualExit() {
+    visualPreferredX = null;
     if (activeVisualFrame && activeVisualFrame.isConnected) {
       const frame = activeVisualFrame;
       activeVisualFrame = null;
-      evalInFrame(frame, { op: "visual_exit" });
+      await evalInFrame(frame, { op: "visual_exit" });
     }
     const selection = getSelection();
     if (selection && selection.focusNode) selection.collapse(selection.focusNode, selection.focusOffset);
     return visualState(false);
   }
 
-  function visualSwapEnds() {
+  async function visualSwapEnds() {
+    visualPreferredX = null;
     if (activeVisualFrame && activeVisualFrame.isConnected) {
-      return mapFrameVisualState(activeVisualFrame, evalInFrame(activeVisualFrame, { op: "visual_swap_ends" }), true);
+      return mapFrameVisualState(
+        activeVisualFrame,
+        await evalInFrame(activeVisualFrame, { op: "visual_swap_ends" }),
+        true
+      );
     }
     const selection = getSelection();
     if (selection && selection.anchorNode && selection.focusNode) {
@@ -2436,53 +3623,403 @@
     return visualState(true);
   }
 
-  const SELECTION_MOTIONS = {
-    left: ["left", "character"],
-    right: ["right", "character"],
-    down: ["forward", "line"],
-    up: ["backward", "line"],
-    word_forward: ["forward", "word"],
-    word_backward: ["backward", "word"],
-    line_start: ["backward", "lineboundary"],
-    line_end: ["forward", "lineboundary"],
-  };
+  const VISUAL_WORD_CHAR = unicodeRegex("[\\p{L}\\p{N}_]", /[A-Za-z0-9_À-\u00ff]/);
 
-  function visualMove(motion, count) {
+  function visualCharClass(ch) {
+    if (!ch || /\s/.test(ch)) return 0;
+    VISUAL_WORD_CHAR.lastIndex = 0;
+    return VISUAL_WORD_CHAR.test(ch) ? 1 : 2;
+  }
+
+  function nextCharEnd(text, offset) {
+    if (offset >= text.length) return text.length;
+    const cp = text.codePointAt(offset);
+    return Math.min(text.length, offset + (cp > 0xffff ? 2 : 1));
+  }
+
+  function visualCharRect(page, offset, probeRange) {
+    if (offset < 0 || offset >= page.text.length || page.text[offset] === "\n") return null;
+    const index = page.firstIndex((_, i) => page.bases[i] > offset) - 1;
+    if (index < 0) return null;
+    const node = page.nodes[index];
+    let local = offset - page.bases[index];
+    if (local < 0 || local >= node.data.length) return null;
+    let code = node.data.charCodeAt(local);
+    if (code >= 0xdc00 && code <= 0xdfff && local > 0) {
+      local--;
+      code = node.data.charCodeAt(local);
+    }
+    const step = code >= 0xd800 && code <= 0xdbff && local + 1 < node.data.length ? 2 : 1;
+    try {
+      probeRange.setStart(node, local);
+      probeRange.setEnd(node, Math.min(local + step, node.data.length));
+      return firstRangeRect(probeRange);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function isSameVisualLine(a, b) {
+    if (!a || !b) return false;
+    const overlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    const minH = Math.min(a.height, b.height);
+    if (minH > 0 && overlap >= minH * 0.35) return true;
+    const midA = (a.top + a.bottom) * 0.5;
+    const midB = (b.top + b.bottom) * 0.5;
+    return Math.abs(midA - midB) <= Math.max(minH * 0.45, 4);
+  }
+
+  function sampleVisualOffset(page, offset, dir, limit, probeRange) {
+    const text = page.text;
+    const len = text.length;
+    if (!len) return null;
+    let pos = Math.max(0, Math.min(offset, len - 1));
+    const end = Math.max(0, Math.min(limit, len - 1));
+    while (dir > 0 ? pos <= end : pos >= end) {
+      if (text[pos] === "\n") {
+        pos += dir;
+        continue;
+      }
+      const rect = visualCharRect(page, pos, probeRange);
+      if (rect) return { offset: pos, rect };
+      if (text[pos] !== " ") {
+        const idx = page.firstIndex((_, i) => page.bases[i] > pos) - 1;
+        if (idx >= 0) {
+          pos = dir > 0 ? page.bases[idx] + page.nodes[idx].data.length : page.bases[idx] - 1;
+          continue;
+        }
+      }
+      pos += dir;
+    }
+    return null;
+  }
+
+  function findLineBreak(page, anchorOffset, lineRect, dir, probeRange) {
+    const len = page.text.length;
+    if (!len) return null;
+    const bound = dir > 0 ? len - 1 : 0;
+    let same = anchorOffset;
+    let diff = null;
+    let step = 1;
+    let pos = anchorOffset;
+    while (true) {
+      if (dir > 0 ? pos >= bound : pos <= bound) return null;
+      const candidate = dir > 0 ? Math.min(pos + step, bound) : Math.max(pos - step, bound);
+      const vis = sampleVisualOffset(page, candidate, dir, bound, probeRange);
+      if (!vis) return null;
+      if (!isSameVisualLine(lineRect, vis.rect)) {
+        diff = vis.offset;
+        break;
+      }
+      same = vis.offset;
+      pos = vis.offset;
+      step = Math.min(step * 2, 128);
+    }
+    let lo = same;
+    let hi = diff;
+    while (Math.abs(hi - lo) > 1) {
+      const mid = (lo + hi) >> 1;
+      if (mid === lo || mid === hi) break;
+      const vis = sampleVisualOffset(page, mid, dir, hi, probeRange);
+      if (!vis || vis.offset === hi) {
+        const visBack = sampleVisualOffset(page, mid, -dir, lo, probeRange);
+        if (!visBack || visBack.offset === lo) break;
+        if (isSameVisualLine(lineRect, visBack.rect)) lo = visBack.offset;
+        else hi = visBack.offset;
+        continue;
+      }
+      if (isSameVisualLine(lineRect, vis.rect)) lo = vis.offset;
+      else hi = vis.offset;
+    }
+    return { sameEnd: lo, nextStart: hi };
+  }
+
+  function lineEndCaretOffset(page, lineStart, lineEnd, probeRange) {
+    const text = page.text;
+    let end = nextCharEnd(text, lineEnd);
+    if (text[lineEnd] === " " && lineEnd > lineStart && end < text.length && text[end] !== "\n") {
+      const endRect = visualCharRect(page, lineEnd, probeRange);
+      const afterRect = visualCharRect(page, end, probeRange);
+      if (endRect && afterRect && !isSameVisualLine(endRect, afterRect)) {
+        end = lineEnd;
+      }
+    }
+    return end;
+  }
+
+  function closestOffsetOnLine(page, lineStart, lineEnd, preferredX, probeRange) {
+    const text = page.text;
+    const startRect = visualCharRect(page, lineStart, probeRange);
+    const endRect = visualCharRect(page, lineEnd, probeRange);
+    if (!startRect || !endRect) return { offset: lineStart, side: "start" };
+    const ltr = startRect.left <= endRect.left;
+    if (ltr) {
+      if (preferredX <= startRect.left) return { offset: lineStart, side: "start" };
+      if (preferredX >= endRect.right) {
+        return { offset: lineEndCaretOffset(page, lineStart, lineEnd, probeRange), side: "end" };
+      }
+      let lo = lineStart;
+      let hi = lineEnd;
+      while (hi - lo > 6) {
+        const mid = (lo + hi) >> 1;
+        const vis = sampleVisualOffset(page, mid, +1, hi, probeRange);
+        if (!vis || vis.offset >= hi) break;
+        if (vis.rect.left <= preferredX) lo = vis.offset;
+        else hi = vis.offset;
+      }
+      let best = { offset: lo, side: "start", dist: Infinity };
+      for (let i = lo; i <= hi; ) {
+        const r = visualCharRect(page, i, probeRange);
+        const nextI = nextCharEnd(text, i);
+        if (r) {
+          const dLeft = Math.abs(r.left - preferredX);
+          if (dLeft < best.dist) best = { offset: i, side: "start", dist: dLeft };
+          const rightOff = i === lineEnd ? lineEndCaretOffset(page, lineStart, lineEnd, probeRange) : nextI;
+          const dRight = Math.abs(r.right - preferredX);
+          if (dRight < best.dist) best = { offset: rightOff, side: "end", dist: dRight };
+        }
+        i = nextI;
+      }
+      return { offset: best.offset, side: best.side };
+    }
+    let best = { offset: lineStart, side: "start", dist: Math.abs(startRect.right - preferredX) };
+    for (let i = lineStart, scanned = 0; i <= lineEnd && scanned < 256; scanned++) {
+      const r = visualCharRect(page, i, probeRange);
+      const nextI = nextCharEnd(text, i);
+      if (r) {
+        const dRight = Math.abs(r.right - preferredX);
+        if (dRight < best.dist) best = { offset: i, side: "start", dist: dRight };
+        const dLeft = Math.abs(r.left - preferredX);
+        if (dLeft < best.dist) best = { offset: nextI, side: "end", dist: dLeft };
+      }
+      i = nextI;
+    }
+    return { offset: best.offset, side: best.side };
+  }
+
+  function resolveCurrentVisualPos(page, curOffset, probeRange) {
+    const len = page.text.length;
+    if (!len) return null;
+    const caretRect = focusRect();
+    if (caretRect) {
+      const rAt = visualCharRect(page, curOffset, probeRange);
+      if (rAt && isSameVisualLine(caretRect, rAt)) {
+        return { offset: curOffset, rect: rAt, caretX: caretRect.left };
+      }
+      const rPrev = curOffset > 0 ? visualCharRect(page, curOffset - 1, probeRange) : null;
+      if (rPrev && isSameVisualLine(caretRect, rPrev)) {
+        return { offset: curOffset - 1, rect: rPrev, caretX: caretRect.left };
+      }
+    }
+    const vis =
+      sampleVisualOffset(page, Math.min(curOffset, len - 1), +1, len - 1, probeRange) ||
+      sampleVisualOffset(page, Math.max(curOffset - 1, 0), -1, 0, probeRange);
+    if (!vis) return null;
+    return { offset: vis.offset, rect: vis.rect, caretX: caretRect ? caretRect.left : vis.rect.left };
+  }
+
+  function stepLogicalLine(text, offset, forward, times) {
+    const starts = lineStarts(text);
+    let line = 0;
+    while (line + 1 < starts.length && starts[line + 1] <= offset) line++;
+    const col = offset - starts[line];
+    const targetLine = Math.max(0, Math.min(starts.length - 1, line + (forward ? times : -times)));
+    const targetStart = starts[targetLine];
+    const targetEnd = starts[targetLine + 1] === undefined ? text.length : starts[targetLine + 1] - 1;
+    return { offset: Math.min(targetStart + col, targetEnd), side: forward ? "end" : "start" };
+  }
+
+  function moveVisualLine(page, curOffset, forward, times, probeRange) {
+    const cur = resolveCurrentVisualPos(page, curOffset, probeRange);
+    if (!cur) return stepLogicalLine(page.text, curOffset, forward, times);
+    if (visualPreferredX === null) visualPreferredX = cur.caretX;
+    let lineOffset = cur.offset;
+    let lineRect = cur.rect;
+    const dir = forward ? +1 : -1;
+    const len = page.text.length;
+    for (let i = 0; i < times; i++) {
+      const step1 = findLineBreak(page, lineOffset, lineRect, dir, probeRange);
+      if (!step1) {
+        if (forward) return { offset: len, side: "end" };
+        const firstVis = sampleVisualOffset(page, 0, +1, len - 1, probeRange);
+        return { offset: firstVis ? firstVis.offset : 0, side: "start" };
+      }
+      const nextEdge = step1.nextStart;
+      const targetRect = visualCharRect(page, nextEdge, probeRange);
+      if (!targetRect) return { offset: nextEdge, side: forward ? "start" : "end" };
+      const step2 = findLineBreak(page, nextEdge, targetRect, dir, probeRange);
+      let targetStart;
+      let targetEnd;
+      if (forward) {
+        targetStart = nextEdge;
+        if (step2) {
+          targetEnd = step2.sameEnd;
+        } else {
+          const lastVis = sampleVisualOffset(page, len - 1, -1, targetStart, probeRange);
+          targetEnd = lastVis ? lastVis.offset : targetStart;
+        }
+      } else {
+        targetEnd = nextEdge;
+        if (step2) {
+          targetStart = step2.sameEnd;
+        } else {
+          const firstVis = sampleVisualOffset(page, 0, +1, targetEnd, probeRange);
+          targetStart = firstVis ? firstVis.offset : targetEnd;
+        }
+      }
+      if (i === times - 1) {
+        return closestOffsetOnLine(page, targetStart, targetEnd, visualPreferredX, probeRange);
+      }
+      lineOffset = forward ? targetEnd : targetStart;
+      lineRect = targetRect;
+    }
+    return { offset: curOffset, side: forward ? "end" : "start" };
+  }
+
+  function visualLineEdge(page, curOffset, toEnd, probeRange) {
+    const text = page.text;
+    const len = text.length;
+    const cur = resolveCurrentVisualPos(page, curOffset, probeRange);
+    if (!cur) {
+      if (toEnd) {
+        const nl = text.indexOf("\n", curOffset);
+        return { offset: nl === -1 ? len : nl, side: "end" };
+      }
+      return { offset: curOffset > 0 ? text.lastIndexOf("\n", curOffset - 1) + 1 : 0, side: "start" };
+    }
+    const dir = toEnd ? +1 : -1;
+    const brk = findLineBreak(page, cur.offset, cur.rect, dir, probeRange);
+    if (toEnd) {
+      const endChar = brk ? brk.sameEnd : (sampleVisualOffset(page, len - 1, -1, cur.offset, probeRange) || cur).offset;
+      const startBrk = findLineBreak(page, cur.offset, cur.rect, -1, probeRange);
+      const startChar = startBrk ? startBrk.sameEnd : 0;
+      return { offset: lineEndCaretOffset(page, startChar, endChar, probeRange), side: "end" };
+    }
+    const startChar = brk ? brk.sameEnd : (sampleVisualOffset(page, 0, +1, cur.offset, probeRange) || cur).offset;
+    return { offset: startChar, side: "start" };
+  }
+
+  function stepVisualChar(page, offset, forward, probeRange) {
+    const text = page.text;
+    const len = text.length;
+    if (forward) {
+      if (offset >= len) return { offset: len, side: "end" };
+      let pos = offset;
+      if (text[pos] === "\n") {
+        pos++;
+        while (pos < len && text[pos] === " " && !visualCharRect(page, pos, probeRange)) pos++;
+      }
+      if (pos >= len) return { offset: len, side: "end" };
+      pos = nextCharEnd(text, pos);
+      while (pos < len && text[pos] === " " && !visualCharRect(page, pos, probeRange)) pos++;
+      return { offset: pos, side: "end" };
+    }
+    if (offset <= 0) return { offset: 0, side: "start" };
+    let pos = offset;
+    while (pos > 0 && text[pos - 1] === " " && !visualCharRect(page, pos - 1, probeRange)) pos--;
+    if (pos > 0 && text[pos - 1] === "\n") {
+      pos--;
+      while (pos > 0 && text[pos - 1] === " " && !visualCharRect(page, pos - 1, probeRange)) pos--;
+    }
+    if (pos <= 0) return { offset: 0, side: "start" };
+    pos--;
+    if (
+      pos > 0 &&
+      text.charCodeAt(pos) >= 0xdc00 &&
+      text.charCodeAt(pos) <= 0xdfff &&
+      text.charCodeAt(pos - 1) >= 0xd800 &&
+      text.charCodeAt(pos - 1) <= 0xdbff
+    ) {
+      pos--;
+    }
+    return { offset: pos, side: "start" };
+  }
+
+  function stepVisualWord(text, offset, forward) {
+    const len = text.length;
+    let pos = offset;
+    if (forward) {
+      if (pos < len) {
+        const cls = visualCharClass(text[pos]);
+        if (cls !== 0) {
+          while (pos < len && visualCharClass(text[pos]) === cls) pos++;
+        }
+        while (pos < len && visualCharClass(text[pos]) === 0) pos++;
+      }
+      return { offset: pos, side: pos < len ? "start" : "end" };
+    }
+    while (pos > 0 && visualCharClass(text[pos - 1]) === 0) pos--;
+    if (pos > 0) {
+      const cls = visualCharClass(text[pos - 1]);
+      while (pos > 0 && visualCharClass(text[pos - 1]) === cls) pos--;
+    }
+    return { offset: pos, side: "start" };
+  }
+
+  async function visualMove(motion, count) {
     if (activeVisualFrame && activeVisualFrame.isConnected) {
       return mapFrameVisualState(
         activeVisualFrame,
-        evalInFrame(activeVisualFrame, { op: "visual_move", motion, count }),
+        await evalInFrame(activeVisualFrame, { op: "visual_move", motion, count }),
         true
       );
     }
     const selection = getSelection();
     if (!selection || !selection.focusNode) return visualState(true);
     const times = Math.max(1, count || 1);
-    const spec = SELECTION_MOTIONS[motion];
-    if (spec) {
-      // The line boundaries take no count.
-      const steps = motion === "line_start" || motion === "line_end" ? 1 : times;
-      for (let i = 0; i < steps; i++) selection.modify("extend", spec[0], spec[1]);
-      reveal();
-      return visualState(true);
+    if (motion !== "down" && motion !== "up") visualPreferredX = null;
+
+    // Move over the entire page's rendered text within the selection's DOM root so non-editable pages support
+    // full-page `h`/`j`/`k`/`l`/`w`/`b`/`0`/`$`/`{`/`}`/`gg`/`G` without stopping at a single text node or line.
+    const page = pageForSelection(selection);
+    if (!page.nodes.length) return visualState(true);
+    const probeRange = document.createRange();
+    let place = { offset: page.offsetOf(selection.focusNode, selection.focusOffset), side: "end" };
+
+    switch (motion) {
+      case "left":
+      case "right":
+        for (let i = 0; i < times; i++) place = stepVisualChar(page, place.offset, motion === "right", probeRange);
+        break;
+      case "down":
+      case "up":
+        place = moveVisualLine(page, place.offset, motion === "down", times, probeRange);
+        break;
+      case "word_forward":
+      case "word_backward":
+        for (let i = 0; i < times; i++) place = stepVisualWord(page.text, place.offset, motion === "word_forward");
+        break;
+      case "line_start":
+        place = visualLineEdge(page, place.offset, false, probeRange);
+        break;
+      case "line_end":
+        place = visualLineEdge(page, place.offset, true, probeRange);
+        break;
+      case "paragraph_forward":
+      case "paragraph_backward":
+        for (let i = 0; i < times; i++) place = paragraphEdge(page.text, place.offset, motion === "paragraph_forward");
+        break;
+      case "top": {
+        const firstVis = sampleVisualOffset(page, 0, +1, page.text.length - 1, probeRange);
+        place = { offset: firstVis ? firstVis.offset : 0, side: "start" };
+        break;
+      }
+      case "bottom":
+        place = { offset: page.text.length, side: "end" };
+        break;
+      default:
+        return visualState(true);
     }
-    // Over the page's text: the paragraphs, and the top and the bottom, which also scroll there as `gg` and `G` do.
-    const page = new PageText();
-    let place = { offset: page.offsetOf(selection.focusNode, selection.focusOffset) };
-    const find = {
-      paragraph_forward: (text, offset) => paragraphEdge(text, offset, true),
-      paragraph_backward: (text, offset) => paragraphEdge(text, offset, false),
-      top: () => ({ offset: 0, side: "start" }),
-      bottom: text => ({ offset: text.length, side: "end" }),
-    }[motion];
-    if (!find) return visualState(true);
-    const steps = motion === "top" || motion === "bottom" ? 1 : times;
-    for (let i = 0; i < steps; i++) place = find(page.text, place.offset);
+
     const point = page.pointAt(place.offset, place.side);
     if (point) {
-      selection.extend(point.node, point.offset);
-      if (motion === "top" || motion === "bottom") scroll({ motion, count: 1 });
-      else reveal();
+      extendSelectionTo(selection, point.node, point.offset);
+      if (motion === "top" || motion === "bottom") {
+        await scroll({ motion, count: 1, smooth: false });
+        reveal();
+      } else {
+        reveal();
+      }
     }
     return visualState(true);
   }
@@ -2506,26 +4043,73 @@
     return ranges;
   }
 
-  function visualObject(keys, count) {
+  function allElementRanges(page) {
+    const root = document.body || document.documentElement;
+    if (!root) return [];
+    const seen = new Set();
+    const ranges = [];
+    let count = 0;
+    for (const element of deepElements(root)) {
+      if (++count > 500) break;
+      if (isNotTextElement(element)) continue;
+      const range = page.elementRange(element);
+      if (!range || range.end <= range.start) continue;
+      const sig = range.start + ":" + range.end;
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      ranges.push(range);
+    }
+    return ranges;
+  }
+
+  function parseTextObjectSpec(keys) {
+    const raw = String(keys || "");
+    let kind = "";
+    let scope = "cover_or_next";
+    let rest = "";
+    if (raw.startsWith("g[")) {
+      kind = "left";
+      rest = raw.slice(2);
+    } else if (raw.startsWith("g]")) {
+      kind = "right";
+      rest = raw.slice(2);
+    } else if ((raw.startsWith("an") || raw.startsWith("in")) && raw.length > 2) {
+      kind = raw[0];
+      scope = "next";
+      rest = raw.slice(2);
+    } else if ((raw.startsWith("al") || raw.startsWith("il")) && raw.length > 2) {
+      kind = raw[0];
+      scope = "last";
+      rest = raw.slice(2);
+    } else {
+      kind = raw[0] || "";
+      rest = raw.slice(1);
+    }
+    const key = { "<lt>": "<", "<Bar>": "|", "<Bslash>": "\\" }[rest] || rest;
+    return { kind, scope, key };
+  }
+
+  async function visualObject(keys, count) {
     if (activeVisualFrame && activeVisualFrame.isConnected) {
       return mapFrameVisualState(
         activeVisualFrame,
-        evalInFrame(activeVisualFrame, { op: "visual_text_object", keys, count }),
+        await evalInFrame(activeVisualFrame, { op: "visual_text_object", keys, count }),
         true
       );
     }
     const selection = getSelection();
     if (!selection || !selection.rangeCount) return visualState(true);
-    const kind = keys[0];
-    const key = { "<lt>": "<", "<Bar>": "|", "<Bslash>": "\\" }[keys.slice(1)] || keys.slice(1);
+    visualPreferredX = null;
+    const { kind, scope, key } = parseTextObjectSpec(keys);
+    const searchKind = kind === "left" || kind === "right" ? "a" : kind;
     const times = Math.max(1, count || 1);
-    const page = new PageText();
+    const page = pageForSelection(selection);
     let current = selectedRange(page, selection);
     let range = null;
     if (key === "t") {
-      const ranges = elementRanges(page, selection);
+      const ranges = scope === "cover_or_next" ? elementRanges(page, selection) : allElementRanges(page);
       for (let i = 0; i < times; i++) {
-        const grown = chooseRange(ranges, current);
+        const grown = chooseRange(ranges, current, scope);
         if (!grown) {
           range = null;
           break;
@@ -2534,14 +4118,22 @@
         current = grown;
       }
     } else {
-      range = findTextObject(page.text, kind, key, current, times);
+      range = findTextObject(page.text, searchKind, key, current, times, scope);
     }
     if (range) {
-      const start = page.pointAt(range.start, "start");
-      const end = page.pointAt(range.end, "end");
-      if (start && end) {
-        selection.setBaseAndExtent(start.node, start.offset, end.node, end.offset);
-        reveal();
+      if (kind === "left" || kind === "right") {
+        const edge = kind === "left" ? page.pointAt(range.start, "start") : page.pointAt(range.end, "end");
+        if (edge) {
+          extendSelectionTo(selection, edge.node, edge.offset);
+          reveal();
+        }
+      } else {
+        const start = page.pointAt(range.start, "start");
+        const end = page.pointAt(range.end, "end");
+        if (start && end) {
+          selection.setBaseAndExtent(start.node, start.offset, end.node, end.offset);
+          reveal();
+        }
       }
     }
     return visualState(true);
@@ -2573,16 +4165,16 @@
     }
   }
 
-  function copySelection() {
-    const editFrame = focusedEditableFrame();
+  async function copySelection() {
+    const editFrame = await focusedEditableFrame();
     if (editFrame) {
-      evalInFrame(editFrame, { op: "copy_selection" });
+      await evalInFrame(editFrame, { op: "copy_selection" });
       return { kind: "ok" };
     }
     const sel = getSelection();
     if (!sel || sel.isCollapsed) {
       for (const frame of visibleFrames()) {
-        const res = evalInFrame(frame, { op: "copy_selection_if_any" });
+        const res = await evalInFrame(frame, { op: "copy_selection_if_any" });
         if (res && res.copied) return { kind: "ok" };
       }
     }
@@ -2590,21 +4182,21 @@
     return { kind: "ok" };
   }
 
-  function cutSelection() {
-    const editFrame = focusedEditableFrame();
+  async function cutSelection() {
+    const editFrame = await focusedEditableFrame();
     if (editFrame) {
-      evalInFrame(editFrame, { op: "cut_selection" });
+      await evalInFrame(editFrame, { op: "cut_selection" });
       return { kind: "ok" };
     }
     for (const frame of visibleFrames()) {
-      const res = evalInFrame(frame, { op: "cut_selection_if_any" });
+      const res = await evalInFrame(frame, { op: "cut_selection_if_any" });
       if (res && res.cut) return { kind: "ok" };
     }
     performPageCut();
     return { kind: "ok" };
   }
 
-  function cutSelectionIfAny() {
+  async function cutSelectionIfAny() {
     const active = deepActiveElement();
     if (active && isTextField(active) && active.selectionStart !== active.selectionEnd) {
       return { kind: "cut_result", cut: performPageCut() };
@@ -2616,13 +4208,13 @@
       }
     }
     for (const frame of visibleFrames()) {
-      const res = evalInFrame(frame, { op: "cut_selection_if_any" });
+      const res = await evalInFrame(frame, { op: "cut_selection_if_any" });
       if (res && res.cut) return res;
     }
     return { kind: "cut_result", cut: false };
   }
 
-  function copySelectionIfAny() {
+  async function copySelectionIfAny() {
     const active = deepActiveElement();
     if (active && isTextField(active) && active.selectionStart !== active.selectionEnd) {
       return { kind: "copy_result", copied: performPageCopy() };
@@ -2632,18 +4224,19 @@
       return { kind: "copy_result", copied: performPageCopy() };
     }
     for (const frame of visibleFrames()) {
-      const res = evalInFrame(frame, { op: "copy_selection_if_any" });
+      const res = await evalInFrame(frame, { op: "copy_selection_if_any" });
       if (res && res.copied) return res;
     }
     return { kind: "copy_result", copied: false };
   }
 
   // `y`: copy as the page's own copy does (`text/html` + `text/plain`, `VIS-02`), flash, and collapse at the start.
-  function visualYank() {
+  async function visualYank() {
+    visualPreferredX = null;
     if (activeVisualFrame && activeVisualFrame.isConnected) {
       const frame = activeVisualFrame;
       activeVisualFrame = null;
-      return mapFrameVisualState(frame, evalInFrame(frame, { op: "visual_yank" }), false);
+      return mapFrameVisualState(frame, await evalInFrame(frame, { op: "visual_yank" }), false);
     }
     const active = deepActiveElement();
     if (active && active.localName === "input" && (active.type || "").toLowerCase() === "password") {
@@ -2664,17 +4257,18 @@
     return { kind: "visual_state", active: false, yanked, copied_by_page, caret: null, flash };
   }
 
-  function visualCaret() {
+  async function visualCaret() {
     if (activeVisualFrame && activeVisualFrame.isConnected) {
-      return mapFrameVisualState(activeVisualFrame, evalInFrame(activeVisualFrame, { op: "caret" }), false);
+      return mapFrameVisualState(activeVisualFrame, await evalInFrame(activeVisualFrame, { op: "caret" }), false);
     }
     return visualState(true);
   }
 
   // A label pick on text: the selection grows to it in visual mode; otherwise visual mode starts there.
   function moveCaret(node, offset, extend) {
+    visualPreferredX = null;
     const selection = getSelection();
-    if (extend && selection.rangeCount) selection.extend(node, offset);
+    if (extend && selection.rangeCount) extendSelectionTo(selection, node, offset);
     else selection.collapse(node, offset);
     reveal();
     return visualState(true);
@@ -2691,28 +4285,28 @@
   let reportedEditing = null;
   let focusSyncScheduled = false;
 
-  function anyChildFrameEditing() {
+  async function anyChildFrameEditing() {
     for (const frame of allFrames()) {
-      const res = evalInFrame(frame, { op: "has_editable_focus" });
+      const res = await evalInFrame(frame, { op: "has_editable_focus" });
       if (res && res.editing) return true;
     }
     return false;
   }
 
-  function focusedEditableFrame() {
+  async function focusedEditableFrame() {
     const active = deepActiveElement();
     if (active && (active.localName === "iframe" || active.localName === "frame")) {
-      const res = evalInFrame(active, { op: "has_editable_focus" });
+      const res = await evalInFrame(active, { op: "has_editable_focus" });
       if (res && res.editing) return active;
     }
     for (const frame of allFrames()) {
-      const res = evalInFrame(frame, { op: "has_editable_focus" });
+      const res = await evalInFrame(frame, { op: "has_editable_focus" });
       if (res && res.editing) return frame;
     }
     return null;
   }
 
-  function rememberFocusedEditable() {
+  async function rememberFocusedEditable() {
     const active = deepActiveElement();
     const editing = isEditable(active);
     if (editing && active) {
@@ -2724,7 +4318,7 @@
       reportedEditing = editing;
       if (editing) {
         postEvent({ kind: "editable_focus", editing: true });
-      } else if ((wasEditing || window.top === window) && !anyChildFrameEditing()) {
+      } else if ((wasEditing || window.top === window) && !(await anyChildFrameEditing())) {
         postEvent({ kind: "editable_focus", editing: false });
       }
     }
@@ -2851,7 +4445,7 @@
   }
 
   // All fields across this document and child frames in reading order (`FRM-01`).
-  function allFieldEntries() {
+  async function allFieldEntries() {
     const entries = fields().map((element, index) => ({
       frame: null,
       element,
@@ -2859,10 +4453,16 @@
       rect: plainRect(element.getBoundingClientRect()),
       active: element === deepActiveElement(),
     }));
-    for (const frame of allFrames()) {
-      if (!frameVisible(frame)) continue;
-      const box = frameBox(frame);
-      const sub = evalInFrame(frame, { op: "frame_fields" });
+    const frameBatches = await Promise.all(
+      allFrames()
+        .filter(frame => frameVisible(frame))
+        .map(async frame => ({
+          frame,
+          box: frameBox(frame),
+          sub: await evalInFrame(frame, { op: "frame_fields" }),
+        }))
+    );
+    for (const { frame, box, sub } of frameBatches) {
       if (!sub || !Array.isArray(sub.fields)) continue;
       for (const f of sub.fields) {
         const mapped = fromFrame(box, f.rect);
@@ -2894,7 +4494,7 @@
     return { kind: "activated", mode: "i", url: null, message: null };
   }
 
-  function focusFieldEntry(entry) {
+  async function focusFieldEntry(entry) {
     if (!entry.frame) {
       lastFieldFrame = null;
       return focusField(entry.element);
@@ -2904,7 +4504,7 @@
       entry.frame.focus();
     } catch (_) {}
     return (
-      evalInFrame(entry.frame, { op: "frame_focus_field", index: entry.childIndex }) || {
+      (await evalInFrame(entry.frame, { op: "frame_focus_field", index: entry.childIndex })) || {
         kind: "activated",
         mode: "i",
         url: null,
@@ -2913,37 +4513,37 @@
     );
   }
 
-  function inputFirst(count) {
-    const visible = allFieldEntries().filter(entry => rectInViewport(entry.rect));
+  async function inputFirst(count) {
+    const visible = (await allFieldEntries()).filter(entry => rectInViewport(entry.rect));
     // No field to type in: the keys go to the page, as with `I`.
     if (!visible.length) return { kind: "explicit_insert" };
     return focusFieldEntry(visible[Math.min(Math.max(count || 1, 1), visible.length) - 1]);
   }
 
   // `i`: a count says which field and one field needs no choosing; several are labeled.
-  function inputChoose(count) {
+  async function inputChoose(count) {
     if (count === null || count === undefined) {
-      const choices = controlTargets("only", "");
+      const choices = await controlTargets("only", "");
       if (choices.length > 1) return { kind: "targets", jump: "inputs", pattern: "", targets: choices };
       if (choices.length === 1) return pick(choices[0].id, false, false);
     }
     return inputFirst(count);
   }
 
-  function inputLast(count) {
+  async function inputLast(count) {
     if (lastFieldFrame && lastFieldFrame.isConnected) {
-      const sub = evalInFrame(lastFieldFrame, { op: "frame_focus_last" });
+      const sub = await evalInFrame(lastFieldFrame, { op: "frame_focus_last" });
       if (sub && sub.kind === "activated") return sub;
     }
     const last = lastInput();
     if (last && isEditable(last) && isRendered(last)) return focusField(last);
-    const list = allFieldEntries();
+    const list = await allFieldEntries();
     if (list.length) return focusFieldEntry(list[Math.min(Math.max(count || 1, 1), list.length) - 1]);
     return { kind: "ok" };
   }
 
-  function inputStep(offset) {
-    const list = allFieldEntries();
+  async function inputStep(offset) {
+    const list = await allFieldEntries();
     if (!list.length) return { kind: "ok" };
     const current = list.findIndex(entry => entry.active);
     let index;
@@ -2958,10 +4558,10 @@
   }
 
   // `<Esc>` in insert mode: the field gives up the focus, in child frames too (`FRM-01`).
-  function blurField() {
-    const editFrame = focusedEditableFrame();
+  async function blurField() {
+    const editFrame = await focusedEditableFrame();
     if (editFrame) {
-      evalInFrame(editFrame, { op: "blur_field" });
+      await evalInFrame(editFrame, { op: "blur_field" });
     }
     const active = deepActiveElement();
     if (isEditable(active)) active.blur();
@@ -2969,9 +4569,9 @@
   }
 
   // `<C-u>`: delete back to the start of the current line without deleting a preceding newline.
-  function editDeleteToLineStart() {
-    const editFrame = focusedEditableFrame();
-    if (editFrame) return evalInFrame(editFrame, { op: "edit_delete_to_line_start" }) || { kind: "ok" };
+  async function editDeleteToLineStart() {
+    const editFrame = await focusedEditableFrame();
+    if (editFrame) return (await evalInFrame(editFrame, { op: "edit_delete_to_line_start" })) || { kind: "ok" };
     const field = deepActiveElement();
     if (!isEditable(field) || field.localName === "select") return { kind: "ok" };
     if (isTextField(field)) {
@@ -3010,9 +4610,9 @@
     return { kind: "ok" };
   }
 
-  function editDeleteToLineEnd() {
-    const editFrame = focusedEditableFrame();
-    if (editFrame) return evalInFrame(editFrame, { op: "edit_delete_to_line_end" }) || { kind: "ok" };
+  async function editDeleteToLineEnd() {
+    const editFrame = await focusedEditableFrame();
+    if (editFrame) return (await evalInFrame(editFrame, { op: "edit_delete_to_line_end" })) || { kind: "ok" };
     const field = deepActiveElement();
     if (!isEditable(field) || field.localName === "select") return { kind: "ok" };
     if (isTextField(field)) {
@@ -3048,9 +4648,9 @@
     return { kind: "ok" };
   }
 
-  function editDeleteCharForward() {
-    const editFrame = focusedEditableFrame();
-    if (editFrame) return evalInFrame(editFrame, { op: "edit_delete_char_forward" }) || { kind: "ok" };
+  async function editDeleteCharForward() {
+    const editFrame = await focusedEditableFrame();
+    if (editFrame) return (await evalInFrame(editFrame, { op: "edit_delete_char_forward" })) || { kind: "ok" };
     const field = deepActiveElement();
     if (!isEditable(field) || field.localName === "select") return { kind: "ok" };
     document.execCommand("forwardDelete", false, null);
@@ -3063,10 +4663,10 @@
 
   // Put a yank where the caret is, or over the put the caret still sits at the end of. The editor's own insert keeps
   // undo and fires input events, so the page sees typing.
-  function yankPut(text, index, replace) {
-    const editFrame = focusedEditableFrame();
+  async function yankPut(text, index, replace) {
+    const editFrame = await focusedEditableFrame();
     if (editFrame) {
-      const sub = evalInFrame(editFrame, { op: "yank_put", text, index, replace });
+      const sub = await evalInFrame(editFrame, { op: "yank_put", text, index, replace });
       if (sub && sub.kind === "put") {
         const box = frameBox(editFrame);
         const flash = Array.isArray(sub.flash)
@@ -3097,9 +4697,9 @@
 
   // Which yank `<A-p>` (older, step 1) or `<A-n>` (newer, step -1) puts: the next one from the put the caret sits
   // after, or the newest.
-  function yankCycle(step) {
-    const editFrame = focusedEditableFrame();
-    if (editFrame) return evalInFrame(editFrame, { op: "yank_cycle", step }) || { kind: "ok" };
+  async function yankCycle(step) {
+    const editFrame = await focusedEditableFrame();
+    if (editFrame) return (await evalInFrame(editFrame, { op: "yank_cycle", step })) || { kind: "ok" };
     const field = deepActiveElement();
     if (!isEditable(field) || field.localName === "select") return { kind: "ok" };
     const last = cyclingPut();
@@ -3112,7 +4712,7 @@
 
   // A field takes the focus in insert mode; any other control is pressed by the browser where it is on top (`ctrl`
   // holds Ctrl on capital hints so page handlers run, `JMP-03`); text moves the cursor (`FRM-01`).
-  function pick(id, newTab, extend) {
+  async function pick(id, newTab, extend) {
     const entry = pickable.get(id);
     if (!entry) return { kind: "ok" };
     if (entry.frame) {
@@ -3124,7 +4724,7 @@
           if (sel) sel.removeAllRanges();
         }
         activeVisualFrame = entry.frame;
-        const sub = evalInFrame(entry.frame, {
+        const sub = await evalInFrame(entry.frame, {
           op: "jump_pick",
           id: entry.childId,
           new_tab: !!newTab,
@@ -3133,7 +4733,7 @@
         return mapFrameVisualState(entry.frame, sub, true);
       }
       const box = frameBox(entry.frame);
-      const sub = evalInFrame(entry.frame, {
+      const sub = await evalInFrame(entry.frame, {
         op: "jump_pick",
         id: entry.childId,
         new_tab: !!newTab,
@@ -3168,6 +4768,7 @@
     }
     activeVisualFrame = null;
     if (entry.paragraph) {
+      visualPreferredX = null;
       const range = entry.paragraph;
       getSelection().setBaseAndExtent(range.startContainer, range.startOffset, range.endContainer, range.endOffset);
       reveal();
@@ -3192,16 +4793,16 @@
     return { kind: "ok" };
   }
 
-  function captchaAction(action) {
+  async function captchaAction(action) {
     const purposes = action === "audio" ? ["audio", "visual"] : [action];
-    const targets = controlTargets("include", "", "captcha");
+    const targets = await controlTargets("include", "", "captcha");
     let chosen = null;
     for (const p of purposes) {
       chosen = targets.find(each => each.purpose === p);
       if (chosen) break;
     }
     if (!chosen) return { kind: "ok" };
-    const result = pick(chosen.id, false, false);
+    const result = await pick(chosen.id, false, false);
     if (result && result.kind === "press") {
       refocusTop();
     }
@@ -3217,9 +4818,9 @@
     );
   }
 
-  function captchaFill(text) {
+  async function captchaFill(text) {
     const val = String(text || "");
-    const targets = controlTargets("include", "", "captcha");
+    const targets = await controlTargets("include", "", "captcha");
     const localOf = item => {
       const entry = pickable.get(item.id);
       return entry && entry.control ? entry.control : null;
@@ -3228,7 +4829,16 @@
       targets.find(each => each.purpose === "answer" && isTypeableField(localOf(each))) ||
       targets.find(each => isTypeableField(localOf(each)));
     const element = match ? localOf(match) : null;
-    if (!element) return { kind: "ok" };
+    if (!element) {
+      const remoteMatch = targets.find(each => each.purpose === "answer" && pickable.get(each.id)?.frame);
+      if (remoteMatch) {
+        const entry = pickable.get(remoteMatch.id);
+        if (entry && entry.frame && entry.frame.isConnected) {
+          return (await evalInFrame(entry.frame, { op: "captcha_fill", text: val })) || { kind: "ok" };
+        }
+      }
+      return { kind: "ok" };
+    }
     element.focus();
     if (element.localName === "input" || element.localName === "textarea") {
       try {
@@ -3252,7 +4862,7 @@
   let activeTouchFrame = null;
   let activeTouchTarget = null;
 
-  function dispatchTouch(stage, x, y, resetChain) {
+  async function dispatchTouch(stage, x, y, resetChain) {
     if (resetChain) {
       activeTouchFrame = null;
       activeTouchTarget = null;
@@ -3273,7 +4883,7 @@
     }
     if (inner) {
       const box = frameBox(inner);
-      evalInFrame(inner, {
+      await evalInFrame(inner, {
         op: "dispatch_touch",
         stage,
         x: (x - box.left) / box.scaleX,
@@ -3335,12 +4945,12 @@
   // Requests
   // ---------------------------------------------------------------------------------------------------------------
 
-  function jumpTargets(request) {
+  async function jumpTargets(request) {
     const pattern = request.pattern || "";
     const topOnly = !!request.top_only;
     switch (request.jump) {
       case "hints": {
-        const items = controlTargets(request.include_fields ? "include" : "exclude", "", "all", topOnly);
+        const items = await controlTargets(request.include_fields ? "include" : "exclude", "", "all", topOnly);
         if (topOnly) {
           items.sort((a, b) => (Math.abs(a.y - b.y) > ROW_TOLERANCE ? a.y - b.y : a.x - b.x));
         }
@@ -3363,25 +4973,31 @@
     return [];
   }
 
-  globalThis.__zendiaAutomation = function (requestJson) {
+  globalThis.__zendiaAutomation = async function (requestJson) {
     try {
       const request = JSON.parse(requestJson);
       let response;
       switch (request.op) {
         case "init":
           if (request.watch_mutations) enableMutationWatch();
-          initChildFrames();
-          rememberFocusedEditable();
+          watchStart(true);
+          await initChildFrames(false);
+          await rememberFocusedEditable();
+          response = { kind: "ok" };
+          break;
+        case "captcha_watch_scan":
+          watchStart(true);
+          await Promise.all(allFrames().map(frame => evalInFrame(frame, { op: "captcha_watch_scan" })));
           response = { kind: "ok" };
           break;
         case "has_editable_focus":
           response = {
             kind: "editable_focus",
-            editing: isEditable(deepActiveElement()) || anyChildFrameEditing(),
+            editing: isEditable(deepActiveElement()) || (await anyChildFrameEditing()),
           };
           break;
         case "frame_fields": {
-          const all = allFieldEntries();
+          const all = await allFieldEntries();
           response = {
             kind: "frame_fields",
             fields: all.map((entry, index) => ({ index, rect: entry.rect, active: entry.active })),
@@ -3389,14 +5005,14 @@
           break;
         }
         case "frame_focus_field": {
-          const all = allFieldEntries();
+          const all = await allFieldEntries();
           const chosen = all[request.index || 0];
-          response = chosen ? focusFieldEntry(chosen) : { kind: "ok" };
+          response = chosen ? await focusFieldEntry(chosen) : { kind: "ok" };
           break;
         }
         case "frame_focus_last": {
           if (lastFieldFrame && lastFieldFrame.isConnected) {
-            const sub = evalInFrame(lastFieldFrame, { op: "frame_focus_last" });
+            const sub = await evalInFrame(lastFieldFrame, { op: "frame_focus_last" });
             if (sub && sub.kind === "activated") {
               response = sub;
               break;
@@ -3407,119 +5023,120 @@
           break;
         }
         case "scroll_if_able":
-          response = scrollIfAble(request);
+          response = await scrollIfAble(request);
           break;
         case "copy_selection":
-          response = copySelection();
+          response = await copySelection();
           break;
         case "copy_selection_if_any":
-          response = copySelectionIfAny();
+          response = await copySelectionIfAny();
           break;
         case "cut_selection":
-          response = cutSelection();
+          response = await cutSelection();
           break;
         case "cut_selection_if_any":
-          response = cutSelectionIfAny();
+          response = await cutSelectionIfAny();
           break;
         case "collect_controls":
-          response = { kind: "raw_controls", items: collectControlsRaw() };
+          response = { kind: "raw_controls", items: await collectControlsRaw() };
           break;
         case "captcha_tokens":
-          response = { kind: "captcha_tokens", tokens: captchaTokens() };
+          response = { kind: "captcha_tokens", tokens: await captchaTokens() };
           break;
         case "captcha_areas":
           response = {
             kind: "captcha_areas",
-            areas: captchaAreas(),
-            captcha_tokens: window.top === window ? captchaTokens() : 0,
+            areas: await captchaAreas(),
+            captcha_tokens: window.top === window ? await captchaTokens() : 0,
             viewport: [innerWidth, innerHeight],
           };
           break;
         case "jump_scan": {
           if (request.watch_mutations) enableMutationWatch();
-          const targets = jumpTargets(request);
+          const targets = await jumpTargets(request);
           const includeCaptchaMeta =
             request.jump === "captcha" || request.jump === "challenge" || request.jump === "hints";
+          const includeAreas =
+            request.jump === "captcha" || request.jump === "challenge" || targets.some(t => t.challenge);
           response = {
             kind: "targets",
             jump: request.jump,
             pattern: request.pattern || "",
             targets,
-            captcha_tokens: includeCaptchaMeta ? captchaTokens() : 0,
-            captcha_areas:
-              (request.jump === "captcha" || request.jump === "challenge") && !targets.length ? captchaAreas() : [],
+            captcha_tokens: includeCaptchaMeta ? await captchaTokens() : 0,
+            captcha_areas: includeAreas ? await captchaAreas() : [],
             viewport: [innerWidth, innerHeight],
           };
           break;
         }
         case "jump_pick":
-          response = pick(request.id, !!request.new_tab, !!request.extend);
+          response = await pick(request.id, !!request.new_tab, !!request.extend);
           break;
         case "captcha_fill":
-          response = captchaFill(request.text);
+          response = await captchaFill(request.text);
           break;
         case "dispatch_touch":
-          response = dispatchTouch(request.stage, request.x, request.y, !!request.reset_chain);
+          response = await dispatchTouch(request.stage, request.x, request.y, !!request.reset_chain);
           break;
         case "refocus_top":
           response = refocusTop();
           break;
         case "scroll":
-          response = scroll(request);
+          response = await scroll(request);
           break;
         case "input_choose":
-          response = inputChoose(request.count);
+          response = await inputChoose(request.count);
           break;
         case "input_first":
-          response = inputFirst(request.count);
+          response = await inputFirst(request.count);
           break;
         case "input_last":
-          response = inputLast(request.count);
+          response = await inputLast(request.count);
           break;
         case "input_step":
-          response = inputStep(request.delta || 1);
+          response = await inputStep(request.delta || 1);
           break;
         case "blur_field":
-          response = blurField();
+          response = await blurField();
           break;
         case "edit_delete_to_line_start":
-          response = editDeleteToLineStart();
+          response = await editDeleteToLineStart();
           break;
         case "edit_delete_to_line_end":
-          response = editDeleteToLineEnd();
+          response = await editDeleteToLineEnd();
           break;
         case "edit_delete_char_forward":
-          response = editDeleteCharForward();
+          response = await editDeleteCharForward();
           break;
         case "visual_enter":
-          response = visualEnter();
+          response = await visualEnter();
           break;
         case "visual_exit":
-          response = visualExit();
+          response = await visualExit();
           break;
         case "visual_yank":
-          response = visualYank();
+          response = await visualYank();
           break;
         case "visual_swap_ends":
-          response = visualSwapEnds();
+          response = await visualSwapEnds();
           break;
         case "visual_move":
-          response = visualMove(request.motion, request.count);
+          response = await visualMove(request.motion, request.count);
           break;
         case "visual_text_object":
-          response = visualObject(request.keys || "iw", request.count);
+          response = await visualObject(request.keys || "iw", request.count);
           break;
         case "caret":
-          response = visualCaret();
+          response = await visualCaret();
           break;
         case "yank_put":
-          response = yankPut(request.text, request.index || 0, !!request.replace);
+          response = await yankPut(request.text, request.index || 0, !!request.replace);
           break;
         case "yank_cycle":
-          response = yankCycle(request.step || 1);
+          response = await yankCycle(request.step || 1);
           break;
         case "captcha_action":
-          response = captchaAction(request.action);
+          response = await captchaAction(request.action);
           break;
         case "toggle_reader_mode":
           response = toggleReaderMode();

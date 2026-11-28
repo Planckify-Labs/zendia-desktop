@@ -41,10 +41,17 @@ const MATCH_BACKGROUND: Color = Color::from_argb(102, 0xff, 0xc7, 0x77);
 const TARGET_OUTLINE: Color = Color::from_argb(140, 0xa2, 0x57, 0x72);
 /// Keyboard cursor (`PointerPad`) palette (`ZendiaPointerContent.sys.mjs:23-29`).
 const PAD_BACKGROUND: Color = Color::from_rgb(0x23, 0x21, 0x36);
+const PAD_FINE_BACKGROUND: Color = Color::from_argb(198, 0x23, 0x21, 0x36);
+const PAD_FINE_OUTLINE: Color = Color::from_argb(96, 0xa2, 0x57, 0x72);
 const PAD_TYPED_TEXT: Color = Color::from_rgb(0xff, 0xc7, 0x77);
 const PAD_AREA_OUTLINE: Color = Color::from_argb(204, 0xff, 0xc7, 0x77);
 const PAD_RULER_SHADOW: Color = Color::from_argb(89, 0x23, 0x21, 0x36);
 const PAD_HELD_FILL: Color = Color::from_argb(115, 0xff, 0xc7, 0x77);
+/// Live vertical alignment hairline (`#86e1fc`) drawn over the puzzle image while dragging a slider.
+const PAD_SLIDER_GUIDE: Color = Color::from_argb(235, 0x86, 0xe1, 0xfc);
+/// Numbered click-order pin colors (`#ffc777` fill, `#232136` ink).
+const PAD_PIN_FILL: Color = Color::from_rgb(0xff, 0xc7, 0x77);
+const PAD_PIN_INK: Color = Color::from_rgb(0x23, 0x21, 0x36);
 /// Exact SVG arrow cursor from `ZendiaPointerContent.arrowCursor` (`18x24`, tip at `(0, 0)`).
 const ARROW_CURSOR_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="18" height="24" viewBox="0 0 18 24"><path d="M0 0 L0 17 L4.5 13 L7.5 20 L10.5 18.6 L7.6 12 L13 12 Z" fill="#232136" stroke="#ffffff" stroke-width="1.4" stroke-linejoin="round"/></svg>"##;
 
@@ -409,8 +416,9 @@ fn draw_cursor_pad(
                     x: sr.x - 4.0 * zoom,
                     ..sr
                 };
-                layer = layer.child(pad_tag(tag_rect, lbl, typed_chars, dy, zoom));
+                layer = layer.child(pad_tag(tag_rect, lbl, typed_chars, dy, zoom, false));
             } else {
+                let fine = layout.kind == PadLayoutKind::FineGrid;
                 layer = layer.child(
                     rect()
                         .position(Position::new_absolute().left(sr.x).top(sr.y))
@@ -418,13 +426,70 @@ fn draw_cursor_pad(
                         .height(Size::px(sr.height.max(0.0)))
                         .border(
                             Border::new()
-                                .fill(TARGET_OUTLINE)
+                                .fill(if fine { PAD_FINE_OUTLINE } else { TARGET_OUTLINE })
                                 .width((1.0 * zoom).max(1.0))
                                 .alignment(BorderAlignment::Inner),
                         ),
                 );
-                layer = layer.child(pad_tag(sr, lbl, typed_chars, 0.0, zoom));
+                layer = layer.child(pad_tag(sr, lbl, typed_chars, 0.0, zoom, fine));
             }
+        }
+    }
+
+    // Live vertical alignment guide over the puzzle image while sliding (`slider` mode).
+    if pad.holding.is_some()
+        && pad.slider
+        && let Some((top_y, bot_y)) = pad.ruler_y_span
+    {
+        let guide_x = (pad.cursor.0 + pad.slider_piece_offset_x) * zoom;
+        let guide_top = top_y * zoom;
+        let guide_h = ((bot_y - top_y) * zoom).max(1.0);
+        layer = layer.child(
+            rect()
+                .position(Position::new_absolute().left(guide_x).top(guide_top))
+                .width(Size::px((2.0 * zoom).max(1.5)))
+                .height(Size::px(guide_h))
+                .background(PAD_SLIDER_GUIDE)
+                .shadow(Shadow::new().x(1.0 * zoom).blur(2.0 * zoom).color(LABEL_SHADOW)),
+        );
+    }
+
+    // Numbered click-order pins (`1`, `2`, `3`, …) so multi-step click-order CAPTCHA progress stays visible.
+    if !pad.clicks.is_empty() {
+        let pin_size = 18.0 * zoom;
+        let pin_font = 10.0 * zoom;
+        for (index, &(px, py)) in pad.clicks.iter().enumerate() {
+            layer = layer.child(
+                rect()
+                    .position(
+                        Position::new_absolute()
+                            .left(px * zoom - pin_size / 2.0)
+                            .top(py * zoom - pin_size / 2.0),
+                    )
+                    .width(Size::px(pin_size))
+                    .height(Size::px(pin_size))
+                    .corner_radius(CornerRadius::new_all(pin_size / 2.0))
+                    .background(PAD_PIN_FILL)
+                    .border(
+                        Border::new()
+                            .fill(PAD_PIN_INK)
+                            .width((1.5 * zoom).max(1.0))
+                            .alignment(BorderAlignment::Inner),
+                    )
+                    .shadow(Shadow::new().y(1.0 * zoom).blur(3.0 * zoom).color(LABEL_SHADOW))
+                    .main_align(Alignment::center())
+                    .cross_align(Alignment::center())
+                    .child(
+                        label()
+                            .text((index + 1).to_string())
+                            .font_family("monospace")
+                            .font_weight(FontWeight::BOLD)
+                            .font_size(pin_font)
+                            .line_height(1.0)
+                            .color(PAD_PIN_INK)
+                            .max_lines(1),
+                    ),
+            );
         }
     }
 
@@ -532,10 +597,10 @@ fn draw_dashed_area(mut layer: Rect, area: ViewportRect, zoom: f32) -> Rect {
     layer
 }
 
-fn pad_tag(area: ViewportRect, text_str: &str, typed: usize, dy: f32, zoom: f32) -> Rect {
-    let font_size = 10.0 * zoom;
-    let height = 13.0 * zoom;
-    let pad_x = 2.0 * zoom;
+fn pad_tag(area: ViewportRect, text_str: &str, typed: usize, dy: f32, zoom: f32, fine: bool) -> Rect {
+    let font_size = (if fine { 9.0 } else { 10.0 }) * zoom;
+    let height = (if fine { 11.5 } else { 13.0 }) * zoom;
+    let pad_x = (if fine { 1.5 } else { 2.0 }) * zoom;
     let split = text_str
         .char_indices()
         .nth(typed)
@@ -560,7 +625,7 @@ fn pad_tag(area: ViewportRect, text_str: &str, typed: usize, dy: f32, zoom: f32)
         .height(Size::px(height))
         .padding(Gaps::new(0.0, pad_x, 0.0, pad_x))
         .corner_radius(CornerRadius::new_all(3.0 * zoom))
-        .background(PAD_BACKGROUND)
+        .background(if fine { PAD_FINE_BACKGROUND } else { PAD_BACKGROUND })
         .shadow(Shadow::new().y(1.0 * zoom).blur(2.0 * zoom).color(LABEL_SHADOW))
         .cross_align(Alignment::center())
         .direction(Direction::Horizontal);

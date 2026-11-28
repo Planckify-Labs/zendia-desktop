@@ -8,11 +8,12 @@
 //! (`PointerPad`) state machine, ported from `ZendiaCaptcha.sys.mjs` and `ZendiaPointerContent.sys.mjs` (`CAP-01`..`CAP-09`).
 
 use crate::focus::HINT_ALPHABET;
+use crate::model::TabId;
 use crate::tab_source::{PointerEventKind, PointerStep, TouchStage};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
-use zendia_automation::ViewportRect;
+use zendia_automation::{CaptchaWatchDetection, CaptchaWatchStateReading, ViewportRect};
 
 /// All check kinds recognized by `ZendiaCaptcha.KINDS`.
 pub const KINDS: &[&str] = &[
@@ -69,8 +70,14 @@ pub const WATCH_AFTER_CLICK_MS: u64 = 700;
 pub const STAYING_NOTICE_MS: u64 = 1500;
 /// Duration of a `"click"` flash notice in the cursor prompt (`600 ms`).
 pub const CURSOR_NOTICE_MS: u64 = 600;
+/// How long a gone subframe holding a CAPTCHA state is kept while waiting for its replacement (`ZendiaCaptchaWatch.REPLACE_WAIT_MS`).
+pub const REPLACE_WAIT_MS: u64 = 2000;
 
+const MAX_DETECTIONS: usize = 50;
+const MAX_URL: usize = 2048;
+const MAX_TEXT: usize = 256;
 const CELL_SIZE: f32 = 40.0;
+const FINE_CELL_SIZE: f32 = 22.0;
 const MAX_CELLS: usize = 21 * 21;
 const STEP: f32 = 2.0;
 const FAR_STEP: f32 = 10.0;
@@ -435,7 +442,7 @@ static CHALLENGE_PROMPTS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|
         ),
         (
             "click",
-            Regex::new(r"(?i)^(?:please )?(?:click|tap|select)(?: on)?(?: the)?(?: (?:icons?|characters?|symbols?|letters?|objects?))? in (?:the |this )?(?:following |given )?order\b")
+            Regex::new(r"(?i)^(?:please )?(?:click|tap|select|pick)(?: on)?(?: the)?(?: (?:icons?|characters?|symbols?|letters?|objects?|images?))? (?:in|with) (?:the |this )?(?:following |given )?order\b")
                 .unwrap(),
         ),
         (
@@ -847,6 +854,351 @@ pub fn rects_meet(a: ViewportRect, b: ViewportRect) -> bool {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Live CAPTCHA Watch Service (`ZendiaCaptchaWatch.sys.mjs`)
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    value.chars().take(max).collect()
+}
+
+/// Sanitizes raw detections coming from a content frame (`ZendiaCaptchaWatch.sanitize`).
+pub fn sanitize_detections(detections: &[CaptchaWatchDetection]) -> Vec<CaptchaWatchDetection> {
+    detections
+        .iter()
+        .take(MAX_DETECTIONS)
+        .filter_map(|detection| {
+            let signal = truncate_chars(&detection.signal, 32);
+            if !matches!(
+                signal.as_str(),
+                "frame" | "script" | "widget" | "own" | "token" | "honeypot"
+            ) {
+                return None;
+            }
+            Some(CaptchaWatchDetection {
+                signal,
+                name: detection.name.as_deref().map(|s| truncate_chars(s, 64)),
+                kind: detection.kind.as_deref().map(|s| truncate_chars(s, 64)),
+                challenge: detection.challenge,
+                hidden: detection.hidden,
+                detail: detection.detail.as_deref().map(|s| truncate_chars(s, MAX_TEXT)),
+            })
+        })
+        .collect()
+}
+
+/// Sanitizes a frame's live CAPTCHA state reading (`ZendiaCaptchaWatch.sanitizeState`).
+pub fn sanitize_state(reading: &CaptchaWatchStateReading) -> CaptchaWatchStateReading {
+    let state = truncate_chars(&reading.state, 16);
+    if !STATES.contains(&state.as_str()) {
+        return CaptchaWatchStateReading {
+            state: "none".to_string(),
+            name: None,
+            how: None,
+        };
+    }
+    CaptchaWatchStateReading {
+        state,
+        name: reading.name.as_deref().map(|s| truncate_chars(s, 64)),
+        how: reading.how.as_deref().map(|s| truncate_chars(s, 160)),
+    }
+}
+
+/// One-line human summary of a tab's sanitized detections (`ZendiaCaptchaWatch.describe`).
+pub fn describe_detections(detections: &[CaptchaWatchDetection]) -> String {
+    // Preserve insertion order of services and kinds, matching JS `Map` and `Set`.
+    let mut services: Vec<(String, Vec<String>)> = Vec::new();
+    for det in detections {
+        if (det.signal == "frame" || det.signal == "script")
+            && let Some(name) = det.name.as_deref().filter(|s| !s.is_empty())
+        {
+            let kinds = if let Some((_, kinds)) = services.iter_mut().find(|(n, _)| n == name) {
+                kinds
+            } else {
+                services.push((name.to_string(), Vec::new()));
+                &mut services.last_mut().unwrap().1
+            };
+            if let Some(kind) = det.kind.as_deref().filter(|s| !s.is_empty())
+                && !kinds.iter().any(|k| k == kind)
+            {
+                kinds.push(kind.to_string());
+            }
+        }
+    }
+    let mut parts: Vec<String> = services
+        .into_iter()
+        .map(|(name, kinds)| {
+            if kinds.is_empty() {
+                name
+            } else {
+                format!("{name} ({})", kinds.join(", "))
+            }
+        })
+        .collect();
+    if let Some(detail) = detections
+        .iter()
+        .find(|d| d.signal == "widget")
+        .and_then(|d| d.detail.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(format!("{detail} page widget{}", if detail == "1" { "" } else { "s" }));
+    }
+    for det in detections.iter().filter(|d| d.signal == "own") {
+        let kind_part = det
+            .kind
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map_or_else(String::new, |k| format!("{k} "));
+        let detail_part = det
+            .detail
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map_or_else(String::new, |d| format!(" \"{}\"", truncate_chars(d, 80)));
+        parts.push(format!("page-drawn {kind_part}challenge{detail_part}"));
+    }
+    let details = |signal: &str| -> Vec<&str> {
+        detections
+            .iter()
+            .filter(|d| d.signal == signal)
+            .filter_map(|d| d.detail.as_deref().filter(|s| !s.is_empty()))
+            .collect()
+    };
+    let tokens = details("token");
+    if !tokens.is_empty() {
+        parts.push(format!(
+            "token field{} {}",
+            if tokens.len() == 1 { "" } else { "s" },
+            tokens.join(", ")
+        ));
+    }
+    let traps = details("honeypot");
+    if !traps.is_empty() {
+        parts.push(format!(
+            "honeypot field{} {}",
+            if traps.len() == 1 { "" } else { "s" },
+            traps.join(", ")
+        ));
+    }
+    parts.join("; ")
+}
+
+/// Stable order-independent signature for a list of detections (`ZendiaCaptchaWatch.signatureOf`).
+pub fn signature_of_detections(detections: &[CaptchaWatchDetection]) -> String {
+    let mut keys: Vec<String> = detections
+        .iter()
+        .map(|d| {
+            format!(
+                "{}:{}:{}:{}:{}",
+                d.signal,
+                d.name.as_deref().unwrap_or(""),
+                d.kind.as_deref().unwrap_or(""),
+                d.detail.as_deref().unwrap_or(""),
+                if d.hidden { "hidden" } else { "" }
+            )
+        })
+        .collect();
+    keys.sort();
+    keys.join("|")
+}
+
+/// Merged live CAPTCHA finding across all frames of a tab (`ZendiaCaptchaWatch.lastFor`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptchaWatchRecord {
+    pub url: String,
+    pub detections: Vec<CaptchaWatchDetection>,
+    pub state: String,
+    pub how: Option<String>,
+    pub text: String,
+    pub signature: String,
+    pub at_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct FrameWatchEntry {
+    url: String,
+    detections: Vec<CaptchaWatchDetection>,
+    state: CaptchaWatchStateReading,
+    top: bool,
+    /// Deadline (`now_ms + REPLACE_WAIT_MS`) while waiting for a replaced subframe to report.
+    leaving_until_ms: Option<u64>,
+}
+
+/// Per-tab live CAPTCHA watcher merging top and child frame reports (`ZendiaCaptchaWatchService`).
+#[derive(Clone, Debug, Default)]
+pub struct CaptchaWatchService {
+    frames: BTreeMap<TabId, BTreeMap<u64, FrameWatchEntry>>,
+    last: BTreeMap<TabId, CaptchaWatchRecord>,
+    announced: BTreeMap<TabId, String>,
+}
+
+impl CaptchaWatchService {
+    pub fn last_for(&self, tab_id: TabId) -> Option<&CaptchaWatchRecord> {
+        self.last.get(&tab_id)
+    }
+
+    /// Merges a single frame's report into `tab_id` and returns `(merged_record, changed_announcement)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn report(
+        &mut self,
+        tab_id: TabId,
+        url: &str,
+        detections: &[CaptchaWatchDetection],
+        state: &CaptchaWatchStateReading,
+        frame_id: u64,
+        top: bool,
+        now_ms: u64,
+    ) -> (Option<CaptchaWatchRecord>, bool) {
+        let detections = sanitize_detections(detections);
+        let state = sanitize_state(state);
+        self.sweep_tab_expired(tab_id, now_ms);
+        let frames = self.frames.entry(tab_id).or_default();
+        if !top && state.state != "none" {
+            frames.retain(|_, entry| entry.leaving_until_ms.is_none());
+        }
+        if !detections.is_empty() || state.state != "none" {
+            frames.insert(
+                frame_id,
+                FrameWatchEntry {
+                    url: truncate_chars(url, MAX_URL),
+                    detections,
+                    state,
+                    top,
+                    leaving_until_ms: None,
+                },
+            );
+        } else if frames.remove(&frame_id).is_none() {
+            return (self.last.get(&tab_id).cloned(), false);
+        }
+        self.recompute(tab_id, now_ms)
+    }
+
+    /// Handles a frame navigating away or unloading (`ZendiaCaptchaWatch.drop`).
+    /// Returns `(merged_record, changed_announcement)`.
+    pub fn drop_frame(&mut self, tab_id: TabId, frame_id: u64, now_ms: u64) -> (Option<CaptchaWatchRecord>, bool) {
+        self.sweep_tab_expired(tab_id, now_ms);
+        let Some(frames) = self.frames.get_mut(&tab_id) else {
+            return (None, false);
+        };
+        let Some(gone) = frames.get(&frame_id) else {
+            return (self.last.get(&tab_id).cloned(), false);
+        };
+        if gone.leaving_until_ms.is_some() {
+            return (self.last.get(&tab_id).cloned(), false);
+        }
+        let gone_top = gone.top;
+        let gone_has_state = gone.state.state != "none";
+        let page_stays = frames.iter().any(|(&id, entry)| entry.top && id != frame_id);
+        if !gone_top && page_stays && gone_has_state {
+            if let Some(entry) = frames.get_mut(&frame_id) {
+                entry.leaving_until_ms = Some(now_ms.saturating_add(REPLACE_WAIT_MS));
+            }
+            return (self.last.get(&tab_id).cloned(), false);
+        }
+        frames.remove(&frame_id);
+        if gone_top {
+            frames.retain(|_, entry| entry.leaving_until_ms.is_none());
+        }
+        self.recompute(tab_id, now_ms)
+    }
+
+    /// Expires any deferred subframe drops whose `REPLACE_WAIT_MS` grace window elapsed.
+    pub fn sweep_expired_drops(&mut self, now_ms: u64) -> Vec<(TabId, Option<CaptchaWatchRecord>)> {
+        let affected: Vec<TabId> = self
+            .frames
+            .iter()
+            .filter_map(|(&tab_id, frames)| {
+                frames
+                    .values()
+                    .any(|e| e.leaving_until_ms.is_some_and(|deadline| now_ms >= deadline))
+                    .then_some(tab_id)
+            })
+            .collect();
+        let mut updates = Vec::new();
+        for tab_id in affected {
+            self.sweep_tab_expired(tab_id, now_ms);
+            let (record, changed) = self.recompute(tab_id, now_ms);
+            if changed {
+                updates.push((tab_id, record));
+            }
+        }
+        updates
+    }
+
+    /// Clears all watch state for `tab_id` (on tab close or top-level navigation).
+    pub fn clear_tab(&mut self, tab_id: TabId) -> bool {
+        self.frames.remove(&tab_id);
+        let had_last = self.last.remove(&tab_id).is_some();
+        let had_announced = self.announced.remove(&tab_id).is_some();
+        had_last || had_announced
+    }
+
+    fn sweep_tab_expired(&mut self, tab_id: TabId, now_ms: u64) {
+        if let Some(frames) = self.frames.get_mut(&tab_id) {
+            frames.retain(|_, entry| entry.leaving_until_ms.is_none_or(|deadline| now_ms < deadline));
+        }
+    }
+
+    fn recompute(&mut self, tab_id: TabId, now_ms: u64) -> (Option<CaptchaWatchRecord>, bool) {
+        let mut merged: Vec<CaptchaWatchDetection> = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut url = String::new();
+        let mut best_state = CaptchaWatchStateReading {
+            state: "none".to_string(),
+            name: None,
+            how: None,
+        };
+        if let Some(frames) = self.frames.get(&tab_id) {
+            for entry in frames.values() {
+                if entry.top || url.is_empty() {
+                    url = entry.url.clone();
+                }
+                if entry.state.state != best_state.state
+                    && stronger(&best_state.state, &entry.state.state) == entry.state.state
+                {
+                    best_state = entry.state.clone();
+                }
+                for detection in &entry.detections {
+                    let key = signature_of_detections(std::slice::from_ref(detection));
+                    if seen.insert(key) {
+                        merged.push(detection.clone());
+                    }
+                }
+            }
+        }
+        if merged.is_empty() && best_state.state == "none" {
+            self.last.remove(&tab_id);
+            let was_announced = self.announced.remove(&tab_id).is_some();
+            return (None, was_announced);
+        }
+        let desc = describe_detections(&merged);
+        let text = if !desc.is_empty() {
+            desc
+        } else {
+            best_state
+                .name
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "CAPTCHA".to_string())
+        };
+        let signature = format!("{}#{}", signature_of_detections(&merged), best_state.state);
+        let record = CaptchaWatchRecord {
+            url,
+            detections: merged,
+            state: best_state.state,
+            how: best_state.how,
+            text,
+            signature: signature.clone(),
+            at_ms: now_ms,
+        };
+        self.last.insert(tab_id, record.clone());
+        let changed = self.announced.get(&tab_id).map(String::as_str) != Some(signature.as_str());
+        if changed {
+            self.announced.insert(tab_id, signature);
+        }
+        (Some(record), changed)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Keyboard Cursor (`PointerPad`) State Machine (`ZendiaPointerContent.sys.mjs:750-1470`)
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -856,6 +1208,7 @@ pub enum PadLayoutKind {
     Board,
     Ruler,
     Grid,
+    FineGrid,
 }
 
 impl PadLayoutKind {
@@ -864,11 +1217,12 @@ impl PadLayoutKind {
             Self::Board => "board",
             Self::Ruler => "ruler",
             Self::Grid => "grid",
+            Self::FineGrid => "fine",
         }
     }
 }
 
-/// One jump layout of the keyboard cursor (`board`, `ruler`, or `grid`).
+/// One jump layout of the keyboard cursor (`board`, `ruler`, `grid`, or `fine`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PadLayout {
     pub kind: PadLayoutKind,
@@ -893,6 +1247,9 @@ pub struct PointerPadOptions {
     pub can_verify: bool,
     pub watches_captcha: bool,
     pub standalone: bool,
+    /// When true (e.g. clicking into a CAPTCHA picture/click-order challenge), lowercase labels click immediately
+    /// while recording numbered order markers (`1`, `2`, `3`, …) and prefer the fine `22 px` grid when it fits.
+    pub click_order: bool,
 }
 
 /// Outcome of feeding a key into [`PointerPadState`].
@@ -913,13 +1270,26 @@ pub struct PointerPadState {
     pub viewport: (f32, f32),
     pub drag_on_first_jump: bool,
     pub grabbed: bool,
+    pub slider: bool,
+    /// Track vertical bounds `(top, bottom)` used to keep slider drags on their track.
+    pub track_y_bounds: Option<(f32, f32)>,
+    /// Horizontal offset from grabbed handle center to puzzle piece center (`0.0` when piece is canvas-drawn).
+    pub slider_piece_offset_x: f32,
+    /// Vertical span `(top, bottom)` of the ruler lines, used to render a live alignment guide while sliding.
+    pub ruler_y_span: Option<(f32, f32)>,
     pub cursor: (f32, f32),
     /// `Some(start_point)` while the primary mouse button is held down.
     pub holding: Option<(f32, f32)>,
     /// Last point reached along a drag path (`#held.walked`).
     pub walked: (f32, f32),
     pub typed: String,
+    /// Whether any letter in `typed` was capitalized (`As`, `aS`, `AS` all trigger click/drop).
+    pub typed_capital: bool,
     pub count: String,
+    /// When true (click-order CAPTCHAs or toggled with `.`), lowercase labels click directly and Capital moves.
+    pub click_on_jump: bool,
+    /// Ordered coordinates clicked in this session (`1`, `2`, `3`, …), rendered as numbered pins for click-order CAPTCHAs.
+    pub clicks: Vec<(f32, f32)>,
     pub layouts: Vec<PadLayout>,
     pub layout_index: usize,
     pub banner: String,
@@ -954,6 +1324,18 @@ impl PointerPadState {
             opts.areas = vec![around];
         }
         let cursor = opts.grab.unwrap_or_else(|| middle(opts.areas[0]));
+        let slider_piece_offset_x = match (opts.grab, opts.piece) {
+            (Some(grab), Some(piece)) => middle(piece).0 - grab.0,
+            _ => 0.0,
+        };
+        let track_y_bounds = if opts.slider {
+            opts.track
+                .or(opts.grab_rect)
+                .map(|r| (r.y, (r.y + r.height).max(r.y + 1.0)))
+        } else {
+            None
+        };
+        let mut ruler_y_span = None;
         let mut layouts = Vec::new();
         if let Some(board_rects) = opts.lattice.filter(|l| !l.is_empty()) {
             layouts.push(make_layout(PadLayoutKind::Board, board_rects, None));
@@ -961,9 +1343,46 @@ impl PointerPadState {
         if let (Some(grab), true, Some(grab_rect)) = (opts.grab, opts.slider, opts.grab_rect)
             && let Some(ruler) = build_ruler_layout(&opts.areas, grab, grab_rect, opts.track, opts.piece)
         {
+            if let Some(first) = ruler.rects.first() {
+                let r_top = first.y;
+                let r_bottom = first.y + first.height;
+                ruler_y_span = Some((r_top, r_bottom));
+                // Ensure the slider's dashed area encloses both the track/handle and the puzzle image above it,
+                // even when opened from `s` or when a widget selector only matched the handle itself.
+                let base = opts.areas[0];
+                let along = opts.track.unwrap_or(grab_rect);
+                let left = base.x.min(along.x).min(grab_rect.x);
+                let right = (base.x + base.width)
+                    .max(along.x + along.width)
+                    .max(grab_rect.x + grab_rect.width);
+                let top = base.y.min(r_top).max(0.0);
+                let bottom = (base.y + base.height)
+                    .max(along.y + along.height)
+                    .max(grab_rect.y + grab_rect.height)
+                    .max(r_bottom)
+                    .min(vh);
+                opts.areas[0] = ViewportRect {
+                    x: left,
+                    y: top,
+                    width: (right - left).max(1.0),
+                    height: (bottom - top).max(1.0),
+                };
+            }
             layouts.push(ruler);
         }
-        layouts.push(build_grid_layout(&opts.areas));
+        let grid_layout = build_grid_layout(&opts.areas);
+        let fine_layout = build_fine_grid_layout(&opts.areas, grid_layout.rects.len());
+        if opts.click_order
+            && let Some(fine) = fine_layout
+        {
+            layouts.push(fine);
+            layouts.push(grid_layout);
+        } else {
+            layouts.push(grid_layout);
+            if let Some(fine) = fine_layout {
+                layouts.push(fine);
+            }
+        }
 
         let mut initial_steps = Vec::new();
         let (grabbed, holding) = if opts.grab.is_some() {
@@ -1002,11 +1421,18 @@ impl PointerPadState {
                 viewport: (vw, vh),
                 drag_on_first_jump: opts.drag,
                 grabbed,
+                slider: opts.slider,
+                track_y_bounds,
+                slider_piece_offset_x,
+                ruler_y_span,
                 cursor,
                 holding,
                 walked: cursor,
                 typed: String::new(),
+                typed_capital: false,
                 count: String::new(),
+                click_on_jump: opts.click_order && !opts.drag && opts.grab.is_none(),
+                clicks: Vec::new(),
                 layouts,
                 layout_index: 0,
                 banner: opts.banner,
@@ -1023,6 +1449,17 @@ impl PointerPadState {
     /// Currently displayed layout (`None` when `<Tab>` cycled to `"hide"`).
     pub fn shown_layout(&self) -> Option<&PadLayout> {
         self.layouts.get(self.layout_index)
+    }
+
+    /// Horizontal pixel delta from where the current hold started, when dragging a slider.
+    pub fn slider_delta_px(&self) -> Option<i32> {
+        if self.slider
+            && let Some(start) = self.holding
+        {
+            Some((self.cursor.0 - start.0).round() as i32)
+        } else {
+            None
+        }
     }
 
     /// Any release step needed if the pad is torn down while holding the mouse button (`ZendiaPointerContent:1254`).
@@ -1055,23 +1492,37 @@ impl PointerPadState {
         if !self.count.is_empty() {
             parts.push(self.count.clone());
         }
+        if let Some(dx) = self.slider_delta_px()
+            && dx != 0
+        {
+            parts.push(if dx > 0 { format!("+{dx}px") } else { format!("{dx}px") });
+        }
+        if !self.clicks.is_empty() && self.holding.is_none() {
+            let n = self.clicks.len();
+            parts.push(format!("{n} click{}", if n == 1 { "" } else { "s" }));
+        }
         let kind = self.shown_layout().map(|l| l.kind);
         if self.holding.is_some() {
             let head = match kind {
-                Some(PadLayoutKind::Ruler) => "slide · letter puts the piece on its line",
+                Some(PadLayoutKind::Ruler) => "slide · letter puts the piece on its line · Letter drops",
                 Some(PadLayoutKind::Board) => "holding · label puts it there",
                 _ => "holding · label drags there · Label drops",
             };
             parts.push(head.to_string());
             parts.push("hjkl HJKL ←→ move".to_string());
+            if self.slider {
+                parts.push("0 start".to_string());
+            }
             parts.push("Space/Enter drop".to_string());
             parts.push("Esc undo".to_string());
         } else {
             parts.push(
                 if self.drag_on_first_jump {
                     "drag · label takes hold there"
+                } else if self.click_on_jump {
+                    "click-order · label clicks · Label moves · . mode"
                 } else {
-                    "cursor · label moves · Label clicks"
+                    "cursor · label moves · Label clicks · . order"
                 }
                 .to_string(),
             );
@@ -1093,7 +1544,7 @@ impl PointerPadState {
         parts.join(" · ")
     }
 
-    /// Processes a single key token (`<Esc>`, `<BS>`, `<Tab>`, `<Space>`, `<CR>`, `<Left>`, `<C-r>`, `h`, `9`, `A`, …).
+    /// Processes a single key token (`<Esc>`, `<BS>`, `<Tab>`, `<Space>`, `<CR>`, `<Left>`, `<C-r>`, `h`, `9`, `A`, `.`, …).
     pub fn handle_token(&mut self, token: &str, staying: bool) -> PadStepOutcome {
         let mut out = PadStepOutcome {
             steps: Vec::new(),
@@ -1121,6 +1572,7 @@ impl PointerPadState {
             "<Esc>" => {
                 if !self.typed.is_empty() || !self.count.is_empty() {
                     self.typed.clear();
+                    self.typed_capital = false;
                     self.count.clear();
                 } else if let Some(start) = self.holding {
                     self.move_to(start, &mut out.steps);
@@ -1132,13 +1584,26 @@ impl PointerPadState {
             "<BS>" => {
                 if !self.typed.is_empty() {
                     self.typed.pop();
-                } else {
+                    if self.typed.is_empty() {
+                        self.typed_capital = false;
+                    }
+                } else if !self.count.is_empty() {
                     self.count.clear();
+                } else if self.holding.is_none() {
+                    self.clicks.pop();
                 }
             }
             "<Tab>" => {
                 self.typed.clear();
+                self.typed_capital = false;
                 self.layout_index = (self.layout_index + 1) % (self.layouts.len() + 1);
+            }
+            "." if self.holding.is_none() => {
+                self.typed.clear();
+                self.typed_capital = false;
+                self.count.clear();
+                self.drag_on_first_jump = false;
+                self.click_on_jump = !self.click_on_jump;
             }
             "<Space>" | "<CR>" => {
                 self.count.clear();
@@ -1169,7 +1634,11 @@ impl PointerPadState {
             _ => {
                 let mut chars = token.chars();
                 if let (Some(ch), None) = (chars.next(), chars.next()) {
-                    if ch.is_ascii_digit() && self.typed.is_empty() {
+                    if ch == '0' && self.count.is_empty() && self.typed.is_empty() {
+                        if let Some(start) = self.holding {
+                            self.move_to(start, &mut out.steps);
+                        }
+                    } else if ch.is_ascii_digit() && self.typed.is_empty() {
                         self.count = grow_count(&self.count, ch, 999);
                     } else {
                         self.label_key(ch, &mut out);
@@ -1190,26 +1659,33 @@ impl PointerPadState {
             self.layouts.len() - 1
         };
         let lower: String = ch.to_lowercase().collect();
+        let ch_capital = lower != ch.to_string();
         let typed = format!("{}{lower}", self.typed);
         self.count.clear();
         if let Some(item_idx) = self.layouts[active_idx].labels.iter().position(|l| *l == typed) {
+            let capital = self.typed_capital || ch_capital;
             self.typed.clear();
+            self.typed_capital = false;
             let at = self.layouts[active_idx].points[item_idx];
             let kind = self.layouts[active_idx].kind;
-            let capital = lower != ch.to_string();
             self.move_to(at, &mut out.steps);
             if self.holding.is_some() {
                 if capital || kind == PadLayoutKind::Board {
                     self.let_go(false, out);
                 }
-            } else if capital {
-                self.click(out);
-            } else if self.drag_on_first_jump {
+            } else if self.drag_on_first_jump && !capital {
                 self.drag_on_first_jump = false;
                 self.start_hold(&mut out.steps);
+            } else if self.click_on_jump {
+                if !capital {
+                    self.click(out);
+                }
+            } else if capital {
+                self.click(out);
             }
         } else if self.layouts[active_idx].labels.iter().any(|l| l.starts_with(&typed)) {
             self.typed = typed;
+            self.typed_capital |= ch_capital;
             if self.layout_index >= self.layouts.len() {
                 self.layout_index = active_idx;
             }
@@ -1219,7 +1695,14 @@ impl PointerPadState {
     fn move_to(&mut self, point: (f32, f32), steps: &mut Vec<PointerStep>) {
         let max_x = (self.viewport.0 - 1.0).max(0.0);
         let max_y = (self.viewport.1 - 1.0).max(0.0);
-        let to = (point.0.clamp(0.0, max_x), point.1.clamp(0.0, max_y));
+        let clamped_y = if self.holding.is_some()
+            && let Some((min_y, track_max_y)) = self.track_y_bounds
+        {
+            point.1.clamp(min_y.max(0.0), track_max_y.min(max_y))
+        } else {
+            point.1.clamp(0.0, max_y)
+        };
+        let to = (point.0.clamp(0.0, max_x), clamped_y);
         let from = self.cursor;
         self.cursor = to;
         if self.holding.is_some() {
@@ -1306,7 +1789,8 @@ impl PointerPadState {
 
     fn click(&mut self, out: &mut PadStepOutcome) {
         let at = self.cursor;
-        self.notice = Some("click".to_string());
+        self.clicks.push(at);
+        self.notice = Some(format!("click #{}", self.clicks.len()));
         out.flash_click = true;
         out.check_soon = true;
         out.steps.push(PointerStep {
@@ -1377,6 +1861,18 @@ fn build_grid_layout(areas: &[ViewportRect]) -> PadLayout {
     make_layout(PadLayoutKind::Grid, cells, None)
 }
 
+fn build_fine_grid_layout(areas: &[ViewportRect], coarse_count: usize) -> Option<PadLayout> {
+    let cells: Vec<ViewportRect> = areas
+        .iter()
+        .copied()
+        .flat_map(|a| grid_cells(a, FINE_CELL_SIZE))
+        .collect();
+    if cells.len() <= coarse_count || cells.len() > MAX_CELLS {
+        return None;
+    }
+    Some(make_layout(PadLayoutKind::FineGrid, cells, None))
+}
+
 fn build_ruler_layout(
     areas: &[ViewportRect],
     grab: (f32, f32),
@@ -1412,14 +1908,22 @@ fn build_ruler_layout(
     if stops.is_empty() {
         return None;
     }
-    let (mut top, bottom) = if let Some(p) = piece {
+    let (mut top, mut bottom) = if let Some(p) = piece {
         (p.y - RULER_LABEL_ROOM, p.y + p.height)
     } else {
         let b = handle.y.min(track.map_or(handle.y, |t| t.y)) - 2.0;
-        let t = track.map_or(area.y, |tr| b - tr.width * RULER_HEIGHT);
+        let t = b - along.width * RULER_HEIGHT;
         (t, b)
     };
-    top = top.max(area.y).max(0.0);
+    // Only clamp `top` to `area.y` when `area` actually reaches above the slider into the puzzle image.
+    // If `area` only wraps the slider handle/track, never crush the ruler down onto the handle.
+    if area.y < bottom - 40.0 {
+        top = top.max(area.y);
+    }
+    top = top.max(0.0);
+    if bottom <= top + 20.0 {
+        bottom = (top + 20.0).min(handle.y + handle.height);
+    }
     let height = (bottom - top).max(20.0);
     let rects: Vec<ViewportRect> = stops
         .iter()
@@ -1842,6 +2346,7 @@ mod tests {
             can_verify: true,
             watches_captcha: true,
             standalone: false,
+            click_order: false,
         });
         assert_eq!(init.len(), 2);
         assert_eq!(pad.shown_layout().unwrap().kind, PadLayoutKind::Ruler);
@@ -1849,14 +2354,282 @@ mod tests {
         assert!(pad.prompt_text().contains("slide · letter puts the piece on its line"));
 
         let start_x = pad.cursor.0;
+        let start_y = pad.cursor.1;
         pad.handle_token("9", true);
         let step1 = pad.handle_token("L", true);
         assert!(!step1.steps.is_empty());
         let step2 = pad.handle_token("l", true);
         assert!((pad.cursor.0 - (start_x + 92.0)).abs() < 0.01);
         assert!(!step2.steps.is_empty());
-        let drop = pad.handle_token("<Space>", true);
-        assert!(drop.finished, "slider cursor began holding so dropping ends it");
-        assert_eq!(drop.steps.last().unwrap().kind, PointerEventKind::Up);
+        assert!(pad.prompt_text().contains("+92px"));
+
+        // Vertical nudges while sliding stay clamped inside the slider track bounds.
+        pad.handle_token("9", true);
+        pad.handle_token("J", true);
+        assert!(pad.cursor.1 <= track.y + track.height);
+        assert!(pad.cursor.1 >= track.y);
+
+        // `0` snaps the slider handle back to its start without releasing.
+        let reset = pad.handle_token("0", true);
+        assert!(!reset.finished);
+        assert!(pad.holding.is_some());
+        assert!((pad.cursor.0 - start_x).abs() < 0.01);
+        assert!((pad.cursor.1 - start_y).abs() < 0.01);
+
+        // Capital ruler letter slides directly to that stop and drops.
+        let cap_drop = pad.handle_token("A", true);
+        assert!(cap_drop.finished, "capital ruler letter drops immediately");
+        assert_eq!(cap_drop.steps.last().unwrap().kind, PointerEventKind::Up);
+
+        // Even when `areas` only wraps the tiny slider handle (e.g. opened from `s` without outer `captcha_areas`),
+        // the ruler must extend upward across the puzzle image rather than crushing onto the handle.
+        let handle_only = ViewportRect {
+            x: 120.0,
+            y: 360.0,
+            width: 56.0,
+            height: 44.0,
+        };
+        let track_wide = ViewportRect {
+            x: 120.0,
+            y: 360.0,
+            width: 260.0,
+            height: 44.0,
+        };
+        let (pad_from_handle, _) = PointerPadState::new(PointerPadOptions {
+            areas: vec![handle_only],
+            viewport: (800.0, 600.0),
+            drag: true,
+            grab: Some(middle(handle_only)),
+            grab_rect: Some(handle_only),
+            slider: true,
+            track: Some(track_wide),
+            piece: None,
+            lattice: None,
+            banner: String::new(),
+            can_verify: true,
+            watches_captcha: true,
+            standalone: false,
+            click_order: false,
+        });
+        let ruler = pad_from_handle.shown_layout().unwrap();
+        assert_eq!(ruler.kind, PadLayoutKind::Ruler);
+        let first_line = ruler.rects[0];
+        assert!(
+            first_line.height >= 150.0,
+            "ruler lines should span the puzzle image above the slider, got height={}",
+            first_line.height
+        );
+        assert!(
+            first_line.y < handle_only.y - 100.0,
+            "ruler tags should sit at the top of the puzzle image, not on the handle"
+        );
+        assert!(pad_from_handle.areas[0].y <= first_line.y + 0.1);
+        assert!(pad_from_handle.areas[0].width >= track_wide.width - 0.1);
+    }
+
+    #[test]
+    fn click_order_picture_uses_fine_grid_records_ordered_pins_and_toggles_mode() {
+        let picture = ViewportRect {
+            x: 100.0,
+            y: 80.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        let (mut pad, _) = PointerPadState::new(PointerPadOptions {
+            areas: vec![picture],
+            viewport: (800.0, 600.0),
+            drag: false,
+            grab: None,
+            grab_rect: None,
+            slider: false,
+            track: None,
+            piece: None,
+            lattice: None,
+            banner: String::new(),
+            can_verify: true,
+            watches_captcha: true,
+            standalone: false,
+            click_order: true,
+        });
+        assert_eq!(pad.shown_layout().unwrap().kind, PadLayoutKind::FineGrid);
+        assert!(pad.click_on_jump);
+        assert!(pad.prompt_text().contains("click-order"));
+
+        let labels: Vec<String> = pad.shown_layout().unwrap().labels.clone();
+        let first = labels[0].clone();
+        let second = labels[1].clone();
+        assert_eq!(first.len(), 2);
+
+        // Lowercase 2-letter label clicks directly and records pin #1.
+        for ch in first.chars() {
+            let out = pad.handle_token(&ch.to_string(), true);
+            assert!(!out.finished);
+        }
+        assert_eq!(pad.clicks.len(), 1);
+        assert!(pad.prompt_text().contains("1 click"));
+
+        // Lowercase second label clicks directly and records pin #2.
+        for ch in second.chars() {
+            pad.handle_token(&ch.to_string(), true);
+        }
+        assert_eq!(pad.clicks.len(), 2);
+        assert!(pad.prompt_text().contains("2 clicks"));
+
+        // Capital first letter in click-order mode moves without clicking (for fine adjustment).
+        let third = labels[2].clone();
+        let mut chars = third.chars();
+        let first_upper = chars.next().unwrap().to_uppercase().to_string();
+        let second_lower = chars.next().unwrap().to_string();
+        pad.handle_token(&first_upper, true);
+        pad.handle_token(&second_lower, true);
+        assert_eq!(
+            pad.clicks.len(),
+            2,
+            "capital label moves without clicking in click-order mode"
+        );
+
+        // `<BS>` pops the last visual click marker when nothing is typed.
+        pad.handle_token("<BS>", true);
+        assert_eq!(pad.clicks.len(), 1);
+
+        // `.` toggles back to move-first mode, where capital first letter (`As`) clicks.
+        pad.handle_token(".", true);
+        assert!(!pad.click_on_jump);
+        pad.handle_token(&first_upper, true);
+        let clicked = pad.handle_token(&second_lower, true);
+        assert!(clicked.flash_click);
+        assert_eq!(pad.clicks.len(), 2);
+
+        // `<CR>` triggers verify and finishes the cursor.
+        let verify = pad.handle_token("<CR>", true);
+        assert!(verify.trigger_verify && verify.finished);
+    }
+
+    #[test]
+    fn captcha_watch_service_matches_fork_test_captcha_watch() {
+        let det = |signal: &str, name: Option<&str>, kind: Option<&str>, detail: Option<&str>| CaptchaWatchDetection {
+            signal: signal.to_string(),
+            name: name.map(str::to_string),
+            kind: kind.map(str::to_string),
+            challenge: false,
+            hidden: false,
+            detail: detail.map(str::to_string),
+        };
+        let state = |s: &str, name: Option<&str>, how: Option<&str>| CaptchaWatchStateReading {
+            state: s.to_string(),
+            name: name.map(str::to_string),
+            how: how.map(str::to_string),
+        };
+
+        // 1. One-line description matches `test_a_finding_is_told_in_one_line`.
+        assert_eq!(
+            describe_detections(&[
+                det(
+                    "frame",
+                    Some("reCAPTCHA"),
+                    Some("image"),
+                    Some("https://www.google.com/recaptcha/api2/bframe?hl=en"),
+                ),
+                det(
+                    "script",
+                    Some("reCAPTCHA"),
+                    Some("score"),
+                    Some("https://www.google.com/recaptcha/api2/api.js?render=6Lcx"),
+                ),
+                det("script", Some("Kasada"), Some("sensor"), Some("/ips.js")),
+                det("widget", None, None, Some("2")),
+                det("token", None, None, Some("cf-turnstile-response")),
+                det("honeypot", None, None, Some("website")),
+            ]),
+            "reCAPTCHA (image, score); Kasada (sensor); 2 page widgets; token field cf-turnstile-response; honeypot field website"
+        );
+        assert_eq!(
+            describe_detections(&[det("widget", None, None, Some("1"))]),
+            "1 page widget"
+        );
+        assert_eq!(describe_detections(&[]), "");
+
+        // 2. Signature is order-independent.
+        let pair = vec![
+            det("frame", Some("hCaptcha"), Some("image"), Some("a")),
+            det("token", None, None, Some("h-captcha-response")),
+        ];
+        let mut rev = pair.clone();
+        rev.reverse();
+        assert_eq!(signature_of_detections(&pair), signature_of_detections(&rev));
+        assert_ne!(signature_of_detections(&pair), signature_of_detections(&pair[1..]));
+
+        // 3. Per-tab dedupe, subframe merge, strongest state, live transitions, and delayed replacement.
+        let mut watch = CaptchaWatchService::default();
+        let tab = TabId(1);
+        let (r1, changed1) = watch.report(
+            tab,
+            "https://shop.example/checkout",
+            &[det("widget", None, None, Some("1"))],
+            &state("none", None, None),
+            0,
+            true,
+            1000,
+        );
+        assert!(changed1);
+        assert_eq!(r1.as_ref().unwrap().text, "1 page widget");
+
+        let (r2, changed2) = watch.report(
+            tab,
+            "https://verify.example/px",
+            &[det("frame", Some("HUMAN"), Some("behavioral"), Some("d"))],
+            &state("unchecked", Some("HUMAN"), Some("checkbox is not ticked")),
+            7,
+            false,
+            1100,
+        );
+        assert!(changed2);
+        let r2 = r2.unwrap();
+        assert_eq!(r2.url, "https://shop.example/checkout");
+        assert_eq!(r2.state, "unchecked");
+        assert!(r2.text.contains("HUMAN"));
+
+        // Subframe holding a state stays for REPLACE_WAIT_MS when dropped while top stays.
+        let (r_deferred, changed_def) = watch.drop_frame(tab, 7, 1500);
+        assert!(!changed_def);
+        assert_eq!(r_deferred.unwrap().state, "unchecked");
+
+        // After REPLACE_WAIT_MS expires, subframe is dropped.
+        let expired = watch.sweep_expired_drops(1500 + REPLACE_WAIT_MS);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(watch.last_for(tab).unwrap().state, "none");
+        assert!(!watch.last_for(tab).unwrap().text.contains("HUMAN"));
+
+        // Sanitization drops unknown signals and clamps `how` to 160 chars.
+        let tab2 = TabId(2);
+        let (san, _) = watch.report(
+            tab2,
+            "https://x",
+            &[
+                det("read-all-cookies", Some("nope"), None, None),
+                det("frame", Some("hCaptcha"), Some("image"), Some("d")),
+            ],
+            &state("pwned", None, Some(&"x".repeat(500))),
+            0,
+            true,
+            2000,
+        );
+        let san = san.unwrap();
+        assert_eq!(san.detections.len(), 1);
+        assert_eq!(san.state, "none");
+
+        let tab3 = TabId(3);
+        let (state_only, _) = watch.report(
+            tab3,
+            "https://x",
+            &[],
+            &state("solved", Some("Turnstile"), Some(&"y".repeat(500))),
+            0,
+            true,
+            2100,
+        );
+        let state_only = state_only.unwrap();
+        assert_eq!(state_only.state, "solved");
+        assert!(state_only.how.unwrap().chars().count() <= 160);
     }
 }

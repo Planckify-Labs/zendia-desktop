@@ -106,8 +106,50 @@ color = "purple"
 
 [[groups]]
 mode = "v"
+keys = "an"
+name = "next"
+color = "purple"
+
+[[groups]]
+mode = "v"
+keys = "al"
+name = "last"
+color = "purple"
+
+[[groups]]
+mode = "v"
 keys = "i"
 name = "inside"
+color = "purple"
+
+[[groups]]
+mode = "v"
+keys = "in"
+name = "next"
+color = "purple"
+
+[[groups]]
+mode = "v"
+keys = "il"
+name = "last"
+color = "purple"
+
+[[groups]]
+mode = "v"
+keys = "g"
+name = "goto"
+color = "purple"
+
+[[groups]]
+mode = "v"
+keys = "g["
+name = "left edge"
+color = "purple"
+
+[[groups]]
+mode = "v"
+keys = "g]"
+name = "right edge"
 color = "purple"
 
 [[groups]]
@@ -1250,17 +1292,1555 @@ keys = "?"
 command = "which_key.show_all"
 description = "Keymaps (which-key)"
 
+# Visual text objects: around (`a`)
 [[bindings]]
 mode = "v"
-keys = ["a(", "a)", "ab", "a[", "a]", "a{", "a}", "aB", "a<lt>", "a>", "a\"", "a'", "a`", "aq", "aw", "aW", "ae", "ad", "as", "ap", "at", "ag", "a_", "a.", "a,", "a;", "a:", "a+", "a-", "a=", "a~", "a<Bar>", "a/", "a<Bslash>", "a&", "a$", "a#"]
+keys = ["a(", "a)"]
 command = "visual.object"
-description = "Select Around Text Object"
+description = "Around Parentheses (...)"
 
 [[bindings]]
 mode = "v"
-keys = ["i(", "i)", "ib", "i[", "i]", "i{", "i}", "iB", "i<lt>", "i>", "i\"", "i'", "i`", "iq", "iw", "iW", "ie", "id", "is", "ip", "it", "ig", "i_", "i.", "i,", "i;", "i:", "i+", "i-", "i=", "i~", "i<Bar>", "i/", "i<Bslash>", "i&", "i$", "i#"]
+keys = "ab"
 command = "visual.object"
-description = "Select Inside Text Object"
+description = "Around Any Bracket ()[]{}"
+
+[[bindings]]
+mode = "v"
+keys = ["a[", "a]"]
+command = "visual.object"
+description = "Around Square Brackets [...]"
+
+[[bindings]]
+mode = "v"
+keys = ["a{", "a}", "aB"]
+command = "visual.object"
+description = "Around Curly Braces {...}"
+
+[[bindings]]
+mode = "v"
+keys = ["a<lt>", "a>"]
+command = "visual.object"
+description = "Around Angle Brackets <...>"
+
+[[bindings]]
+mode = "v"
+keys = "a\""
+command = "visual.object"
+description = "Around Double Quotes (\"...\")"
+
+[[bindings]]
+mode = "v"
+keys = "a'"
+command = "visual.object"
+description = "Around Single Quotes ('...')"
+
+[[bindings]]
+mode = "v"
+keys = "a`"
+command = "visual.object"
+description = "Around Backticks (`...`)"
+
+[[bindings]]
+mode = "v"
+keys = "aq"
+command = "visual.object"
+description = "Around Any Quote"
+
+[[bindings]]
+mode = "v"
+keys = "aw"
+command = "visual.object"
+description = "Around Word"
+
+[[bindings]]
+mode = "v"
+keys = "aW"
+command = "visual.object"
+description = "Around WORD (Non-Blank)"
+
+[[bindings]]
+mode = "v"
+keys = "ae"
+command = "visual.object"
+description = "Around Subword (camel/snake)"
+
+[[bindings]]
+mode = "v"
+keys = "ad"
+command = "visual.object"
+description = "Around Number (Digits)"
+
+[[bindings]]
+mode = "v"
+keys = "as"
+command = "visual.object"
+description = "Around Sentence"
+
+[[bindings]]
+mode = "v"
+keys = "ap"
+command = "visual.object"
+description = "Around Paragraph"
+
+[[bindings]]
+mode = "v"
+keys = "at"
+command = "visual.object"
+description = "Around HTML Element"
+
+[[bindings]]
+mode = "v"
+keys = "ag"
+command = "visual.object"
+description = "Whole Page"
+
+[[bindings]]
+mode = "v"
+keys = "a_"
+command = "visual.object"
+description = "Around _..._ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a."
+command = "visual.object"
+description = "Around .…. Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a,"
+command = "visual.object"
+description = "Around ,..., Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a;"
+command = "visual.object"
+description = "Around ;...; Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a:"
+command = "visual.object"
+description = "Around :...: Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a+"
+command = "visual.object"
+description = "Around +...+ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a-"
+command = "visual.object"
+description = "Around -...- Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a="
+command = "visual.object"
+description = "Around =...= Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a~"
+command = "visual.object"
+description = "Around ~...~ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a<Bar>"
+command = "visual.object"
+description = "Around |...| Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a/"
+command = "visual.object"
+description = "Around /.../ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a<Bslash>"
+command = "visual.object"
+description = "Around \\...\\ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a&"
+command = "visual.object"
+description = "Around &...& Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a$"
+command = "visual.object"
+description = "Around $...$ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "a#"
+command = "visual.object"
+description = "Around #...# Segment"
+
+# Visual text objects: inside (`i`)
+[[bindings]]
+mode = "v"
+keys = ["i(", "i)"]
+command = "visual.object"
+description = "Inside Parentheses (...)"
+
+[[bindings]]
+mode = "v"
+keys = "ib"
+command = "visual.object"
+description = "Inside Any Bracket ()[]{}"
+
+[[bindings]]
+mode = "v"
+keys = ["i[", "i]"]
+command = "visual.object"
+description = "Inside Square Brackets [...]"
+
+[[bindings]]
+mode = "v"
+keys = ["i{", "i}", "iB"]
+command = "visual.object"
+description = "Inside Curly Braces {...}"
+
+[[bindings]]
+mode = "v"
+keys = ["i<lt>", "i>"]
+command = "visual.object"
+description = "Inside Angle Brackets <...>"
+
+[[bindings]]
+mode = "v"
+keys = "i\""
+command = "visual.object"
+description = "Inside Double Quotes (\"...\")"
+
+[[bindings]]
+mode = "v"
+keys = "i'"
+command = "visual.object"
+description = "Inside Single Quotes ('...')"
+
+[[bindings]]
+mode = "v"
+keys = "i`"
+command = "visual.object"
+description = "Inside Backticks (`...`)"
+
+[[bindings]]
+mode = "v"
+keys = "iq"
+command = "visual.object"
+description = "Inside Any Quote"
+
+[[bindings]]
+mode = "v"
+keys = "iw"
+command = "visual.object"
+description = "Inside Word"
+
+[[bindings]]
+mode = "v"
+keys = "iW"
+command = "visual.object"
+description = "Inside WORD (Non-Blank)"
+
+[[bindings]]
+mode = "v"
+keys = "ie"
+command = "visual.object"
+description = "Inside Subword (camel/snake)"
+
+[[bindings]]
+mode = "v"
+keys = "id"
+command = "visual.object"
+description = "Inside Number (Digits)"
+
+[[bindings]]
+mode = "v"
+keys = "is"
+command = "visual.object"
+description = "Inside Sentence"
+
+[[bindings]]
+mode = "v"
+keys = "ip"
+command = "visual.object"
+description = "Inside Paragraph"
+
+[[bindings]]
+mode = "v"
+keys = "it"
+command = "visual.object"
+description = "Inside HTML Element"
+
+[[bindings]]
+mode = "v"
+keys = "ig"
+command = "visual.object"
+description = "Whole Page (Trimmed)"
+
+[[bindings]]
+mode = "v"
+keys = "i_"
+command = "visual.object"
+description = "Inside _..._ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i."
+command = "visual.object"
+description = "Inside .…. Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i,"
+command = "visual.object"
+description = "Inside ,..., Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i;"
+command = "visual.object"
+description = "Inside ;...; Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i:"
+command = "visual.object"
+description = "Inside :...: Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i+"
+command = "visual.object"
+description = "Inside +...+ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i-"
+command = "visual.object"
+description = "Inside -...- Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i="
+command = "visual.object"
+description = "Inside =...= Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i~"
+command = "visual.object"
+description = "Inside ~...~ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i<Bar>"
+command = "visual.object"
+description = "Inside |...| Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i/"
+command = "visual.object"
+description = "Inside /.../ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i<Bslash>"
+command = "visual.object"
+description = "Inside \\...\\ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i&"
+command = "visual.object"
+description = "Inside &...& Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i$"
+command = "visual.object"
+description = "Inside $...$ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "i#"
+command = "visual.object"
+description = "Inside #...# Segment"
+
+# Visual text objects: around next (`an`, mini.ai)
+[[bindings]]
+mode = "v"
+keys = ["an(", "an)"]
+command = "visual.object"
+description = "Around Next Parentheses (...)"
+
+[[bindings]]
+mode = "v"
+keys = "anb"
+command = "visual.object"
+description = "Around Next Any Bracket ()[]{}"
+
+[[bindings]]
+mode = "v"
+keys = ["an[", "an]"]
+command = "visual.object"
+description = "Around Next Square Brackets [...]"
+
+[[bindings]]
+mode = "v"
+keys = ["an{", "an}", "anB"]
+command = "visual.object"
+description = "Around Next Curly Braces {...}"
+
+[[bindings]]
+mode = "v"
+keys = ["an<lt>", "an>"]
+command = "visual.object"
+description = "Around Next Angle Brackets <...>"
+
+[[bindings]]
+mode = "v"
+keys = "an\""
+command = "visual.object"
+description = "Around Next Double Quotes (\"...\")"
+
+[[bindings]]
+mode = "v"
+keys = "an'"
+command = "visual.object"
+description = "Around Next Single Quotes ('...')"
+
+[[bindings]]
+mode = "v"
+keys = "an`"
+command = "visual.object"
+description = "Around Next Backticks (`...`)"
+
+[[bindings]]
+mode = "v"
+keys = "anq"
+command = "visual.object"
+description = "Around Next Any Quote"
+
+[[bindings]]
+mode = "v"
+keys = "anw"
+command = "visual.object"
+description = "Around Next Word"
+
+[[bindings]]
+mode = "v"
+keys = "anW"
+command = "visual.object"
+description = "Around Next WORD (Non-Blank)"
+
+[[bindings]]
+mode = "v"
+keys = "ane"
+command = "visual.object"
+description = "Around Next Subword (camel/snake)"
+
+[[bindings]]
+mode = "v"
+keys = "and"
+command = "visual.object"
+description = "Around Next Number (Digits)"
+
+[[bindings]]
+mode = "v"
+keys = "ans"
+command = "visual.object"
+description = "Around Next Sentence"
+
+[[bindings]]
+mode = "v"
+keys = "anp"
+command = "visual.object"
+description = "Around Next Paragraph"
+
+[[bindings]]
+mode = "v"
+keys = "ant"
+command = "visual.object"
+description = "Around Next HTML Element"
+
+[[bindings]]
+mode = "v"
+keys = "ang"
+command = "visual.object"
+description = "Whole Page"
+
+[[bindings]]
+mode = "v"
+keys = "an_"
+command = "visual.object"
+description = "Around Next _..._ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an."
+command = "visual.object"
+description = "Around Next .…. Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an,"
+command = "visual.object"
+description = "Around Next ,..., Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an;"
+command = "visual.object"
+description = "Around Next ;...; Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an:"
+command = "visual.object"
+description = "Around Next :...: Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an+"
+command = "visual.object"
+description = "Around Next +...+ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an-"
+command = "visual.object"
+description = "Around Next -...- Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an="
+command = "visual.object"
+description = "Around Next =...= Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an~"
+command = "visual.object"
+description = "Around Next ~...~ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an<Bar>"
+command = "visual.object"
+description = "Around Next |...| Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an/"
+command = "visual.object"
+description = "Around Next /.../ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an<Bslash>"
+command = "visual.object"
+description = "Around Next \\...\\ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an&"
+command = "visual.object"
+description = "Around Next &...& Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an$"
+command = "visual.object"
+description = "Around Next $...$ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "an#"
+command = "visual.object"
+description = "Around Next #...# Segment"
+
+
+# Visual text objects: around last (`al`, mini.ai)
+[[bindings]]
+mode = "v"
+keys = ["al(", "al)"]
+command = "visual.object"
+description = "Around Last Parentheses (...)"
+
+[[bindings]]
+mode = "v"
+keys = "alb"
+command = "visual.object"
+description = "Around Last Any Bracket ()[]{}"
+
+[[bindings]]
+mode = "v"
+keys = ["al[", "al]"]
+command = "visual.object"
+description = "Around Last Square Brackets [...]"
+
+[[bindings]]
+mode = "v"
+keys = ["al{", "al}", "alB"]
+command = "visual.object"
+description = "Around Last Curly Braces {...}"
+
+[[bindings]]
+mode = "v"
+keys = ["al<lt>", "al>"]
+command = "visual.object"
+description = "Around Last Angle Brackets <...>"
+
+[[bindings]]
+mode = "v"
+keys = "al\""
+command = "visual.object"
+description = "Around Last Double Quotes (\"...\")"
+
+[[bindings]]
+mode = "v"
+keys = "al'"
+command = "visual.object"
+description = "Around Last Single Quotes ('...')"
+
+[[bindings]]
+mode = "v"
+keys = "al`"
+command = "visual.object"
+description = "Around Last Backticks (`...`)"
+
+[[bindings]]
+mode = "v"
+keys = "alq"
+command = "visual.object"
+description = "Around Last Any Quote"
+
+[[bindings]]
+mode = "v"
+keys = "alw"
+command = "visual.object"
+description = "Around Last Word"
+
+[[bindings]]
+mode = "v"
+keys = "alW"
+command = "visual.object"
+description = "Around Last WORD (Non-Blank)"
+
+[[bindings]]
+mode = "v"
+keys = "ale"
+command = "visual.object"
+description = "Around Last Subword (camel/snake)"
+
+[[bindings]]
+mode = "v"
+keys = "ald"
+command = "visual.object"
+description = "Around Last Number (Digits)"
+
+[[bindings]]
+mode = "v"
+keys = "als"
+command = "visual.object"
+description = "Around Last Sentence"
+
+[[bindings]]
+mode = "v"
+keys = "alp"
+command = "visual.object"
+description = "Around Last Paragraph"
+
+[[bindings]]
+mode = "v"
+keys = "alt"
+command = "visual.object"
+description = "Around Last HTML Element"
+
+[[bindings]]
+mode = "v"
+keys = "alg"
+command = "visual.object"
+description = "Whole Page"
+
+[[bindings]]
+mode = "v"
+keys = "al_"
+command = "visual.object"
+description = "Around Last _..._ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al."
+command = "visual.object"
+description = "Around Last .…. Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al,"
+command = "visual.object"
+description = "Around Last ,..., Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al;"
+command = "visual.object"
+description = "Around Last ;...; Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al:"
+command = "visual.object"
+description = "Around Last :...: Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al+"
+command = "visual.object"
+description = "Around Last +...+ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al-"
+command = "visual.object"
+description = "Around Last -...- Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al="
+command = "visual.object"
+description = "Around Last =...= Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al~"
+command = "visual.object"
+description = "Around Last ~...~ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al<Bar>"
+command = "visual.object"
+description = "Around Last |...| Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al/"
+command = "visual.object"
+description = "Around Last /.../ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al<Bslash>"
+command = "visual.object"
+description = "Around Last \\...\\ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al&"
+command = "visual.object"
+description = "Around Last &...& Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al$"
+command = "visual.object"
+description = "Around Last $...$ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "al#"
+command = "visual.object"
+description = "Around Last #...# Segment"
+
+
+# Visual text objects: inside next (`in`, mini.ai)
+[[bindings]]
+mode = "v"
+keys = ["in(", "in)"]
+command = "visual.object"
+description = "Inside Next Parentheses (...)"
+
+[[bindings]]
+mode = "v"
+keys = "inb"
+command = "visual.object"
+description = "Inside Next Any Bracket ()[]{}"
+
+[[bindings]]
+mode = "v"
+keys = ["in[", "in]"]
+command = "visual.object"
+description = "Inside Next Square Brackets [...]"
+
+[[bindings]]
+mode = "v"
+keys = ["in{", "in}", "inB"]
+command = "visual.object"
+description = "Inside Next Curly Braces {...}"
+
+[[bindings]]
+mode = "v"
+keys = ["in<lt>", "in>"]
+command = "visual.object"
+description = "Inside Next Angle Brackets <...>"
+
+[[bindings]]
+mode = "v"
+keys = "in\""
+command = "visual.object"
+description = "Inside Next Double Quotes (\"...\")"
+
+[[bindings]]
+mode = "v"
+keys = "in'"
+command = "visual.object"
+description = "Inside Next Single Quotes ('...')"
+
+[[bindings]]
+mode = "v"
+keys = "in`"
+command = "visual.object"
+description = "Inside Next Backticks (`...`)"
+
+[[bindings]]
+mode = "v"
+keys = "inq"
+command = "visual.object"
+description = "Inside Next Any Quote"
+
+[[bindings]]
+mode = "v"
+keys = "inw"
+command = "visual.object"
+description = "Inside Next Word"
+
+[[bindings]]
+mode = "v"
+keys = "inW"
+command = "visual.object"
+description = "Inside Next WORD (Non-Blank)"
+
+[[bindings]]
+mode = "v"
+keys = "ine"
+command = "visual.object"
+description = "Inside Next Subword (camel/snake)"
+
+[[bindings]]
+mode = "v"
+keys = "ind"
+command = "visual.object"
+description = "Inside Next Number (Digits)"
+
+[[bindings]]
+mode = "v"
+keys = "ins"
+command = "visual.object"
+description = "Inside Next Sentence"
+
+[[bindings]]
+mode = "v"
+keys = "inp"
+command = "visual.object"
+description = "Inside Next Paragraph"
+
+[[bindings]]
+mode = "v"
+keys = "int"
+command = "visual.object"
+description = "Inside Next HTML Element"
+
+[[bindings]]
+mode = "v"
+keys = "ing"
+command = "visual.object"
+description = "Inside Next Whole Page"
+
+[[bindings]]
+mode = "v"
+keys = "in_"
+command = "visual.object"
+description = "Inside Next _..._ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in."
+command = "visual.object"
+description = "Inside Next .…. Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in,"
+command = "visual.object"
+description = "Inside Next ,..., Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in;"
+command = "visual.object"
+description = "Inside Next ;...; Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in:"
+command = "visual.object"
+description = "Inside Next :...: Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in+"
+command = "visual.object"
+description = "Inside Next +...+ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in-"
+command = "visual.object"
+description = "Inside Next -...- Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in="
+command = "visual.object"
+description = "Inside Next =...= Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in~"
+command = "visual.object"
+description = "Inside Next ~...~ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in<Bar>"
+command = "visual.object"
+description = "Inside Next |...| Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in/"
+command = "visual.object"
+description = "Inside Next /.../ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in<Bslash>"
+command = "visual.object"
+description = "Inside Next \\...\\ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in&"
+command = "visual.object"
+description = "Inside Next &...& Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in$"
+command = "visual.object"
+description = "Inside Next $...$ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "in#"
+command = "visual.object"
+description = "Inside Next #...# Segment"
+
+
+# Visual text objects: inside last (`il`, mini.ai)
+[[bindings]]
+mode = "v"
+keys = ["il(", "il)"]
+command = "visual.object"
+description = "Inside Last Parentheses (...)"
+
+[[bindings]]
+mode = "v"
+keys = "ilb"
+command = "visual.object"
+description = "Inside Last Any Bracket ()[]{}"
+
+[[bindings]]
+mode = "v"
+keys = ["il[", "il]"]
+command = "visual.object"
+description = "Inside Last Square Brackets [...]"
+
+[[bindings]]
+mode = "v"
+keys = ["il{", "il}", "ilB"]
+command = "visual.object"
+description = "Inside Last Curly Braces {...}"
+
+[[bindings]]
+mode = "v"
+keys = ["il<lt>", "il>"]
+command = "visual.object"
+description = "Inside Last Angle Brackets <...>"
+
+[[bindings]]
+mode = "v"
+keys = "il\""
+command = "visual.object"
+description = "Inside Last Double Quotes (\"...\")"
+
+[[bindings]]
+mode = "v"
+keys = "il'"
+command = "visual.object"
+description = "Inside Last Single Quotes ('...')"
+
+[[bindings]]
+mode = "v"
+keys = "il`"
+command = "visual.object"
+description = "Inside Last Backticks (`...`)"
+
+[[bindings]]
+mode = "v"
+keys = "ilq"
+command = "visual.object"
+description = "Inside Last Any Quote"
+
+[[bindings]]
+mode = "v"
+keys = "ilw"
+command = "visual.object"
+description = "Inside Last Word"
+
+[[bindings]]
+mode = "v"
+keys = "ilW"
+command = "visual.object"
+description = "Inside Last WORD (Non-Blank)"
+
+[[bindings]]
+mode = "v"
+keys = "ile"
+command = "visual.object"
+description = "Inside Last Subword (camel/snake)"
+
+[[bindings]]
+mode = "v"
+keys = "ild"
+command = "visual.object"
+description = "Inside Last Number (Digits)"
+
+[[bindings]]
+mode = "v"
+keys = "ils"
+command = "visual.object"
+description = "Inside Last Sentence"
+
+[[bindings]]
+mode = "v"
+keys = "ilp"
+command = "visual.object"
+description = "Inside Last Paragraph"
+
+[[bindings]]
+mode = "v"
+keys = "ilt"
+command = "visual.object"
+description = "Inside Last HTML Element"
+
+[[bindings]]
+mode = "v"
+keys = "ilg"
+command = "visual.object"
+description = "Inside Last Whole Page"
+
+[[bindings]]
+mode = "v"
+keys = "il_"
+command = "visual.object"
+description = "Inside Last _..._ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il."
+command = "visual.object"
+description = "Inside Last .…. Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il,"
+command = "visual.object"
+description = "Inside Last ,..., Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il;"
+command = "visual.object"
+description = "Inside Last ;...; Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il:"
+command = "visual.object"
+description = "Inside Last :...: Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il+"
+command = "visual.object"
+description = "Inside Last +...+ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il-"
+command = "visual.object"
+description = "Inside Last -...- Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il="
+command = "visual.object"
+description = "Inside Last =...= Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il~"
+command = "visual.object"
+description = "Inside Last ~...~ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il<Bar>"
+command = "visual.object"
+description = "Inside Last |...| Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il/"
+command = "visual.object"
+description = "Inside Last /.../ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il<Bslash>"
+command = "visual.object"
+description = "Inside Last \\...\\ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il&"
+command = "visual.object"
+description = "Inside Last &...& Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il$"
+command = "visual.object"
+description = "Inside Last $...$ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "il#"
+command = "visual.object"
+description = "Inside Last #...# Segment"
+
+
+# Visual text objects: left edge (`g[`, mini.ai)
+[[bindings]]
+mode = "v"
+keys = ["g[(", "g[)"]
+command = "visual.object"
+description = "Left Edge of Parentheses (...)"
+
+[[bindings]]
+mode = "v"
+keys = "g[b"
+command = "visual.object"
+description = "Left Edge of Any Bracket ()[]{}"
+
+[[bindings]]
+mode = "v"
+keys = ["g[[", "g[]"]
+command = "visual.object"
+description = "Left Edge of Square Brackets [...]"
+
+[[bindings]]
+mode = "v"
+keys = ["g[{", "g[}", "g[B"]
+command = "visual.object"
+description = "Left Edge of Curly Braces {...}"
+
+[[bindings]]
+mode = "v"
+keys = ["g[<lt>", "g[>"]
+command = "visual.object"
+description = "Left Edge of Angle Brackets <...>"
+
+[[bindings]]
+mode = "v"
+keys = "g[\""
+command = "visual.object"
+description = "Left Edge of Double Quotes (\"...\")"
+
+[[bindings]]
+mode = "v"
+keys = "g['"
+command = "visual.object"
+description = "Left Edge of Single Quotes ('...')"
+
+[[bindings]]
+mode = "v"
+keys = "g[`"
+command = "visual.object"
+description = "Left Edge of Backticks (`...`)"
+
+[[bindings]]
+mode = "v"
+keys = "g[q"
+command = "visual.object"
+description = "Left Edge of Any Quote"
+
+[[bindings]]
+mode = "v"
+keys = "g[w"
+command = "visual.object"
+description = "Left Edge of Word"
+
+[[bindings]]
+mode = "v"
+keys = "g[W"
+command = "visual.object"
+description = "Left Edge of WORD (Non-Blank)"
+
+[[bindings]]
+mode = "v"
+keys = "g[e"
+command = "visual.object"
+description = "Left Edge of Subword (camel/snake)"
+
+[[bindings]]
+mode = "v"
+keys = "g[d"
+command = "visual.object"
+description = "Left Edge of Number (Digits)"
+
+[[bindings]]
+mode = "v"
+keys = "g[s"
+command = "visual.object"
+description = "Left Edge of Sentence"
+
+[[bindings]]
+mode = "v"
+keys = "g[p"
+command = "visual.object"
+description = "Left Edge of Paragraph"
+
+[[bindings]]
+mode = "v"
+keys = "g[t"
+command = "visual.object"
+description = "Left Edge of HTML Element"
+
+[[bindings]]
+mode = "v"
+keys = "g[g"
+command = "visual.object"
+description = "Left Edge of Whole Page"
+
+[[bindings]]
+mode = "v"
+keys = "g[_"
+command = "visual.object"
+description = "Left Edge of _..._ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[."
+command = "visual.object"
+description = "Left Edge of .…. Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[,"
+command = "visual.object"
+description = "Left Edge of ,..., Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[;"
+command = "visual.object"
+description = "Left Edge of ;...; Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[:"
+command = "visual.object"
+description = "Left Edge of :...: Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[+"
+command = "visual.object"
+description = "Left Edge of +...+ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[-"
+command = "visual.object"
+description = "Left Edge of -...- Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[="
+command = "visual.object"
+description = "Left Edge of =...= Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[~"
+command = "visual.object"
+description = "Left Edge of ~...~ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[<Bar>"
+command = "visual.object"
+description = "Left Edge of |...| Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[/"
+command = "visual.object"
+description = "Left Edge of /.../ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[<Bslash>"
+command = "visual.object"
+description = "Left Edge of \\...\\ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[&"
+command = "visual.object"
+description = "Left Edge of &...& Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[$"
+command = "visual.object"
+description = "Left Edge of $...$ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g[#"
+command = "visual.object"
+description = "Left Edge of #...# Segment"
+
+
+# Visual text objects: right edge (`g]`, mini.ai)
+[[bindings]]
+mode = "v"
+keys = ["g](", "g])"]
+command = "visual.object"
+description = "Right Edge of Parentheses (...)"
+
+[[bindings]]
+mode = "v"
+keys = "g]b"
+command = "visual.object"
+description = "Right Edge of Any Bracket ()[]{}"
+
+[[bindings]]
+mode = "v"
+keys = ["g][", "g]]"]
+command = "visual.object"
+description = "Right Edge of Square Brackets [...]"
+
+[[bindings]]
+mode = "v"
+keys = ["g]{", "g]}", "g]B"]
+command = "visual.object"
+description = "Right Edge of Curly Braces {...}"
+
+[[bindings]]
+mode = "v"
+keys = ["g]<lt>", "g]>"]
+command = "visual.object"
+description = "Right Edge of Angle Brackets <...>"
+
+[[bindings]]
+mode = "v"
+keys = "g]\""
+command = "visual.object"
+description = "Right Edge of Double Quotes (\"...\")"
+
+[[bindings]]
+mode = "v"
+keys = "g]'"
+command = "visual.object"
+description = "Right Edge of Single Quotes ('...')"
+
+[[bindings]]
+mode = "v"
+keys = "g]`"
+command = "visual.object"
+description = "Right Edge of Backticks (`...`)"
+
+[[bindings]]
+mode = "v"
+keys = "g]q"
+command = "visual.object"
+description = "Right Edge of Any Quote"
+
+[[bindings]]
+mode = "v"
+keys = "g]w"
+command = "visual.object"
+description = "Right Edge of Word"
+
+[[bindings]]
+mode = "v"
+keys = "g]W"
+command = "visual.object"
+description = "Right Edge of WORD (Non-Blank)"
+
+[[bindings]]
+mode = "v"
+keys = "g]e"
+command = "visual.object"
+description = "Right Edge of Subword (camel/snake)"
+
+[[bindings]]
+mode = "v"
+keys = "g]d"
+command = "visual.object"
+description = "Right Edge of Number (Digits)"
+
+[[bindings]]
+mode = "v"
+keys = "g]s"
+command = "visual.object"
+description = "Right Edge of Sentence"
+
+[[bindings]]
+mode = "v"
+keys = "g]p"
+command = "visual.object"
+description = "Right Edge of Paragraph"
+
+[[bindings]]
+mode = "v"
+keys = "g]t"
+command = "visual.object"
+description = "Right Edge of HTML Element"
+
+[[bindings]]
+mode = "v"
+keys = "g]g"
+command = "visual.object"
+description = "Right Edge of Whole Page"
+
+[[bindings]]
+mode = "v"
+keys = "g]_"
+command = "visual.object"
+description = "Right Edge of _..._ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]."
+command = "visual.object"
+description = "Right Edge of .…. Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g],"
+command = "visual.object"
+description = "Right Edge of ,..., Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g];"
+command = "visual.object"
+description = "Right Edge of ;...; Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]:"
+command = "visual.object"
+description = "Right Edge of :...: Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]+"
+command = "visual.object"
+description = "Right Edge of +...+ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]-"
+command = "visual.object"
+description = "Right Edge of -...- Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]="
+command = "visual.object"
+description = "Right Edge of =...= Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]~"
+command = "visual.object"
+description = "Right Edge of ~...~ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]<Bar>"
+command = "visual.object"
+description = "Right Edge of |...| Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]/"
+command = "visual.object"
+description = "Right Edge of /.../ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]<Bslash>"
+command = "visual.object"
+description = "Right Edge of \\...\\ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]&"
+command = "visual.object"
+description = "Right Edge of &...& Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]$"
+command = "visual.object"
+description = "Right Edge of $...$ Segment"
+
+[[bindings]]
+mode = "v"
+keys = "g]#"
+command = "visual.object"
+description = "Right Edge of #...# Segment"
+
 
 [[bindings]]
 mode = "v"

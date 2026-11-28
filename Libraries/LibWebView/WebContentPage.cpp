@@ -1047,12 +1047,75 @@ void WebContentPage::did_find_in_page(size_t current_match_index, Optional<size_
     }
 }
 
+namespace {
+
+struct PendingEmbedderFrameEvalRelay {
+    NonnullRefPtr<WebContentPage> caller;
+    u64 caller_frame_request_id { 0 };
+    RefPtr<Core::Timer> timeout;
+};
+
+HashMap<u64, PendingEmbedderFrameEvalRelay>& pending_embedder_frame_eval_relays()
+{
+    static HashMap<u64, PendingEmbedderFrameEvalRelay> s_relays;
+    return s_relays;
+}
+
+}
+
 void WebContentPage::did_reply_embedder_message(u64 request_id, bool ok, String result_json)
 {
-    if (displays_tab() || request_id == 0) {
+    if (auto relay = pending_embedder_frame_eval_relays().take(request_id); relay.has_value()) {
+        if (relay->timeout)
+            relay->timeout->stop();
+        if (relay->caller->routed_connection())
+            relay->caller->async_did_reply_embedder_frame_eval(relay->caller_frame_request_id, ok, move(result_json));
+        return;
+    }
+    if (displays_tab() || (request_id == 0 && m_traversable && m_traversable->view().has_value())) {
         if (view().on_embedder_reply)
             view().on_embedder_reply(request_id, ok, result_json);
     }
+}
+
+void WebContentPage::did_request_embedder_frame_eval(u64 frame_request_id, Web::HTML::CrossProcessId target_navigable_id, String world, String script)
+{
+    if (!m_traversable) {
+        async_did_reply_embedder_frame_eval(frame_request_id, false, String {});
+        return;
+    }
+
+    auto navigable = m_traversable->find(target_navigable_id);
+    if (!navigable.has_value()) {
+        async_did_reply_embedder_frame_eval(frame_request_id, false, String {});
+        return;
+    }
+
+    RefPtr<WebContentPage> host;
+    m_traversable->for_each_hosting_page([&](WebContentPage& page) {
+        if (!host && m_traversable->hosts(*navigable, page) && page.hosts_active_document_of(*navigable))
+            host = page;
+    });
+    if (!host || !host->routed_connection()) {
+        async_did_reply_embedder_frame_eval(frame_request_id, false, String {});
+        return;
+    }
+
+    static u64 s_next_relay_id = 1;
+    auto relay_id = 0x8000'0000'0000'0000ULL | s_next_relay_id++;
+    auto timeout = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(1500), [relay_id] {
+        if (auto relay = pending_embedder_frame_eval_relays().take(relay_id); relay.has_value()) {
+            if (relay->caller->routed_connection())
+                relay->caller->async_did_reply_embedder_frame_eval(relay->caller_frame_request_id, false, String {});
+        }
+    });
+    timeout->start();
+    pending_embedder_frame_eval_relays().set(relay_id, PendingEmbedderFrameEvalRelay {
+        .caller = *this,
+        .caller_frame_request_id = frame_request_id,
+        .timeout = move(timeout),
+    });
+    host->async_deliver_embedder_frame_message(navigable->active_document().id(), relay_id, move(world), move(script));
 }
 
 void WebContentPage::did_request_certificate_warning(URL::URL url, Web::HTML::CrossProcessId document_state_id)
