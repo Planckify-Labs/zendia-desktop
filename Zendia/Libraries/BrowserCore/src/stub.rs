@@ -445,6 +445,36 @@ impl StubBackend {
         self.bus.publish(Event::ExtensionPromptChanged { prompt });
     }
 
+    /// Gives the open install prompt its extension icon, if `token` still names it.
+    pub fn feed_extension_prompt_icon(&self, token: u64, icon: crate::modules::ExtensionIcon) {
+        let prompt = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(prompt) = state
+                .model
+                .pending_extension_prompt
+                .as_mut()
+                .filter(|p| p.token == token)
+            else {
+                return;
+            };
+            let Some(subject) = prompt.subject.as_mut() else {
+                return;
+            };
+            subject.icon = Some(icon);
+            prompt.clone()
+        };
+        self.bus.publish(Event::ExtensionPromptChanged { prompt: Some(prompt) });
+    }
+
+    /// Updates or clears the extension install card. An update for another install replaces the card.
+    pub fn feed_extension_install(&self, install: Option<crate::modules::ExtensionInstall>) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.extension_install = install.clone();
+        }
+        self.bus.publish(Event::ExtensionInstallChanged { install });
+    }
+
     /// Updates `ServiceId::ExtensionServer`'s health status and resynchronizes extension toolbar/site contributions.
     pub fn feed_extension_service_status(&self, status: ServiceStatus) {
         self.apply_service_status_pub(ServiceId::ExtensionServer, status);
@@ -4465,6 +4495,9 @@ impl BrowserCore for StubBackend {
             | Command::ExtensionInstallPath { .. }
             | Command::ExtensionOpenOptions { .. }
             | Command::ExtensionPromptAnswer { .. }
+            | Command::ExtensionInstallCancel { .. }
+            | Command::ExtensionInstallRetry { .. }
+            | Command::ExtensionInstallDismiss { .. }
             | Command::ExtensionContextMenuClick { .. }
             | Command::ExtensionInvokeCommand { .. }
             | Command::ExtensionsMenuToggle
@@ -5614,6 +5647,7 @@ pub fn sample_model(include_sample_tabs: bool) -> BrowserModel {
         extensions: crate::modules::sample_extensions(),
         extension_commands: Vec::new(),
         pending_extension_prompt: None,
+        extension_install: None,
         vim_mode_enabled: false,
         keyed_page: None,
         page_editing: false,

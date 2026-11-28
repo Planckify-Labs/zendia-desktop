@@ -9,6 +9,7 @@
 //!
 //! See `Zendia/Documentation/Architecture.md`, "Processes".
 
+mod install;
 mod server;
 mod storage;
 mod store;

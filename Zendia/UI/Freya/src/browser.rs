@@ -604,12 +604,16 @@ pub fn app() -> impl IntoElement {
             CoreEvent::ZoomChanged { .. } => {
                 ext_adapter.push_browser_state();
             }
+            // Extensions see tab order, pinning and whether a tab has a view (its id).
+            CoreEvent::TabsReordered { .. }
+            | CoreEvent::PinnedTabsChanged { .. }
+            | CoreEvent::TabUnloadedChanged { .. } => {
+                ext_adapter.push_browser_state();
+                save_live_session(&stub_core);
+            }
             CoreEvent::SpaceSwitched { .. }
             | CoreEvent::SpacesUpdated { .. }
-            | CoreEvent::TabsReordered { .. }
-            | CoreEvent::PinnedTabsChanged { .. }
             | CoreEvent::TabPinnedUrlsChanged { .. }
-            | CoreEvent::TabUnloadedChanged { .. }
             | CoreEvent::EssentialsChanged { .. }
             | CoreEvent::FolderCreated { .. }
             | CoreEvent::FolderUpdated { .. }

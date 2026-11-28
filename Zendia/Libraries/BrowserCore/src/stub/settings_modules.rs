@@ -32,6 +32,14 @@ fn find_arg<'a>(args: &'a [(String, String)], key: &str) -> Option<&'a str> {
     args.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
+fn parse_install_id(command: &str, args: &[(String, String)]) -> Result<u64, CommandError> {
+    let raw = parse_required_string(command, args, "install_id")?;
+    raw.parse::<u64>().map_err(|_| CommandError::InvalidArgument {
+        command: command.to_string(),
+        message: format!("argument `install_id` expected u64, got `{raw}`"),
+    })
+}
+
 fn parse_bool_arg(command: &str, args: &[(String, String)], key: &str, default: bool) -> Result<bool, CommandError> {
     match find_arg(args, key) {
         None => Ok(default),
@@ -146,6 +154,15 @@ pub(crate) fn parse_command(name: &str, args: &[(String, String)]) -> Result<Opt
                 accepted: parse_bool_arg(name, args, "accepted", false)?,
             }))
         }
+        "extension.install_cancel" => Ok(Some(Command::ExtensionInstallCancel {
+            install_id: parse_install_id(name, args)?,
+        })),
+        "extension.install_retry" => Ok(Some(Command::ExtensionInstallRetry {
+            install_id: parse_install_id(name, args)?,
+        })),
+        "extension.install_dismiss" => Ok(Some(Command::ExtensionInstallDismiss {
+            install_id: parse_install_id(name, args)?,
+        })),
         "extension.context_menu_click" => Ok(Some(Command::ExtensionContextMenuClick {
             extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
             item_id: parse_required_string(name, args, "item_id")?,
@@ -381,6 +398,39 @@ pub(crate) fn command_descriptors() -> Vec<CommandDescriptor> {
                 ArgumentSchema::new("token", ArgumentType::Integer, true, "Prompt token"),
                 ArgumentSchema::new("accepted", ArgumentType::Bool, true, "Whether user accepted"),
             ],
+        },
+        CommandDescriptor {
+            name: "extension.install_cancel".to_string(),
+            title: "Cancel Extension Install".to_string(),
+            description: "Stop a running WebExtension install".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "install_id",
+                ArgumentType::Integer,
+                true,
+                "Install id",
+            )],
+        },
+        CommandDescriptor {
+            name: "extension.install_retry".to_string(),
+            title: "Retry Extension Install".to_string(),
+            description: "Try a failed WebExtension install again".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "install_id",
+                ArgumentType::Integer,
+                true,
+                "Install id",
+            )],
+        },
+        CommandDescriptor {
+            name: "extension.install_dismiss".to_string(),
+            title: "Dismiss Extension Install".to_string(),
+            description: "Close the extension install card, giving up a failed install".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "install_id",
+                ArgumentType::Integer,
+                true,
+                "Install id",
+            )],
         },
         CommandDescriptor {
             name: "extension.context_menu_click".to_string(),
@@ -1004,6 +1054,42 @@ impl StubBackend {
                 self.feed_extension_prompt(None);
                 if let Some(source) = self.current_extension_source() {
                     return source.answer_prompt(token, accepted);
+                }
+                Ok(())
+            }
+            Command::ExtensionInstallCancel { install_id } => {
+                use crate::BrowserCore;
+                let running = self
+                    .model()
+                    .extension_install
+                    .is_some_and(|i| i.install_id == install_id && i.stage.is_running());
+                if running {
+                    self.feed_extension_install(None);
+                }
+                if let Some(source) = self.current_extension_source() {
+                    return source.cancel_install(install_id);
+                }
+                Ok(())
+            }
+            Command::ExtensionInstallRetry { install_id } => {
+                if let Some(source) = self.current_extension_source() {
+                    return source.retry_install(install_id);
+                }
+                Ok(())
+            }
+            Command::ExtensionInstallDismiss { install_id } => {
+                use crate::BrowserCore;
+                let current = self.model().extension_install;
+                if current.as_ref().is_some_and(|i| i.install_id == install_id) {
+                    self.feed_extension_install(None);
+                }
+                // A failed install still holds the store page's request; giving up answers it.
+                let failed = current.is_some_and(|i| {
+                    i.install_id == install_id
+                        && matches!(i.stage, crate::modules::ExtensionInstallStage::Failed { .. })
+                });
+                if failed && let Some(source) = self.current_extension_source() {
+                    return source.cancel_install(install_id);
                 }
                 Ok(())
             }

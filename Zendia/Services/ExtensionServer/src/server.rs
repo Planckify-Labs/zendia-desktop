@@ -7,6 +7,7 @@
 //! Single-threaded core event loop for `ExtensionServer`, hosting `webext::Dispatcher`, `StoreState`,
 //! `ExtensionStorage`, and the IPC bridges to the UI process and Ladybird's Hub.
 
+use crate::install::{self, CancelAction, Card, RetryAction, Stage};
 use crate::storage::ExtensionStorage;
 use crate::store::{
     StoreState, amo_event, amo_install_progress, cws_installed_event, cws_uninstalled_event, store_display_name,
@@ -53,9 +54,22 @@ enum Inbox {
 
 enum QueuedAction {
     ReloadExtension(String),
-    RemoveExtension { id: String, confirm: bool },
-    SetEnabled { id: String, enabled: bool },
-    FinishCwsBegin { id: String, accepted: bool },
+    RemoveExtension {
+        id: String,
+        confirm: bool,
+    },
+    SetEnabled {
+        id: String,
+        enabled: bool,
+    },
+    FinishCwsBegin {
+        id: String,
+        accepted: bool,
+    },
+    /// A store install ended (installed, failed for good, or cancelled); the store may start it again.
+    EndCwsInstall(String),
+    /// A prompt that is accepted without asking. Answered from the main loop, where no borrow is held.
+    AcceptPrompt(PromptCallback),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,6 +97,10 @@ struct SharedState {
     pending_prompts: HashMap<u64, PromptCallback>,
     pending_downloads: HashMap<u64, DownloadCallback>,
     queued_actions: Vec<QueuedAction>,
+    /// The installs the UI shows a card for, by install id.
+    installs: HashMap<u64, Card>,
+    /// What the Chrome Web Store's install prompt showed, by extension id, for the card once the install runs.
+    cws_subjects: HashMap<String, (String, Option<install::Icon>)>,
 }
 
 impl SharedState {
@@ -106,17 +124,20 @@ impl SharedState {
         }
     }
 
+    /// Asks the user. `details` are `{text, highRisk}` objects; `subject` (`{name, version, source}`) names the extension
+    /// an install prompt is about. Returns the prompt's token, `None` when prompts are accepted without asking.
     fn request_prompt(
         &mut self,
         title: String,
         message: String,
-        details: Vec<String>,
+        details: Vec<Value>,
         accept_label: String,
+        subject: Option<Value>,
         on_answer: PromptCallback,
-    ) {
+    ) -> Option<u64> {
         if self.auto_accept_prompts {
-            on_answer(true);
-            return;
+            self.queued_actions.push(QueuedAction::AcceptPrompt(on_answer));
+            return None;
         }
         let token = self.alloc_token();
         self.pending_prompts.insert(token, on_answer);
@@ -127,7 +148,123 @@ impl SharedState {
             "message": message,
             "details": details,
             "acceptLabel": accept_label,
+            "subject": subject,
         })));
+        Some(token)
+    }
+
+    // ---- Install cards ----------------------------------------------------------------------------------------------
+
+    /// Starts a card for an install; it shows "Downloading". `on_cancel` answers whoever asked for the install.
+    fn install_start(
+        &mut self,
+        extension_id: String,
+        name: String,
+        source: String,
+        icon: Option<install::Icon>,
+        on_cancel: CancelAction,
+    ) -> u64 {
+        let install_id = self.alloc_token();
+        self.installs.insert(
+            install_id,
+            Card {
+                extension_id,
+                name,
+                source,
+                icon,
+                failure: None,
+                on_cancel: Some(on_cancel),
+                on_retry: None,
+            },
+        );
+        self.install_stage(install_id, Stage::Downloading);
+        install_id
+    }
+
+    /// Whether the install still runs: not cancelled and not given up.
+    fn install_is_live(&self, install_id: u64) -> bool {
+        self.installs
+            .get(&install_id)
+            .is_some_and(|card| card.failure.is_none())
+    }
+
+    fn install_stage(&mut self, install_id: u64, stage: Stage) {
+        let Some(card) = self.installs.get_mut(&install_id) else {
+            return;
+        };
+        card.failure = None;
+        let frame = card.stage_json(install_id, stage);
+        self.send_ui(&Frame::event(frame));
+    }
+
+    /// Shows the failure and keeps the install until the user retries or dismisses it.
+    fn install_failed(&mut self, install_id: u64, reason: String, retry: Option<RetryAction>) {
+        let Some(card) = self.installs.get_mut(&install_id) else {
+            return;
+        };
+        let frame = card.failed_json(install_id, &reason, retry.is_some());
+        card.failure = Some(reason);
+        card.on_retry = retry;
+        self.send_ui(&Frame::event(frame));
+    }
+
+    fn install_done(&mut self, install_id: u64, extension_id: &str, updated: bool) {
+        let Some(card) = self.installs.remove(&install_id) else {
+            return;
+        };
+        self.send_ui(&Frame::event(card.installed_json(install_id, extension_id, updated)));
+    }
+
+    /// Ends an install without telling whoever asked for it (they were already answered).
+    fn install_forget(&mut self, install_id: u64) {
+        if self.installs.remove(&install_id).is_some() {
+            self.send_ui(&Frame::event(install::cancelled_json(install_id)));
+        }
+    }
+
+    /// The user stopped the install or gave up a failed one. Returns what answers the requester, to call once no borrow
+    /// is held.
+    fn install_take_cancel(&mut self, install_id: u64) -> Option<(CancelAction, Option<String>)> {
+        let mut card = self.installs.remove(&install_id)?;
+        self.send_ui(&Frame::event(install::cancelled_json(install_id)));
+        Some((card.on_cancel.take()?, card.failure.take()))
+    }
+
+    fn send_api_reply_to_page(&mut self, context_id: u64, request_id: u64, ok: bool, payload: &str) {
+        self.send_hub(&Frame::event(json!({
+            "op": "api_reply",
+            "contextId": context_id,
+            "requestId": request_id,
+            "ok": ok,
+            "json": payload,
+        })));
+    }
+
+    fn send_to_page_context(&mut self, context_id: u64, message: &Value) {
+        self.send_hub(&Frame::event(json!({
+            "op": "deliver_to_context",
+            "contextId": context_id,
+            "json": message.to_string(),
+        })));
+    }
+
+    /// Fails the install for good, after its requester was already told.
+    fn install_failed_final(&mut self, install_id: u64, reason: String) {
+        self.install_failed(install_id, reason, None);
+        if let Some(card) = self.installs.get_mut(&install_id) {
+            card.on_cancel = None;
+        }
+    }
+
+    fn install_rename(&mut self, install_id: u64, extension_id: &str, name: &str) {
+        if let Some(card) = self.installs.get_mut(&install_id) {
+            card.extension_id = extension_id.to_string();
+            card.name = name.to_string();
+        }
+    }
+
+    fn install_take_retry(&mut self, install_id: u64) -> Option<RetryAction> {
+        self.installs.get_mut(&install_id)?.on_retry.take()
     }
 
     fn request_hub_download(&mut self, url: String, on_done: DownloadCallback) {
@@ -299,8 +436,9 @@ impl ExtensionHost for ServerHost {
         self.shared.borrow_mut().request_prompt(
             format!("Allow additional permissions for \"{extension_id}\"?"),
             "This extension is requesting additional access:".to_string(),
-            details,
+            install::plain_details(details),
             "Allow".to_string(),
+            None,
             reply,
         );
     }
@@ -367,6 +505,8 @@ impl ServerState {
             pending_prompts: HashMap::new(),
             pending_downloads: HashMap::new(),
             queued_actions: Vec::new(),
+            installs: HashMap::new(),
+            cws_subjects: HashMap::new(),
         }));
         let host = Rc::new(ServerHost {
             shared: Rc::clone(&shared),
@@ -402,13 +542,24 @@ impl ServerState {
                         if let Some(store) = self.store.as_mut() {
                             if accepted {
                                 if let Some(manifest) = store.approved_cws_installs.remove(&format!("pending:{id}")) {
-                                    store.approved_cws_installs.insert(id, manifest);
+                                    store.approved_cws_installs.insert(id.clone(), manifest);
                                 }
                             } else {
                                 store.approved_cws_installs.remove(&format!("pending:{id}"));
                                 store.installs_in_progress.remove(&id);
                             }
                         }
+                        if !accepted {
+                            self.shared.borrow_mut().cws_subjects.remove(&id);
+                        }
+                    }
+                    QueuedAction::AcceptPrompt(on_answer) => on_answer(true),
+                    QueuedAction::EndCwsInstall(id) => {
+                        if let Some(store) = self.store.as_mut() {
+                            store.installs_in_progress.remove(&id);
+                            store.approved_cws_installs.remove(&id);
+                        }
+                        self.shared.borrow_mut().cws_subjects.remove(&id);
                     }
                 }
             }
@@ -454,6 +605,20 @@ impl ServerState {
                     self.active_tab_id = find_active_tab_id(state);
                     let _ = self.dispatcher.host_event("browserState", state);
                     self.shared.borrow_mut().ui_dirty = true;
+                }
+            }
+            "install_cancel" => {
+                let install_id = frame.json.get("installId").and_then(Value::as_u64).unwrap_or(0);
+                let cancel = self.shared.borrow_mut().install_take_cancel(install_id);
+                if let Some((on_cancel, failure)) = cancel {
+                    on_cancel(failure);
+                }
+            }
+            "install_retry" => {
+                let install_id = frame.json.get("installId").and_then(Value::as_u64).unwrap_or(0);
+                let retry = self.shared.borrow_mut().install_take_retry(install_id);
+                if let Some(retry) = retry {
+                    retry();
                 }
             }
             "get_ui_state" => {
@@ -1251,6 +1416,7 @@ impl ServerState {
                         "The extension and the data it stored will be removed.".to_string(),
                         Vec::new(),
                         "Remove".to_string(),
+                        None,
                         Box::new(move |accepted| {
                             if !accepted {
                                 shared.borrow_mut().send_hub(&Frame::event(json!({
@@ -1381,27 +1547,34 @@ impl ServerState {
             store.installs_in_progress.insert(id.clone());
         }
 
+        let version = preview.get("version").and_then(Value::as_str).unwrap_or("").to_string();
         let title = if is_update {
-            format!("Reinstall \"{display_name}\" from the Chrome Web Store?")
+            format!("Reinstall {display_name}?")
         } else {
-            format!("Add \"{display_name}\"?")
+            format!("Add {display_name}?")
         };
         let message = if warnings.is_empty() {
-            String::new()
+            "It asks for no special permissions.".to_string()
         } else {
-            "It can:".to_string()
+            "It will be able to:".to_string()
         };
 
         if let Some(store) = self.store.as_mut() {
             store.approved_cws_installs.insert(format!("pending:{id}"), manifest);
         }
+        self.shared
+            .borrow_mut()
+            .cws_subjects
+            .insert(id.clone(), (display_name.clone(), None));
+        let icon_url = details.get("iconUrl").and_then(Value::as_str).unwrap_or("").to_string();
         let shared = Rc::clone(&self.shared);
         let ext_id = id.clone();
-        self.shared.borrow_mut().request_prompt(
+        let token = self.shared.borrow_mut().request_prompt(
             title,
             message,
-            warnings,
-            "Add extension".to_string(),
+            warnings.iter().map(|w| install::warning_detail(w)).collect(),
+            if is_update { "Reinstall" } else { "Add extension" }.to_string(),
+            Some(json!({ "name": display_name, "version": version, "source": "Chrome Web Store" })),
             Box::new(move |accepted| {
                 let mut s = shared.borrow_mut();
                 s.queued_actions
@@ -1413,6 +1586,47 @@ impl ServerState {
                     "ok": true,
                     "json": if accepted { "\"\"" } else { "\"user_cancelled\"" },
                 })));
+            }),
+        );
+        if let Some(token) = token {
+            self.fetch_prompt_icon(token, &id, &icon_url);
+        }
+    }
+
+    /// Gets the store's icon for an open install prompt and hands it to the UI. HTTPS and `data:` URLs only.
+    fn fetch_prompt_icon(&mut self, token: u64, extension_id: &str, icon_url: &str) {
+        let deliver = {
+            let shared = Rc::clone(&self.shared);
+            let extension_id = extension_id.to_string();
+            move |bytes: Vec<u8>| {
+                let Some(icon) = install::sniff_icon(&bytes) else {
+                    return;
+                };
+                let mut s = shared.borrow_mut();
+                if let Some(subject) = s.cws_subjects.get_mut(&extension_id) {
+                    subject.1 = Some(icon.clone());
+                }
+                let mut frame = icon.to_json();
+                frame["op"] = json!("prompt_icon");
+                frame["token"] = json!(token);
+                s.send_ui(&Frame::event(frame));
+            }
+        };
+        if icon_url.starts_with("data:") {
+            if let Some(bytes) = install::data_url_bytes(icon_url) {
+                deliver(bytes);
+            }
+            return;
+        }
+        if !icon_url.starts_with("https://") || self.shared.borrow().hub_writer.is_none() {
+            return;
+        }
+        self.shared.borrow_mut().request_hub_download(
+            icon_url.to_string(),
+            Box::new(move |result| {
+                if let Ok(bytes) = result {
+                    deliver(bytes);
+                }
             }),
         );
     }
@@ -1438,98 +1652,50 @@ impl ServerState {
             return;
         };
 
-        let ext_id = extension_id.to_string();
-        let dispatcher = self.dispatcher.clone();
+        let (name, icon) = self
+            .shared
+            .borrow()
+            .cws_subjects
+            .get(extension_id)
+            .cloned()
+            .unwrap_or_else(|| (extension_id.to_string(), None));
         let shared = Rc::clone(&self.shared);
-        let packages_dir = self
-            .store
-            .as_ref()
-            .map(|s| s.packages_dir().to_path_buf())
-            .unwrap_or_else(|| std::env::temp_dir().join("zendia-ext-packages"));
-
-        self.shared.borrow_mut().request_hub_download(
-            url,
-            Box::new(move |result| match result {
-                Err(error) => {
-                    shared.borrow_mut().send_hub(&Frame::event(json!({
-                        "op": "api_reply",
-                        "contextId": context_id,
-                        "requestId": request_id,
-                        "ok": false,
-                        "json": error,
-                    })));
-                }
-                Ok(bytes) => {
-                    let expectation = StoreExpectation {
-                        id: Some(&ext_id),
-                        hash: None,
-                        approved_manifest: Some(&approved_manifest),
-                    };
-                    if let Err(err) = check_store_package(&bytes, &expectation) {
-                        shared.borrow_mut().send_hub(&Frame::event(json!({
-                            "op": "api_reply",
-                            "contextId": context_id,
-                            "requestId": request_id,
-                            "ok": false,
-                            "json": format!("Package is invalid: {err}"),
-                        })));
-                        return;
-                    }
-                    let was_installed = dispatcher.management_info(&ext_id).is_some();
-                    match install_package_into_dispatcher(&dispatcher, bytes.clone(), "", "auto") {
-                        Ok(installed_id) => {
-                            let mut store = StoreState::new(packages_dir);
-                            store.kept = store.read_kept_packages().into_iter().map(|(k, _)| k).collect();
-                            let _ = store.save_kept_package(&installed_id, "chrome", &bytes);
-                            if let Some(bg_url) = dispatcher.background_url(&installed_id) {
-                                shared.borrow_mut().send_hub(&Frame::event(json!({
-                                    "op": "stop_background_page",
-                                    "extensionId": installed_id,
-                                })));
-                                shared.borrow_mut().send_hub(&Frame::event(json!({
-                                    "op": "start_background_page",
-                                    "extensionId": installed_id,
-                                    "url": bg_url,
-                                })));
-                            }
-                            dispatcher.notify_installed(
-                                &installed_id,
-                                if was_installed { "update" } else { "install" },
-                                None,
-                            );
-                            if let Some(info) = dispatcher.management_info(&installed_id) {
-                                shared.borrow_mut().send_hub(&Frame::event(json!({
-                                    "op": "deliver_to_extension",
-                                    "extensionId": store_page_key("chrome"),
-                                    "json": cws_installed_event(&info).to_string(),
-                                })));
-                            }
-                            shared.borrow_mut().send_hub(&Frame::event(json!({
-                                "op": "api_reply",
-                                "contextId": context_id,
-                                "requestId": request_id,
-                                "ok": true,
-                                "json": "",
-                            })));
-                            shared.borrow_mut().ui_dirty = true;
-                            shared.borrow_mut().network_interest_dirty = true;
-                        }
-                        Err(error) => {
-                            shared.borrow_mut().send_hub(&Frame::event(json!({
-                                "op": "api_reply",
-                                "contextId": context_id,
-                                "requestId": request_id,
-                                "ok": false,
-                                "json": error,
-                            })));
-                        }
-                    }
-                }
+        let ext_id = extension_id.to_string();
+        let install_id = self.shared.borrow_mut().install_start(
+            extension_id.to_string(),
+            name,
+            "Chrome Web Store".to_string(),
+            icon,
+            Box::new(move |failure| {
+                let mut s = shared.borrow_mut();
+                let reason = failure.unwrap_or_else(|| "User cancelled install".to_string());
+                s.send_api_reply_to_page(context_id, request_id, false, &reason);
+                s.queued_actions.push(QueuedAction::EndCwsInstall(ext_id));
             }),
         );
+
+        CwsDownload {
+            shared: Rc::clone(&self.shared),
+            dispatcher: self.dispatcher.clone(),
+            install_id,
+            extension_id: extension_id.to_string(),
+            approved_manifest,
+            url,
+            context_id,
+            request_id,
+            packages_dir: self.packages_dir(),
+        }
+        .start();
     }
 
-    fn handle_amo_install(&mut self, context_id: u64, request_id: u64, install_id: i64, url: String, hash: String) {
+    fn handle_amo_install(
+        &mut self,
+        context_id: u64,
+        request_id: u64,
+        page_install_id: i64,
+        url: String,
+        hash: String,
+    ) {
         if !url.starts_with("https://") {
             self.send_api_reply(
                 context_id,
@@ -1539,178 +1705,50 @@ impl ServerState {
             );
             return;
         }
-        self.send_to_context(
-            context_id,
-            &amo_install_progress(install_id, "onDownloadStarted", "STATE_DOWNLOADING", None, None),
-        );
 
-        let dispatcher = self.dispatcher.clone();
         let shared = Rc::clone(&self.shared);
-        let packages_dir = self
-            .store
-            .as_ref()
-            .map(|s| s.packages_dir().to_path_buf())
-            .unwrap_or_else(|| std::env::temp_dir().join("zendia-ext-packages"));
-
-        self.shared.borrow_mut().request_hub_download(
-            url,
-            Box::new(move |result| {
-                let bytes = match result {
-                    Ok(b) => b,
-                    Err(error) => {
-                        shared.borrow_mut().send_hub(&Frame::event(json!({
-                            "op": "deliver_to_context",
-                            "contextId": context_id,
-                            "json": amo_install_progress(install_id, "onDownloadFailed", "STATE_DOWNLOAD_FAILED", Some("ERROR_NETWORK_FAILURE"), None).to_string(),
-                        })));
-                        shared.borrow_mut().send_hub(&Frame::event(json!({
-                            "op": "api_reply",
-                            "contextId": context_id,
-                            "requestId": request_id,
-                            "ok": false,
-                            "json": error,
-                        })));
-                        return;
-                    }
+        let install_id = self.shared.borrow_mut().install_start(
+            String::new(),
+            amo_name_from_url(&url),
+            store_display_name("firefox").to_string(),
+            None,
+            Box::new(move |failure| {
+                let mut s = shared.borrow_mut();
+                let message = match &failure {
+                    Some(_) => amo_install_progress(
+                        page_install_id,
+                        "onDownloadFailed",
+                        "STATE_DOWNLOAD_FAILED",
+                        Some("ERROR_NETWORK_FAILURE"),
+                        None,
+                    ),
+                    None => amo_install_progress(page_install_id, "onInstallCancelled", "STATE_CANCELLED", None, None),
                 };
-
-                let size = bytes.len();
-                shared.borrow_mut().send_hub(&Frame::event(json!({
-                    "op": "deliver_to_context",
-                    "contextId": context_id,
-                    "json": amo_install_progress(install_id, "onDownloadEnded", "STATE_DOWNLOADED", None, Some(size)).to_string(),
-                })));
-
-                let expectation = StoreExpectation {
-                    id: None,
-                    hash: (!hash.is_empty()).then_some(hash.as_str()),
-                    approved_manifest: None,
-                };
-                let summary = match check_store_package(&bytes, &expectation) {
-                    Ok(s) => s,
-                    Err(error) => {
-                        shared.borrow_mut().send_hub(&Frame::event(json!({
-                            "op": "deliver_to_context",
-                            "contextId": context_id,
-                            "json": amo_install_progress(install_id, "onDownloadFailed", "STATE_DOWNLOAD_FAILED", Some("ERROR_CORRUPT_FILE"), None).to_string(),
-                        })));
-                        shared.borrow_mut().send_hub(&Frame::event(json!({
-                            "op": "api_reply",
-                            "contextId": context_id,
-                            "requestId": request_id,
-                            "ok": false,
-                            "json": format!("Package is invalid: {error}"),
-                        })));
-                        return;
-                    }
-                };
-
-                let is_update = dispatcher.management_info(&summary.id).is_some();
-                let title = if is_update {
-                    format!("Reinstall \"{}\" from {}?", summary.name, store_display_name("firefox"))
-                } else {
-                    format!("Add \"{}\"?", summary.name)
-                };
-                let message = if summary.warnings.is_empty() {
-                    String::new()
-                } else {
-                    "It can:".to_string()
-                };
-                let shared_for_prompt = Rc::clone(&shared);
-                shared.borrow_mut().request_prompt(
-                    title,
-                    message,
-                    summary.warnings,
-                    "Add extension".to_string(),
-                    Box::new(move |accepted| {
-                        if !accepted {
-                            shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                                "op": "deliver_to_context",
-                                "contextId": context_id,
-                                "json": amo_install_progress(install_id, "onInstallCancelled", "STATE_CANCELLED", None, None).to_string(),
-                            })));
-                            shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                                "op": "api_reply",
-                                "contextId": context_id,
-                                "requestId": request_id,
-                                "ok": false,
-                                "json": "User cancelled install",
-                            })));
-                            return;
-                        }
-
-                        shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                            "op": "deliver_to_context",
-                            "contextId": context_id,
-                            "json": amo_install_progress(install_id, "onInstallStarted", "STATE_INSTALLING", None, Some(size)).to_string(),
-                        })));
-
-                        match install_package_into_dispatcher(&dispatcher, bytes.clone(), "", "auto") {
-                            Ok(installed_id) => {
-                                let mut store = StoreState::new(packages_dir);
-                                store.kept = store
-                                    .read_kept_packages()
-                                    .into_iter()
-                                    .map(|(k, _)| k)
-                                    .collect();
-                                let _ = store.save_kept_package(&installed_id, "firefox", &bytes);
-                                if let Some(bg_url) = dispatcher.background_url(&installed_id) {
-                                    shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                                        "op": "stop_background_page",
-                                        "extensionId": installed_id,
-                                    })));
-                                    shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                                        "op": "start_background_page",
-                                        "extensionId": installed_id,
-                                        "url": bg_url,
-                                    })));
-                                }
-                                dispatcher.notify_installed(
-                                    &installed_id,
-                                    if is_update { "update" } else { "install" },
-                                    None,
-                                );
-                                shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                                    "op": "deliver_to_context",
-                                    "contextId": context_id,
-                                    "json": amo_install_progress(install_id, "onInstallEnded", "STATE_INSTALLED", None, Some(size)).to_string(),
-                                })));
-                                for ev in ["onInstalling", "onInstalled"] {
-                                    shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                                        "op": "deliver_to_extension",
-                                        "extensionId": store_page_key("firefox"),
-                                        "json": amo_event(ev, &installed_id).to_string(),
-                                    })));
-                                }
-                                shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                                    "op": "api_reply",
-                                    "contextId": context_id,
-                                    "requestId": request_id,
-                                    "ok": true,
-                                    "json": "true",
-                                })));
-                                shared_for_prompt.borrow_mut().ui_dirty = true;
-                                shared_for_prompt.borrow_mut().network_interest_dirty = true;
-                            }
-                            Err(error) => {
-                                shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                                    "op": "deliver_to_context",
-                                    "contextId": context_id,
-                                    "json": amo_install_progress(install_id, "onInstallFailed", "STATE_INSTALL_FAILED", Some("ERROR_CORRUPT_FILE"), None).to_string(),
-                                })));
-                                shared_for_prompt.borrow_mut().send_hub(&Frame::event(json!({
-                                    "op": "api_reply",
-                                    "contextId": context_id,
-                                    "requestId": request_id,
-                                    "ok": false,
-                                    "json": error,
-                                })));
-                            }
-                        }
-                    }),
-                );
+                s.send_to_page_context(context_id, &message);
+                let reason = failure.unwrap_or_else(|| "User cancelled install".to_string());
+                s.send_api_reply_to_page(context_id, request_id, false, &reason);
             }),
         );
+
+        AmoDownload {
+            shared: Rc::clone(&self.shared),
+            dispatcher: self.dispatcher.clone(),
+            install_id,
+            page_install_id,
+            url,
+            hash,
+            context_id,
+            request_id,
+            packages_dir: self.packages_dir(),
+        }
+        .start();
+    }
+
+    fn packages_dir(&self) -> PathBuf {
+        self.store
+            .as_ref()
+            .map(|s| s.packages_dir().to_path_buf())
+            .unwrap_or_else(|| std::env::temp_dir().join("zendia-ext-packages"))
     }
 
     fn send_api_reply(&mut self, context_id: u64, request_id: u64, ok: bool, payload: &str) {
@@ -1720,14 +1758,6 @@ impl ServerState {
             "requestId": request_id,
             "ok": ok,
             "json": payload,
-        })));
-    }
-
-    fn send_to_context(&mut self, context_id: u64, payload: &Value) {
-        self.shared.borrow_mut().send_hub(&Frame::event(json!({
-            "op": "deliver_to_context",
-            "contextId": context_id,
-            "json": payload.to_string(),
         })));
     }
 
@@ -1859,20 +1889,7 @@ impl ServerState {
     /// Matches Zen/Zendia's `CustomizableUI` default (`AREA_ADDONS`): newly installed extensions live in the Site Data
     /// Panel's Extensions grid until the user explicitly pins them to the toolbar.
     fn apply_default_unpinned_if_new(&self, id: &str) {
-        let has_saved_pinned = self
-            .shared
-            .borrow()
-            .storage
-            .as_ref()
-            .and_then(|s| s.read(id, "ui"))
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .and_then(|v| v.get("pinned").and_then(Value::as_bool))
-            .is_some();
-        if !has_saved_pinned {
-            let _ = self
-                .dispatcher
-                .host_event("setActionPinned", &json!({ "extensionId": id, "pinned": false }));
-        }
+        apply_default_unpinned_if_new(&self.shared, &self.dispatcher, id);
     }
 
     fn start_background_page(&mut self, id: &str, reason: StartReason) {
@@ -1959,6 +1976,7 @@ impl ServerState {
             "The extension and the data it stored will be removed.".to_string(),
             Vec::new(),
             "Remove".to_string(),
+            None,
             Box::new(move |accepted| {
                 if accepted {
                     shared.borrow_mut().queued_actions.push(QueuedAction::RemoveExtension {
@@ -2214,6 +2232,380 @@ fn find_active_tab_id(browser_state: &Value) -> Option<i64> {
         return Some(tab);
     }
     windows.iter().find_map(pick_in)
+}
+
+// ---- Store installs -------------------------------------------------------------------------------------------------
+//
+// Each download can be started again from the install card's Retry. Callbacks never hold a borrow of the shared state
+// while they call into the dispatcher, which may call back.
+
+/// Matches Zen/Zendia's `CustomizableUI` default (`AREA_ADDONS`): newly installed extensions live in the Site Data
+/// Panel's Extensions grid until the user explicitly pins them to the toolbar.
+fn apply_default_unpinned_if_new(shared: &Rc<RefCell<SharedState>>, dispatcher: &Dispatcher, id: &str) {
+    let has_saved_pinned = shared
+        .borrow()
+        .storage
+        .as_ref()
+        .and_then(|s| s.read(id, "ui"))
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.get("pinned").and_then(Value::as_bool))
+        .is_some();
+    if !has_saved_pinned {
+        let _ = dispatcher.host_event("setActionPinned", &json!({ "extensionId": id, "pinned": false }));
+    }
+}
+
+/// Starts a newly installed (or reinstalled) extension's background page and tells it why it runs.
+fn activate_installed(
+    shared: &Rc<RefCell<SharedState>>,
+    dispatcher: &Dispatcher,
+    installed_id: &str,
+    was_installed: bool,
+) {
+    apply_default_unpinned_if_new(shared, dispatcher, installed_id);
+    if let Some(bg_url) = dispatcher.background_url(installed_id) {
+        let mut s = shared.borrow_mut();
+        s.send_hub(&Frame::event(json!({
+            "op": "stop_background_page",
+            "extensionId": installed_id,
+        })));
+        s.send_hub(&Frame::event(json!({
+            "op": "start_background_page",
+            "extensionId": installed_id,
+            "url": bg_url,
+        })));
+    }
+    dispatcher.notify_installed(installed_id, if was_installed { "update" } else { "install" }, None);
+    let mut s = shared.borrow_mut();
+    s.ui_dirty = true;
+    s.network_interest_dirty = true;
+}
+
+fn keep_package(packages_dir: &Path, installed_id: &str, store: &str, bytes: &[u8]) {
+    let mut kept = StoreState::new(packages_dir.to_path_buf());
+    kept.kept = kept.read_kept_packages().into_iter().map(|(k, _)| k).collect();
+    let _ = kept.save_kept_package(installed_id, store, bytes);
+}
+
+/// A readable name for the card while an addons.mozilla.org package downloads, from its file name
+/// (`.../dark_reader-4.9.1.xpi` gives "dark reader").
+fn amo_name_from_url(url: &str) -> String {
+    let file = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    let stem = file.strip_suffix(".xpi").unwrap_or(file);
+    let stem = match stem.rsplit_once('-') {
+        Some((name, version)) if version.starts_with(|c: char| c.is_ascii_digit()) => name,
+        _ => stem,
+    };
+    stem.replace(['_', '+'], " ").trim().to_string()
+}
+
+#[derive(Clone)]
+struct CwsDownload {
+    shared: Rc<RefCell<SharedState>>,
+    dispatcher: Dispatcher,
+    install_id: u64,
+    extension_id: String,
+    approved_manifest: String,
+    url: String,
+    context_id: u64,
+    request_id: u64,
+    packages_dir: PathBuf,
+}
+
+impl CwsDownload {
+    fn start(self) {
+        let shared = Rc::clone(&self.shared);
+        let install_id = self.install_id;
+        if shared.borrow().hub_writer.is_none() {
+            shared.borrow_mut().install_failed(
+                install_id,
+                "The browser's network service is not connected.".to_string(),
+                Some(Box::new(move || self.start())),
+            );
+            return;
+        }
+        shared.borrow_mut().install_stage(install_id, Stage::Downloading);
+        let url = self.url.clone();
+        shared
+            .borrow_mut()
+            .request_hub_download(url, Box::new(move |result| self.finish(result)));
+    }
+
+    fn finish(self, result: Result<Vec<u8>, String>) {
+        let shared = Rc::clone(&self.shared);
+        let install_id = self.install_id;
+        if !shared.borrow().install_is_live(install_id) {
+            return;
+        }
+        let bytes = match result {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let retry = self.clone();
+                shared.borrow_mut().install_failed(
+                    install_id,
+                    format!("Couldn't download it. {error}."),
+                    Some(Box::new(move || retry.start())),
+                );
+                return;
+            }
+        };
+
+        shared.borrow_mut().install_stage(install_id, Stage::Checking);
+        let expectation = StoreExpectation {
+            id: Some(&self.extension_id),
+            hash: None,
+            approved_manifest: Some(&self.approved_manifest),
+        };
+        if let Err(error) = check_store_package(&bytes, &expectation) {
+            let retry = self.clone();
+            shared.borrow_mut().install_failed(
+                install_id,
+                format!("The download didn't pass the browser's check: {error}"),
+                Some(Box::new(move || retry.start())),
+            );
+            return;
+        }
+
+        shared.borrow_mut().install_stage(install_id, Stage::Installing);
+        let was_installed = self.dispatcher.management_info(&self.extension_id).is_some();
+        match install_package_into_dispatcher(&self.dispatcher, bytes.clone(), "", "auto") {
+            Ok(installed_id) => {
+                keep_package(&self.packages_dir, &installed_id, "chrome", &bytes);
+                activate_installed(&shared, &self.dispatcher, &installed_id, was_installed);
+                let info = self.dispatcher.management_info(&installed_id);
+                let mut s = shared.borrow_mut();
+                if let Some(info) = info {
+                    s.send_hub(&Frame::event(json!({
+                        "op": "deliver_to_extension",
+                        "extensionId": store_page_key("chrome"),
+                        "json": cws_installed_event(&info).to_string(),
+                    })));
+                }
+                s.send_api_reply_to_page(self.context_id, self.request_id, true, "");
+                s.install_done(install_id, &installed_id, was_installed);
+                s.queued_actions.push(QueuedAction::EndCwsInstall(self.extension_id));
+            }
+            Err(error) => {
+                let mut s = shared.borrow_mut();
+                s.send_api_reply_to_page(self.context_id, self.request_id, false, &error);
+                s.queued_actions.push(QueuedAction::EndCwsInstall(self.extension_id));
+                s.install_failed_final(install_id, format!("It couldn't be installed: {error}"));
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AmoDownload {
+    shared: Rc<RefCell<SharedState>>,
+    dispatcher: Dispatcher,
+    install_id: u64,
+    page_install_id: i64,
+    url: String,
+    hash: String,
+    context_id: u64,
+    request_id: u64,
+    packages_dir: PathBuf,
+}
+
+impl AmoDownload {
+    fn start(self) {
+        let shared = Rc::clone(&self.shared);
+        let install_id = self.install_id;
+        if shared.borrow().hub_writer.is_none() {
+            shared.borrow_mut().install_failed(
+                install_id,
+                "The browser's network service is not connected.".to_string(),
+                Some(Box::new(move || self.start())),
+            );
+            return;
+        }
+        {
+            let mut s = shared.borrow_mut();
+            s.install_stage(install_id, Stage::Downloading);
+            s.send_to_page_context(
+                self.context_id,
+                &amo_install_progress(
+                    self.page_install_id,
+                    "onDownloadStarted",
+                    "STATE_DOWNLOADING",
+                    None,
+                    None,
+                ),
+            );
+        }
+        let url = self.url.clone();
+        shared
+            .borrow_mut()
+            .request_hub_download(url, Box::new(move |result| self.finish(result)));
+    }
+
+    fn finish(self, result: Result<Vec<u8>, String>) {
+        let shared = Rc::clone(&self.shared);
+        let install_id = self.install_id;
+        if !shared.borrow().install_is_live(install_id) {
+            return;
+        }
+        let bytes = match result {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let retry = self.clone();
+                shared.borrow_mut().install_failed(
+                    install_id,
+                    format!("Couldn't download it. {error}."),
+                    Some(Box::new(move || retry.start())),
+                );
+                return;
+            }
+        };
+
+        let size = bytes.len();
+        shared.borrow_mut().install_stage(install_id, Stage::Checking);
+        let expectation = StoreExpectation {
+            id: None,
+            hash: (!self.hash.is_empty()).then_some(self.hash.as_str()),
+            approved_manifest: None,
+        };
+        let summary = match check_store_package(&bytes, &expectation) {
+            Ok(summary) => summary,
+            Err(error) => {
+                let retry = self.clone();
+                shared.borrow_mut().install_failed(
+                    install_id,
+                    format!("The download didn't pass the browser's check: {error}"),
+                    Some(Box::new(move || retry.start())),
+                );
+                return;
+            }
+        };
+
+        let is_update = self.dispatcher.management_info(&summary.id).is_some();
+        let title = if is_update {
+            format!("Reinstall {}?", summary.name)
+        } else {
+            format!("Add {}?", summary.name)
+        };
+        let message = if summary.warnings.is_empty() {
+            "It asks for no special permissions.".to_string()
+        } else {
+            "It will be able to:".to_string()
+        };
+        let details = summary.warnings.iter().map(|w| install::warning_detail(w)).collect();
+        let subject = json!({
+            "name": summary.name,
+            "version": summary.version,
+            "source": store_display_name("firefox"),
+        });
+        {
+            let mut s = shared.borrow_mut();
+            s.install_rename(install_id, &summary.id, &summary.name);
+            s.install_stage(install_id, Stage::AwaitingApproval);
+            s.send_to_page_context(
+                self.context_id,
+                &amo_install_progress(
+                    self.page_install_id,
+                    "onDownloadEnded",
+                    "STATE_DOWNLOADED",
+                    None,
+                    Some(size),
+                ),
+            );
+        }
+
+        let flow = self.clone();
+        shared.borrow_mut().request_prompt(
+            title,
+            message,
+            details,
+            if is_update { "Reinstall" } else { "Add extension" }.to_string(),
+            Some(subject),
+            Box::new(move |accepted| flow.answered(accepted, bytes, is_update)),
+        );
+    }
+
+    fn answered(self, accepted: bool, bytes: Vec<u8>, is_update: bool) {
+        let shared = Rc::clone(&self.shared);
+        let install_id = self.install_id;
+        let size = bytes.len();
+        if !accepted {
+            let mut s = shared.borrow_mut();
+            s.send_to_page_context(
+                self.context_id,
+                &amo_install_progress(
+                    self.page_install_id,
+                    "onInstallCancelled",
+                    "STATE_CANCELLED",
+                    None,
+                    None,
+                ),
+            );
+            s.send_api_reply_to_page(self.context_id, self.request_id, false, "User cancelled install");
+            s.install_forget(install_id);
+            return;
+        }
+
+        {
+            let mut s = shared.borrow_mut();
+            s.install_stage(install_id, Stage::Installing);
+            s.send_to_page_context(
+                self.context_id,
+                &amo_install_progress(
+                    self.page_install_id,
+                    "onInstallStarted",
+                    "STATE_INSTALLING",
+                    None,
+                    Some(size),
+                ),
+            );
+        }
+        match install_package_into_dispatcher(&self.dispatcher, bytes.clone(), "", "auto") {
+            Ok(installed_id) => {
+                keep_package(&self.packages_dir, &installed_id, "firefox", &bytes);
+                activate_installed(&shared, &self.dispatcher, &installed_id, is_update);
+                let mut s = shared.borrow_mut();
+                s.send_to_page_context(
+                    self.context_id,
+                    &amo_install_progress(
+                        self.page_install_id,
+                        "onInstallEnded",
+                        "STATE_INSTALLED",
+                        None,
+                        Some(size),
+                    ),
+                );
+                for event in ["onInstalling", "onInstalled"] {
+                    s.send_hub(&Frame::event(json!({
+                        "op": "deliver_to_extension",
+                        "extensionId": store_page_key("firefox"),
+                        "json": amo_event(event, &installed_id).to_string(),
+                    })));
+                }
+                s.send_api_reply_to_page(self.context_id, self.request_id, true, "true");
+                s.install_done(install_id, &installed_id, is_update);
+            }
+            Err(error) => {
+                let mut s = shared.borrow_mut();
+                s.send_to_page_context(
+                    self.context_id,
+                    &amo_install_progress(
+                        self.page_install_id,
+                        "onInstallFailed",
+                        "STATE_INSTALL_FAILED",
+                        Some("ERROR_CORRUPT_FILE"),
+                        None,
+                    ),
+                );
+                s.send_api_reply_to_page(self.context_id, self.request_id, false, &error);
+                s.install_failed_final(install_id, format!("It couldn't be installed: {error}"));
+            }
+        }
+    }
 }
 
 fn install_package_into_dispatcher(

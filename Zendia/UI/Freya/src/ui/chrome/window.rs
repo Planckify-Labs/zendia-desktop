@@ -25,6 +25,7 @@ use crate::ui::chrome::sidebar::{SidebarFrame, SidebarResizeHandle, try_use_side
 use crate::ui::chrome::toasts::ToastHost;
 use crate::ui::chrome::toolbar::{CompactTopBar, TopToolbar, WindowControls};
 use crate::ui::core_view::use_core;
+use crate::ui::extensions::ExtensionInstallCard;
 use crate::ui::library::{LIBRARY_SLIDE_DURATION, Library, try_use_library_state};
 use crate::ui::panels::{
     DockClosedPill, DockFrame, SPLIT_GAP, active_agent_accent, build_dock_slide_handles, resolve_open_dock_panels,
@@ -890,6 +891,13 @@ impl Component for WindowShell {
                     .left(card_left + 12.0 + toast_panel_clearance)
                     .top(card_top + 12.0 + in_flow_top_bar_height),
             })
+            .spacing(6.0)
+            .cross_align(if sidebar_side == SidebarSide::Right {
+                Alignment::Start
+            } else {
+                Alignment::End
+            })
+            .child(ExtensionInstallCard)
             .child(ToastHost {
                 align_left: sidebar_side == SidebarSide::Right,
             });

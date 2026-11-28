@@ -19,7 +19,7 @@ use crate::contributions::{
 use crate::events::Event;
 use crate::focus::FocusState;
 use crate::input_state::{StatuslineAnnouncement, StatuslineSettings};
-use crate::modules::{ExtensionCommand, ExtensionId, ExtensionInfo, ExtensionPrompt, PluginInfo};
+use crate::modules::{ExtensionCommand, ExtensionId, ExtensionInfo, ExtensionInstall, ExtensionPrompt, PluginInfo};
 use crate::onboarding::OnboardingState;
 use crate::settings::BrowserSettings;
 use crate::share::ShareSettings;
@@ -877,6 +877,8 @@ pub struct BrowserModel {
     pub extensions: Vec<ExtensionInfo>,
     pub extension_commands: Vec<ExtensionCommand>,
     pub pending_extension_prompt: Option<ExtensionPrompt>,
+    /// The extension install in progress or just finished, shown as a card under the toolbar.
+    pub extension_install: Option<ExtensionInstall>,
     pub vim_mode_enabled: bool,
     /// Auxiliary page surface (extension popup or web chat panel) that currently owns vim keyboard focus, if any.
     pub keyed_page: Option<TabId>,
@@ -1704,6 +1706,10 @@ impl BrowserModel {
             }
             Event::ExtensionPromptChanged { prompt } => {
                 self.pending_extension_prompt = prompt.clone();
+                true
+            }
+            Event::ExtensionInstallChanged { install } => {
+                self.extension_install = install.clone();
                 true
             }
             Event::LayoutSettingsChanged { layout } => {

@@ -1098,6 +1098,18 @@ pub enum Command {
         token: u64,
         accepted: bool,
     },
+    /// Stops a running extension install.
+    ExtensionInstallCancel {
+        install_id: u64,
+    },
+    /// Tries a failed extension install again.
+    ExtensionInstallRetry {
+        install_id: u64,
+    },
+    /// Closes the install card. A failed install is given up.
+    ExtensionInstallDismiss {
+        install_id: u64,
+    },
     /// Invokes an extension-registered page context menu item.
     ExtensionContextMenuClick {
         extension_id: ExtensionId,
@@ -1536,6 +1548,9 @@ impl Command {
             Self::ExtensionInstallPath { .. } => "extension.install_path",
             Self::ExtensionOpenOptions { .. } => "extension.open_options",
             Self::ExtensionPromptAnswer { .. } => "extension.prompt_answer",
+            Self::ExtensionInstallCancel { .. } => "extension.install_cancel",
+            Self::ExtensionInstallRetry { .. } => "extension.install_retry",
+            Self::ExtensionInstallDismiss { .. } => "extension.install_dismiss",
             Self::ExtensionContextMenuClick { .. } => "extension.context_menu_click",
             Self::ExtensionInvokeCommand { .. } => "extension.invoke_command",
             Self::ExtensionsMenuToggle => "extensions.menu.toggle",

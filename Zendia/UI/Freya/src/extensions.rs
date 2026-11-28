@@ -26,9 +26,10 @@ use zendia_browser_core::commands::{Command, CommandError, CommandResult};
 use zendia_browser_core::contributions::ContributionId;
 use zendia_browser_core::extension_source::ExtensionSource;
 use zendia_browser_core::history::HistoryClearRange;
-use zendia_browser_core::model::{ServiceStatus, Tab, TabId, TabKind, TabMoveTarget};
+use zendia_browser_core::model::{BrowserModel, ServiceStatus, Tab, TabId, TabKind, TabMoveTarget};
 use zendia_browser_core::modules::{
-    ExtensionCommand, ExtensionContextMenuItem, ExtensionIcon, ExtensionId, ExtensionInfo, ExtensionPrompt,
+    ExtensionCommand, ExtensionContextMenuItem, ExtensionIcon, ExtensionId, ExtensionInfo, ExtensionInstall,
+    ExtensionInstallStage, ExtensionPrompt, ExtensionPromptDetail, ExtensionPromptSubject,
 };
 use zendia_browser_core::stub::StubBackend;
 use zendia_service::{Frame, ServiceConnection, find_service_executable, spawn_service, verify_service_handshake};
@@ -276,8 +277,17 @@ impl ExtensionAdapter {
                     .json
                     .get("details")
                     .and_then(Value::as_array)
-                    .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .map(|arr| arr.iter().filter_map(parse_prompt_detail).collect())
                     .unwrap_or_default();
+                let subject = frame.json.get("subject").and_then(Value::as_object).map(|subject| {
+                    let text = |key: &str| subject.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+                    ExtensionPromptSubject {
+                        name: text("name"),
+                        version: text("version"),
+                        source: text("source"),
+                        icon: None,
+                    }
+                });
                 let accept_label = frame
                     .json
                     .get("acceptLabel")
@@ -290,8 +300,16 @@ impl ExtensionAdapter {
                     message,
                     details,
                     accept_label,
+                    subject,
                 }));
             }
+            "prompt_icon" => {
+                let token = frame.json.get("token").and_then(Value::as_u64).unwrap_or(0);
+                if let Some(icon) = parse_icon_data(Some(&frame.json)) {
+                    self.core.feed_extension_prompt_icon(token, icon);
+                }
+            }
+            "install_progress" => self.feed_install_progress(&frame.json),
             "open_popup" => {
                 let ext_id = frame
                     .json
@@ -378,6 +396,51 @@ impl ExtensionAdapter {
         }
     }
 
+    fn extension_tab_id_of(&self, tab_id: TabId) -> i64 {
+        self.core
+            .model()
+            .tab(tab_id)
+            .map(extension_tab_id)
+            .unwrap_or((VIEWLESS_TAB_ID_BASE + tab_id.0) as i64)
+    }
+
+    /// Shows `ExtensionServer`'s report on an install as the install card.
+    fn feed_install_progress(&self, json: &Value) {
+        let install_id = json.get("installId").and_then(Value::as_u64).unwrap_or(0);
+        let text = |key: &str| json.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+        let stage = match json.get("stage").and_then(Value::as_str).unwrap_or("") {
+            "downloading" => ExtensionInstallStage::Downloading,
+            "checking" => ExtensionInstallStage::Checking,
+            "installing" => ExtensionInstallStage::Installing,
+            "installed" => ExtensionInstallStage::Installed {
+                updated: json.get("updated").and_then(Value::as_bool).unwrap_or(false),
+            },
+            "failed" => ExtensionInstallStage::Failed {
+                reason: text("reason"),
+                can_retry: json.get("canRetry").and_then(Value::as_bool).unwrap_or(false),
+            },
+            // Cancelled, or waiting on the install prompt, which takes the card's place.
+            _ => {
+                let current = self.core.model().extension_install;
+                if current.is_some_and(|install| install.install_id == install_id) {
+                    self.core.feed_extension_install(None);
+                }
+                return;
+            }
+        };
+        let extension_id = Some(text("extensionId"))
+            .filter(|id| !id.is_empty())
+            .map(ExtensionId::new);
+        self.core.feed_extension_install(Some(ExtensionInstall {
+            install_id,
+            extension_id,
+            name: text("name"),
+            source: text("source"),
+            icon: parse_icon_data(json.get("icon")),
+            stage,
+        }));
+    }
+
     /// Pushes the current window and tab snapshot from `BrowserCore` to `ExtensionServer`.
     pub fn push_browser_state(&self) {
         let Ok(conn) = self.connection() else {
@@ -402,17 +465,17 @@ impl ExtensionAdapter {
             .map(|(index, tab)| tab_to_json(tab, index, window_id, active_tab, &self.hub_adapter))
             .collect();
 
-        let windows = vec![json!({
-            "id": window_id,
-            "focused": true,
-            "incognito": false,
-            "type": "normal",
-            "state": "normal",
-        })];
-
+        // cgx-webext reads a window's tabs from the window itself.
         json!({
-            "windows": windows,
-            "tabs": tabs,
+            "windows": [{
+                "id": window_id,
+                "focused": true,
+                "incognito": false,
+                "type": "normal",
+                "state": "normal",
+                "tabs": tabs,
+            }],
+            "lastFocusedWindowId": window_id,
         })
     }
 
@@ -467,7 +530,7 @@ impl ExtensionAdapter {
                     .enumerate()
                     .find(|(_, t)| t.id == tab_id)
                     .map(|(i, t)| tab_to_json(t, i, window_id, model.active_tab, &self.hub_adapter))
-                    .unwrap_or_else(|| json!({ "id": tab_id.0 }));
+                    .unwrap_or_else(|| json!({ "id": self.extension_tab_id_of(tab_id) }));
                 Ok(tab_json)
             }
             "host.tabs.update" => {
@@ -513,18 +576,22 @@ impl ExtensionAdapter {
                     .enumerate()
                     .find(|(_, t)| t.id == target_id)
                     .map(|(i, t)| tab_to_json(t, i, window_id, model.active_tab, &self.hub_adapter))
-                    .unwrap_or_else(|| json!({ "id": target_id.0 }));
+                    .unwrap_or_else(|| json!({ "id": self.extension_tab_id_of(target_id) }));
                 Ok(tab_json)
             }
             "host.tabs.remove" => {
                 let mut ids = Vec::new();
+                let model = self.core.model();
                 if let Some(arr) = args.get("tabIds").and_then(Value::as_array) {
-                    for id in arr.iter().filter_map(Value::as_u64) {
-                        ids.push(TabId(id));
-                    }
+                    ids.extend(
+                        arr.iter()
+                            .filter_map(Value::as_u64)
+                            .filter_map(|id| tab_for_extension_id(&model, id)),
+                    );
                 } else if let Some(id) = args.get("tabId").and_then(Value::as_u64) {
-                    ids.push(TabId(id));
+                    ids.extend(tab_for_extension_id(&model, id));
                 }
+                drop(model);
                 for tab_id in ids {
                     let _ = self.core.invoke(Command::TabClose {
                         tab_id: Some(tab_id),
@@ -583,18 +650,22 @@ impl ExtensionAdapter {
                     .enumerate()
                     .find(|(_, t)| t.id == new_id)
                     .map(|(i, t)| tab_to_json(t, i, window_id, model.active_tab, &self.hub_adapter))
-                    .unwrap_or_else(|| json!({ "id": new_id.0 }));
+                    .unwrap_or_else(|| json!({ "id": self.extension_tab_id_of(new_id) }));
                 Ok(tab_json)
             }
             "host.tabs.move" => {
                 let mut ids = Vec::new();
+                let model = self.core.model();
                 if let Some(arr) = args.get("tabIds").and_then(Value::as_array) {
-                    for id in arr.iter().filter_map(Value::as_u64) {
-                        ids.push(TabId(id));
-                    }
+                    ids.extend(
+                        arr.iter()
+                            .filter_map(Value::as_u64)
+                            .filter_map(|id| tab_for_extension_id(&model, id)),
+                    );
                 } else if let Some(id) = args.get("tabId").and_then(Value::as_u64) {
-                    ids.push(TabId(id));
+                    ids.extend(tab_for_extension_id(&model, id));
                 }
+                drop(model);
                 let space_id = self.core.model().active_space;
                 let index = args.get("index").and_then(Value::as_i64).unwrap_or(0).max(0) as usize;
                 for (offset, tab_id) in ids.iter().enumerate() {
@@ -622,7 +693,10 @@ impl ExtensionAdapter {
                 Ok(Value::Array(moved))
             }
             "host.tabs.setZoom" => {
-                let target_id = args.get("tabId").and_then(Value::as_u64).map(TabId);
+                let target_id = args
+                    .get("tabId")
+                    .and_then(Value::as_u64)
+                    .and_then(|id| tab_for_extension_id(&self.core.model(), id));
                 let factor = args.get("zoomFactor").and_then(Value::as_f64).unwrap_or(1.0);
                 if (factor - 1.0).abs() < 0.01 || factor <= 0.0 {
                     let _ = self.core.invoke(Command::ZoomReset { tab_id: target_id });
@@ -831,7 +905,7 @@ impl Drop for ExtensionAdapter {
 impl ExtensionSource for ExtensionAdapter {
     fn invoke_action(&self, extension_id: &ExtensionId) -> CommandResult {
         let conn = self.connection()?;
-        let active_tab = self.core.model().active_tab.map(|t| t.0 as i64);
+        let active_tab = self.core.model().active_tab.map(|t| self.extension_tab_id_of(t));
         let mut payload = json!({
             "op": "action_clicked",
             "extensionId": extension_id.as_str(),
@@ -949,6 +1023,18 @@ impl ExtensionSource for ExtensionAdapter {
         Ok(())
     }
 
+    fn cancel_install(&self, install_id: u64) -> CommandResult {
+        let conn = self.connection()?;
+        conn.send_event(json!({ "op": "install_cancel", "installId": install_id }))
+            .map_err(|e| CommandError::Failed(format!("install_cancel failed: {e}")))
+    }
+
+    fn retry_install(&self, install_id: u64) -> CommandResult {
+        let conn = self.connection()?;
+        conn.send_event(json!({ "op": "install_retry", "installId": install_id }))
+            .map_err(|e| CommandError::Failed(format!("install_retry failed: {e}")))
+    }
+
     fn answer_prompt(&self, token: u64, accepted: bool) -> CommandResult {
         let conn = self.connection()?;
         conn.send_event(json!({
@@ -998,7 +1084,7 @@ impl ExtensionSource for ExtensionAdapter {
             "name": name,
         });
         if let Some(tab_id) = self.core.model().active_tab {
-            payload["tabId"] = json!(tab_id.0 as i64);
+            payload["tabId"] = json!(self.extension_tab_id_of(tab_id));
         }
         let reply = conn
             .request_sync(payload, Vec::new(), Duration::from_secs(3))
@@ -1030,9 +1116,25 @@ fn find_extension_server_executable() -> Result<PathBuf, String> {
 
 fn resolve_tab_id(core: &StubBackend, args: &Value) -> Result<TabId, String> {
     if let Some(id) = args.get("tabId").and_then(Value::as_u64) {
-        return Ok(TabId(id));
+        return tab_for_extension_id(&core.model(), id).ok_or_else(|| format!("No tab with id: {id}."));
     }
     core.model().active_tab.ok_or_else(|| "No active tab".to_string())
+}
+
+// Extensions name a tab by the id of the Hub view that shows it, as the Hub does for content scripts, webRequest and
+// injected scripts. A tab without a view yet gets an id above every view id.
+const VIEWLESS_TAB_ID_BASE: u64 = 1 << 40;
+
+fn extension_tab_id(tab: &Tab) -> i64 {
+    tab.view_id.unwrap_or(VIEWLESS_TAB_ID_BASE + tab.id.0) as i64
+}
+
+fn tab_for_extension_id(model: &BrowserModel, id: u64) -> Option<TabId> {
+    if id >= VIEWLESS_TAB_ID_BASE {
+        let tab_id = TabId(id - VIEWLESS_TAB_ID_BASE);
+        return model.tab(tab_id).filter(|tab| tab.view_id.is_none()).map(|tab| tab.id);
+    }
+    model.tab_by_view_id(id).map(|tab| tab.id)
 }
 
 fn tab_to_json(
@@ -1048,7 +1150,7 @@ fn tab_to_json(
         .map(|vid| hub_adapter.view_capabilities(vid).zoom_level as f64)
         .unwrap_or(1.0);
     json!({
-        "id": tab.id.0 as i64,
+        "id": extension_tab_id(tab),
         "windowId": window_id,
         "index": index,
         "url": tab.url,
@@ -1075,6 +1177,20 @@ fn parse_rgba_color(value: Option<&Value>) -> Option<[u8; 4]> {
         arr[2].as_u64()? as u8,
         arr[3].as_u64()? as u8,
     ])
+}
+
+/// A prompt detail: `{text, highRisk}`, or a plain string.
+fn parse_prompt_detail(value: &Value) -> Option<ExtensionPromptDetail> {
+    if let Some(text) = value.as_str() {
+        return Some(ExtensionPromptDetail {
+            text: text.to_string(),
+            high_risk: false,
+        });
+    }
+    Some(ExtensionPromptDetail {
+        text: value.get("text")?.as_str()?.to_string(),
+        high_risk: value.get("highRisk").and_then(Value::as_bool).unwrap_or(false),
+    })
 }
 
 fn parse_icon_data(value: Option<&Value>) -> Option<ExtensionIcon> {

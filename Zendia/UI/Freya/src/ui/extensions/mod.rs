@@ -4,13 +4,16 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-//! WebExtension UI surfaces: real icon renderer, HTML popup popover, modal consent prompt, and shortcut matcher.
+//! WebExtension UI surfaces: real icon renderer, HTML popup popover, modal consent prompt, install card, and shortcut
+//! matcher.
 
 pub mod icon;
+pub mod install;
 pub mod popup;
 pub mod prompt;
 
 pub use icon::ExtensionIconView;
+pub use install::ExtensionInstallCard;
 pub use popup::{
     ExtensionPopupOverlay, ExtensionPopupState, OpenExtensionPopup, assign_popup_hint_labels, popup_hints_will_consume,
     try_use_extension_popup_state, use_extension_popup_state, use_provide_extension_popup_state,

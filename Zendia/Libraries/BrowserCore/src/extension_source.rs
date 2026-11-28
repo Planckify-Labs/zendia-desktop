@@ -33,6 +33,16 @@ pub trait ExtensionSource: Send + Sync {
     /// Answers a pending user consent prompt (install, optional permissions, or uninstall).
     fn answer_prompt(&self, token: u64, accepted: bool) -> CommandResult;
 
+    /// Stops a running install, or gives up a failed one, answering the store page that asked for it.
+    fn cancel_install(&self, _install_id: u64) -> CommandResult {
+        Ok(())
+    }
+
+    /// Tries a failed install again.
+    fn retry_install(&self, _install_id: u64) -> CommandResult {
+        Ok(())
+    }
+
     /// Synchronously queries extension-registered context menu items matching a serialized click target JSON object.
     fn context_menu_items(&self, target_json: &str) -> Vec<ExtensionContextMenuItem>;
 

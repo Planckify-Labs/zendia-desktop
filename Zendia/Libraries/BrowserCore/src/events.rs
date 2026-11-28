@@ -19,7 +19,7 @@ use crate::model::{
     ServiceState, SidebarNotification, Space, SpaceId, SplitGroup, SplitGroupId, Tab, TabId, ThemeSettings,
     WhichKeyState, WindowId,
 };
-use crate::modules::{ExtensionCommand, ExtensionId, ExtensionInfo, ExtensionPrompt, PluginInfo};
+use crate::modules::{ExtensionCommand, ExtensionId, ExtensionInfo, ExtensionInstall, ExtensionPrompt, PluginInfo};
 use crate::onboarding::OnboardingState;
 use crate::picker::{PickerRequest, PickerRequestId};
 use crate::region::RegionCapture;
@@ -246,6 +246,9 @@ pub enum Event {
     },
     ExtensionPromptChanged {
         prompt: Option<ExtensionPrompt>,
+    },
+    ExtensionInstallChanged {
+        install: Option<ExtensionInstall>,
     },
     LayoutSettingsChanged {
         layout: LayoutSettings,

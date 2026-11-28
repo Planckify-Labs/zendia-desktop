@@ -21,6 +21,9 @@ pub const CHROME_OVERLAY_LEVEL: u8 = 2;
 pub const POPUP_OVERLAY_LEVEL: u8 = 3;
 /// Hover tooltips sit above every popup, menu, picker, and dialog so they are never painted behind their host card.
 pub const TOOLTIP_OVERLAY_LEVEL: u8 = POPUP_OVERLAY_LEVEL + 1;
+/// Consent prompts (an extension asking to be installed or for more access): above every other surface, so nothing can
+/// cover or imitate part of them.
+pub const CONSENT_OVERLAY_LEVEL: u8 = TOOLTIP_OVERLAY_LEVEL + 1;
 
 pub use data::{
     ColorPair, FontSizes, GlassSpec, Palette, Radii, ResolvedScheme, ResolvedTheme, Rgba, SemanticColors, ShadowSpec,

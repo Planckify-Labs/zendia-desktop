@@ -108,8 +108,57 @@ pub struct ExtensionPrompt {
     pub token: u64,
     pub title: String,
     pub message: String,
-    pub details: Vec<String>,
+    pub details: Vec<ExtensionPromptDetail>,
     pub accept_label: String,
+    /// The extension an install prompt is about. `None` for other prompts.
+    pub subject: Option<ExtensionPromptSubject>,
+}
+
+/// One line of a consent prompt, such as a permission the extension asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionPromptDetail {
+    pub text: String,
+    /// Broad access the user should notice: every site, browsing history, the debugger, native programs.
+    pub high_risk: bool,
+}
+
+/// The extension an install prompt asks about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionPromptSubject {
+    pub name: String,
+    pub version: String,
+    /// Where it comes from, for example "Chrome Web Store", "addons.mozilla.org" or a file name.
+    pub source: String,
+    /// Arrives after the prompt opens, once `ExtensionServer` has fetched it.
+    pub icon: Option<ExtensionIcon>,
+}
+
+/// An extension install the user started, from approval until it is installed, fails or is dismissed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionInstall {
+    pub install_id: u64,
+    /// Known once the package is read; store installs know it from the start.
+    pub extension_id: Option<ExtensionId>,
+    pub name: String,
+    pub source: String,
+    pub icon: Option<ExtensionIcon>,
+    pub stage: ExtensionInstallStage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionInstallStage {
+    Downloading,
+    Checking,
+    Installing,
+    Installed { updated: bool },
+    Failed { reason: String, can_retry: bool },
+}
+
+impl ExtensionInstallStage {
+    /// Whether the install is still running and can be cancelled.
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Downloading | Self::Checking | Self::Installing)
+    }
 }
 
 /// Manifest-declared keyboard shortcut command registered by an installed WebExtension.
