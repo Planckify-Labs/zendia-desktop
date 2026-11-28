@@ -8,8 +8,9 @@
 //! including automatic normal-mode keyboard hint badges (`adfewocmxzbqt`, `EXT-01`, `TB-05`).
 
 use crate::ui::core_view::use_core;
+use crate::ui::kit::{PopupPresence, use_last_some};
 use crate::ui::page::PageSurface;
-use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ThemeRole, use_theme};
+use crate::ui::theme::{ThemeRole, use_theme};
 use crate::ui::vim::page_hints::PageHintsOverlay;
 use freya::prelude::*;
 use std::rc::Rc;
@@ -398,10 +399,11 @@ impl Component for ExtensionPopupOverlay {
         let popup_state = try_use_extension_popup_state();
         let root_size = *Platform::get().current_window().root_size.read();
 
-        let Some(popup_state) = popup_state else {
-            return rect().into_element();
-        };
-        let Some(popup) = popup_state.open.read().clone() else {
+        let open_popup = popup_state.and_then(|state| state.open.read().clone());
+        let is_open = open_popup.is_some();
+        // A closed popup stays drawn while it fades out.
+        let shown = use_last_some(&open_popup);
+        let (Some(popup_state), Some(popup)) = (popup_state, shown) else {
             return rect().into_element();
         };
 
@@ -491,15 +493,13 @@ impl Component for ExtensionPopupOverlay {
             popup_state.request_close();
         };
 
-        rect()
-            .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
-            .position(Position::new_global().left(0.0).top(0.0))
-            .width(Size::percent(100.0))
-            .height(Size::percent(100.0))
-            .on_mouse_down(on_backdrop_down)
+        // It rises and fades in like the browser's own popups. The page inside is not scaled.
+        PopupPresence::anchored(is_open, (left, top))
+            .open_seq(popup.view_id)
+            .animate_scale(false)
+            .on_backdrop_mouse_down(on_backdrop_down)
             .child(
                 rect()
-                    .position(Position::new_global().left(left).top(top))
                     .width(Size::px(card_w))
                     .height(Size::px(card_h))
                     .corner_radius(CornerRadius::new_all(10.0))

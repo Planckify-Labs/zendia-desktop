@@ -11,8 +11,9 @@
 use crate::ui::chrome::menus::state::{AnchorRect, compute_popup_origin_above_or_below, use_menu_state};
 use crate::ui::core_view::{CoreView, use_core};
 use crate::ui::kit::{
-    Icon, ListNavAction, ListNavConfig, PopupContent, PopupHorizontalAlign, PopupPresence, TypeaheadState,
-    anchor_popup_origin, classify_list_key, focus_ring_border, max_popup_height, moved_index, scroll_item_into_view,
+    Icon, ListNavAction, ListNavConfig, PopupContent, PopupHorizontalAlign, PopupPresence, StaggeredRow,
+    TypeaheadState, anchor_popup_origin, classify_list_key, focus_ring_border, max_popup_height, moved_index,
+    scroll_item_into_view, use_interactive_feedback, use_last_some,
 };
 use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedTheme, ThemeRole, use_theme};
 use freya::prelude::*;
@@ -105,7 +106,14 @@ impl Component for ExtensionsMenuOverlay {
         PopupPresence::anchored(is_open, origin)
             .open_seq(seq)
             .on_backdrop_mouse_down(move |_| menu_state.close_extensions_menu())
-            .child(PopupContent::new(seq).child(ExtensionsMenuPanel::new().max_height(max_h).capture_keys(is_open)))
+            .child(
+                PopupContent::new(seq).child(
+                    ExtensionsMenuPanel::new()
+                        .max_height(max_h)
+                        .capture_keys(is_open)
+                        .stagger_trigger(seq),
+                ),
+            )
     }
 }
 
@@ -113,6 +121,8 @@ impl Component for ExtensionsMenuOverlay {
 #[derive(Clone, PartialEq)]
 pub struct ExtensionsMenuPanel {
     capture_keys: bool,
+    /// Each new value staggers the rows in again (the menu's open count); `0` draws them at rest.
+    stagger_trigger: u64,
     initial_row_menu: Option<ExtensionId>,
     max_height: f32,
     key: DiffKey,
@@ -128,10 +138,17 @@ impl ExtensionsMenuPanel {
     pub fn new() -> Self {
         Self {
             capture_keys: false,
+            stagger_trigger: 0,
             initial_row_menu: None,
             max_height: MENU_MAX_HEIGHT,
             key: DiffKey::None,
         }
+    }
+
+    /// Rows rise in one after another each time `trigger` changes, as the app menu's do.
+    pub fn stagger_trigger(mut self, trigger: u64) -> Self {
+        self.stagger_trigger = trigger;
+        self
     }
 
     /// Handles arrows, Enter and Escape from anywhere in the window while set.
@@ -275,11 +292,12 @@ impl Component for ExtensionsMenuPanel {
             );
 
         let open_menu_id = row_menu.read().clone();
+        let stagger_trigger = self.stagger_trigger;
         let row_elements: Vec<Element> = extensions
             .iter()
             .enumerate()
             .map(|(index, ext)| {
-                ExtensionMenuRow {
+                let row = ExtensionMenuRow {
                     ext: ext.clone(),
                     paused,
                     highlighted: *cursor.read() == Some(index),
@@ -287,7 +305,16 @@ impl Component for ExtensionsMenuPanel {
                     row_menu,
                     row_menu_anchor,
                 }
-                .into_element()
+                .into_element();
+                if stagger_trigger > 0 {
+                    StaggeredRow::new(index)
+                        .trigger(stagger_trigger)
+                        .key(("stagger", ext.id.0.clone()))
+                        .child(row)
+                        .into_element()
+                } else {
+                    row
+                }
             })
             .collect();
 
@@ -336,12 +363,13 @@ impl Component for ExtensionsMenuPanel {
         };
 
         // Render the row "..." submenu clamped to window bounds so it never protrudes past window/sidebar edges.
-        let open_options_overlay = open_menu_id
+        // It stays mounted for its exit motion after it closes, showing the extension it was opened for.
+        let open_options = open_menu_id
             .as_ref()
             .and_then(|id| extensions.iter().find(|e| &e.id == id))
             .and_then(|ext| {
                 (*row_menu_anchor.read()).map(|anchor| {
-                    let (ox, oy) = anchor_popup_origin(
+                    let origin = anchor_popup_origin(
                         anchor,
                         (ROW_MENU_WIDTH, ROW_MENU_HEIGHT),
                         window_size,
@@ -349,15 +377,27 @@ impl Component for ExtensionsMenuPanel {
                         4.0,
                         8.0,
                     );
-                    rect()
-                        .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
-                        .position(Position::new_global().left(ox).top(oy))
-                        .child(ExtensionRowOptions {
-                            ext: ext.clone(),
-                            row_menu,
-                        })
+                    (ext.clone(), origin)
                 })
             });
+        let options_open = open_options.is_some();
+        let shown_options = use_last_some(&open_options);
+        let open_options_overlay = shown_options.map(|(ext, (ox, oy))| {
+            let seq = ext
+                .id
+                .0
+                .bytes()
+                .fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(u64::from(b)));
+            rect()
+                .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
+                .position(Position::new_global().left(ox).top(oy))
+                .child(
+                    PopupPresence::inline(options_open)
+                        .open_seq(seq)
+                        .animate_on_mount(true)
+                        .child(ExtensionRowOptions { ext, row_menu }),
+                )
+        });
 
         let card = rect()
             .a11y_role(AccessibilityRole::Menu)
@@ -414,15 +454,19 @@ impl Component for ExtensionMenuRow {
         let ext = self.ext.clone();
         let mut row_menu = self.row_menu;
         let mut row_menu_anchor = self.row_menu_anchor;
-        let mut row_hovered = use_state(|| false);
-        let mut more_hovered = use_state(|| false);
+        let usable = ext.enabled && !self.paused;
+        let row_fb = use_interactive_feedback(usable);
+        let more_fb = use_interactive_feedback(true);
         let mut more_area = use_state(AnchorRect::default);
         let row_a11y = use_a11y();
         let more_a11y = use_a11y();
         let row_focus = use_focus(row_a11y);
         let more_focus = use_focus(more_a11y);
-        let usable = ext.enabled && !self.paused;
         let hover = theme.color(ThemeRole::Hover);
+        let pressed = theme
+            .rgba(ThemeRole::Hover)
+            .mix(theme.rgba(ThemeRole::Text), 0.06)
+            .to_color();
 
         let run_action = {
             let core = core.clone();
@@ -531,11 +575,8 @@ impl Component for ExtensionMenuRow {
             .height(Size::px(28.0))
             .corner_radius(CornerRadius::new_all(6.0))
             .center()
-            .background(if self.menu_open || *more_hovered.read() {
-                hover
-            } else {
-                Color::TRANSPARENT
-            })
+            .background(more_fb.background(if self.menu_open { hover } else { Color::TRANSPARENT }, hover, pressed))
+            .scale(more_fb.scale())
             .border(focus_ring_border(
                 more_focus() == Focus::Keyboard,
                 &theme,
@@ -549,8 +590,10 @@ impl Component for ExtensionMenuRow {
                 }
             })
             .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
-            .on_pointer_enter(move |_| more_hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| more_hovered.set_if_modified(false))
+            .on_pointer_enter(more_fb.on_pointer_enter())
+            .on_pointer_leave(more_fb.on_pointer_leave())
+            .on_pointer_down(more_fb.on_pointer_down())
+            .on_global_pointer_up(more_fb.on_pointer_up())
             .cursor(CursorIcon::Pointer)
             .on_press(toggle_row_menu)
             .child(
@@ -574,14 +617,17 @@ impl Component for ExtensionMenuRow {
                 .content(Content::Flex)
                 .cross_align(Alignment::Center)
                 .spacing(10.0)
-                .background(if self.highlighted || (*row_hovered.read() && usable) {
-                    hover
-                } else {
-                    Color::TRANSPARENT
-                })
+                .background(row_fb.background(
+                    if self.highlighted { hover } else { Color::TRANSPARENT },
+                    hover,
+                    pressed,
+                ))
+                .scale(row_fb.scale())
                 .border(focus_ring_border(row_focus() == Focus::Keyboard, &theme, Border::new()))
-                .on_pointer_enter(move |_| row_hovered.set_if_modified(true))
-                .on_pointer_leave(move |_| row_hovered.set_if_modified(false))
+                .on_pointer_enter(row_fb.on_pointer_enter())
+                .on_pointer_leave(row_fb.on_pointer_leave())
+                .on_pointer_down(row_fb.on_pointer_down())
+                .on_global_pointer_up(row_fb.on_pointer_up())
                 .cursor(if usable {
                     CursorIcon::Pointer
                 } else {
@@ -716,10 +762,15 @@ struct MenuItemRow {
 impl Component for MenuItemRow {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
-        let mut hovered = use_state(|| false);
+        let feedback = use_interactive_feedback(true);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
         let on_press = self.on_press.clone();
+        let hover = theme.color(ThemeRole::Hover);
+        let pressed = theme
+            .rgba(ThemeRole::Hover)
+            .mix(theme.rgba(ThemeRole::Text), 0.06)
+            .to_color();
         rect()
             .a11y_id(a11y_id)
             .a11y_focusable(true)
@@ -732,14 +783,13 @@ impl Component for MenuItemRow {
             .direction(Direction::Horizontal)
             .cross_align(Alignment::Center)
             .spacing(10.0)
-            .background(if *hovered.read() {
-                theme.color(ThemeRole::Hover)
-            } else {
-                Color::TRANSPARENT
-            })
+            .background(feedback.background(Color::TRANSPARENT, hover, pressed))
+            .scale(feedback.scale())
             .border(focus_ring_border(focus() == Focus::Keyboard, &theme, Border::new()))
-            .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
+            .on_pointer_down(feedback.on_pointer_down())
+            .on_global_pointer_up(feedback.on_pointer_up())
             .cursor(CursorIcon::Pointer)
             .on_press(move |e: Event<PressEventData>| {
                 e.stop_propagation();

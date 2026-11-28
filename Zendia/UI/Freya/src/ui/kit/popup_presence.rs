@@ -565,6 +565,7 @@ pub struct StaggeredRow {
     index: usize,
     trigger: u64,
     animate_on_mount: bool,
+    shrink: bool,
     children: Vec<Element>,
     key: DiffKey,
 }
@@ -587,6 +588,7 @@ impl StaggeredRow {
             index,
             trigger: 0,
             animate_on_mount: false,
+            shrink: false,
             children: Vec::new(),
             key: DiffKey::None,
         }
@@ -599,6 +601,12 @@ impl StaggeredRow {
 
     pub fn animate_on_mount(mut self, enabled: bool) -> Self {
         self.animate_on_mount = enabled;
+        self
+    }
+
+    /// Takes its content's size instead of the full width (for items in a grid or wrapping row).
+    pub fn shrink(mut self) -> Self {
+        self.shrink = true;
         self
     }
 }
@@ -624,7 +632,7 @@ impl Component for StaggeredRow {
         let y_offset = motion::CONTENT_IN_Y * (1.0 - factor);
 
         rect()
-            .width(Size::fill())
+            .width(if self.shrink { Size::auto() } else { Size::fill() })
             .opacity(factor)
             .offset_y(y_offset)
             .children(self.children.clone())

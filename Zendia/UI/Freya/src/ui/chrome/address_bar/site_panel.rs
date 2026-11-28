@@ -16,7 +16,8 @@ use crate::ui::chrome::menus::state::clamp_popup_origin;
 use crate::ui::core_view::use_core;
 use crate::ui::kit::icons::prepared_icon_bytes;
 use crate::ui::kit::{
-    Icon, KitTooltip, PopupContent, PopupHorizontalAlign, PopupPresence, anchor_popup_origin, focus_ring_border,
+    Icon, KitTooltip, PopupContent, PopupHorizontalAlign, PopupPresence, StaggeredRow, anchor_popup_origin,
+    focus_ring_border, use_interactive_feedback, use_last_some,
 };
 use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedScheme, Rgba, ThemeRole, motion, use_theme};
 use freya::animation::*;
@@ -94,8 +95,11 @@ impl Component for SiteDataPanelOverlay {
             .on_escape(move |_| state.close_site_panel())
             .on_backdrop_mouse_down(move |_| state.close_site_panel())
             .child(
-                PopupContent::new(seq)
-                    .child(SiteDataPanelCard::new(site_info, extensions).on_close(move |_| state.close_site_panel())),
+                PopupContent::new(seq).child(
+                    SiteDataPanelCard::new(site_info, extensions)
+                        .stagger_trigger(seq)
+                        .on_close(move |_| state.close_site_panel()),
+                ),
             )
     }
 }
@@ -106,6 +110,8 @@ pub struct SiteDataPanelCard {
     site_info: SiteInfo,
     extensions: Vec<SiteExtension>,
     on_close: Option<EventHandler<()>>,
+    /// Each new value cascades the extension tiles in again (the panel's open count); `0` draws them at rest.
+    stagger_trigger: u64,
     key: DiffKey,
 }
 
@@ -121,8 +127,14 @@ impl SiteDataPanelCard {
             site_info,
             extensions,
             on_close: None,
+            stagger_trigger: 0,
             key: DiffKey::None,
         }
+    }
+
+    pub fn stagger_trigger(mut self, trigger: u64) -> Self {
+        self.stagger_trigger = trigger;
+        self
     }
 
     pub fn on_close(mut self, handler: impl Into<EventHandler<()>>) -> Self {
@@ -336,17 +348,19 @@ impl Component for SiteDataPanelCard {
             _ => true,
         };
 
+        let stagger_trigger = self.stagger_trigger;
         let ext_tiles: Vec<Element> = self
             .extensions
             .iter()
-            .map(|ext| {
+            .enumerate()
+            .map(|(index, ext)| {
                 let ext_core = core.clone();
                 let ext_id = ext.extension_id();
                 let ext_cmd = ext.command.clone();
                 let close_ext = self.on_close.clone();
                 let ctx_ext_id = ext_id.clone();
                 let ctx_ext_name = ext.name.clone();
-                SiteExtensionTile {
+                let tile = SiteExtensionTile {
                     extension: ext.clone(),
                     paused: extensions_paused,
                     usable: ext.enabled && !extensions_paused,
@@ -370,7 +384,18 @@ impl Component for SiteDataPanelCard {
                     }),
                     key: DiffKey::from(&ext.id.0),
                 }
-                .into_element()
+                .into_element();
+                // The tiles cascade in after the panel settles, as menu rows do.
+                if stagger_trigger > 0 {
+                    StaggeredRow::new(index)
+                        .trigger(stagger_trigger)
+                        .shrink()
+                        .key(("ext-stagger", ext.id.0.clone()))
+                        .child(tile)
+                        .into_element()
+                } else {
+                    tile
+                }
             })
             .collect();
 
@@ -1003,7 +1028,14 @@ impl Component for SiteDataPanelCard {
         });
 
         // Anchored right-click context menu for an extension tile (`#unified-extensions-context-menu`).
-        let ext_menu_popup = ext_ctx_menu.read().clone().map(|(ext_id, _ext_name, anchor)| {
+        // It stays mounted for its exit motion, showing the extension it was opened for.
+        let ctx_menu_now = ext_ctx_menu.read().clone();
+        let ctx_menu_open = ctx_menu_now.is_some();
+        let shown_ctx_menu = use_last_some(&ctx_menu_now);
+        let ext_menu_popup = shown_ctx_menu.map(|(ext_id, _ext_name, anchor)| {
+            let menu_seq = ext_id.0.bytes().fold(u64::from(anchor.x.to_bits()), |h, b| {
+                h.wrapping_mul(31).wrapping_add(u64::from(b))
+            });
             let pin_core = core.clone();
             let opt_core = core.clone();
             let manage_core = core.clone();
@@ -1032,9 +1064,7 @@ impl Component for SiteDataPanelCard {
                 4.0,
                 8.0,
             );
-            rect()
-                .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL + 1))
-                .position(Position::new_global().left(ox).top(oy))
+            let card = rect()
                 .width(Size::px(EXT_MENU_WIDTH))
                 .padding(Gaps::new_all(4.0))
                 .spacing(2.0)
@@ -1105,7 +1135,16 @@ impl Component for SiteDataPanelCard {
                         });
                         ext_ctx_menu.set(None);
                     }),
-                })
+                });
+            rect()
+                .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL + 1))
+                .position(Position::new_global().left(ox).top(oy))
+                .child(
+                    PopupPresence::inline(ctx_menu_open)
+                        .open_seq(menu_seq)
+                        .animate_on_mount(true)
+                        .child(card),
+                )
         });
 
         let core_vim = core.clone();
@@ -1468,7 +1507,7 @@ struct SitePopupMenuRow {
 impl Component for SitePopupMenuRow {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
-        let mut hovered = use_state(|| false);
+        let feedback = use_interactive_feedback(true);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
 
@@ -1485,14 +1524,17 @@ impl Component for SitePopupMenuRow {
         } else {
             ThemeRole::TextMuted
         };
-        let bg = if *hovered.read() {
-            match theme.scheme {
-                ResolvedScheme::Dark => Rgba::from_rgb_alpha(255, 255, 255, 0.10).to_color(),
-                ResolvedScheme::Light => Rgba::from_rgb_alpha(0, 0, 0, 0.08).to_color(),
-            }
-        } else {
-            Color::TRANSPARENT
+        let (hover_bg, pressed_bg) = match theme.scheme {
+            ResolvedScheme::Dark => (
+                Rgba::from_rgb_alpha(255, 255, 255, 0.10).to_color(),
+                Rgba::from_rgb_alpha(255, 255, 255, 0.16).to_color(),
+            ),
+            ResolvedScheme::Light => (
+                Rgba::from_rgb_alpha(0, 0, 0, 0.08).to_color(),
+                Rgba::from_rgb_alpha(0, 0, 0, 0.13).to_color(),
+            ),
         };
+        let bg = feedback.background(Color::TRANSPARENT, hover_bg, pressed_bg);
         let on_press = self.on_press.clone();
         let key_press = self.on_press.clone();
 
@@ -1510,8 +1552,11 @@ impl Component for SitePopupMenuRow {
             .background(bg)
             .border(focus_ring_border(focus() == Focus::Keyboard, &theme, Border::new()))
             .cursor(CursorIcon::Pointer)
-            .on_pointer_enter(move |_| hovered.set_if_modified(true))
-            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .scale(feedback.scale())
+            .on_pointer_enter(feedback.on_pointer_enter())
+            .on_pointer_leave(feedback.on_pointer_leave())
+            .on_pointer_down(feedback.on_pointer_down())
+            .on_global_pointer_up(feedback.on_pointer_up())
             .on_press(move |e: Event<PressEventData>| {
                 e.stop_propagation();
                 on_press.call(());
