@@ -130,7 +130,14 @@ private:
     u32 m_network_interest { 0 };
     HashMap<ByteString, NonnullOwnPtr<HeadlessWebView>> m_background_views;
     HashTable<u64> m_popup_views;
-    HashMap<u64, WeakPtr<WebContentClient>> m_pending_network_answers;
+    // Each WebContent process numbers its own tokens, so the same token can come from two processes at once. The
+    // ExtensionServer sees the bridge's own number instead, which maps back to the process and its token.
+    struct PendingNetworkAnswer {
+        WeakPtr<WebContentClient> client;
+        u64 token { 0 };
+    };
+    HashMap<u64, PendingNetworkAnswer> m_pending_network_answers;
+    u64 m_next_network_token { 1 };
     HashMap<u64, NonnullOwnPtr<PendingDownload>> m_downloads;
 };
 

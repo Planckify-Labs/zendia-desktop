@@ -84,9 +84,9 @@ void EmbedderExtensionBridge::disconnect()
 
     // Release any WebContent fetches waiting on a network answer from the dead ExtensionServer.
     auto pending_net = move(m_pending_network_answers);
-    for (auto const& [token, weak_client] : pending_net) {
-        if (auto client = weak_client.strong_ref())
-            client->async_extension_network_answer(token, "{}"_string);
+    for (auto const& [bridge_token, pending] : pending_net) {
+        if (auto client = pending.client.strong_ref())
+            client->async_extension_network_answer(pending.token, "{}"_string);
     }
 
     for (auto& [id, download] : m_downloads) {
@@ -470,11 +470,14 @@ void EmbedderExtensionBridge::report_network_stage(WeakPtr<WebContentClient> cli
         }
         return;
     }
-    if (token != 0)
-        m_pending_network_answers.set(token, move(client));
+    u64 bridge_token = 0;
+    if (token != 0) {
+        bridge_token = m_next_network_token++;
+        m_pending_network_answers.set(bridge_token, { move(client), token });
+    }
     JsonObject ev;
     ev.set("op"sv, "network_stage"sv);
-    ev.set("token"sv, token);
+    ev.set("token"sv, bridge_token);
     ev.set("stage"sv, MUST(String::from_utf8(stage)));
     ev.set("isTab"sv, is_tab);
     ev.set("details"sv, details);
@@ -532,9 +535,9 @@ void EmbedderExtensionBridge::dispatch_incoming_frame(Frame const& frame)
     if (op == "network_answer"sv) {
         auto token = frame.json.get_integer<u64>("token"sv).value_or(0);
         auto answer_json = frame.json.get_string("answerJson"sv).value_or("{}"_string);
-        if (auto weak = m_pending_network_answers.take(token); weak.has_value()) {
-            if (auto client = weak->strong_ref())
-                client->async_extension_network_answer(token, answer_json);
+        if (auto pending = m_pending_network_answers.take(token); pending.has_value()) {
+            if (auto client = pending->client.strong_ref())
+                client->async_extension_network_answer(pending->token, answer_json);
         }
         return;
     }
