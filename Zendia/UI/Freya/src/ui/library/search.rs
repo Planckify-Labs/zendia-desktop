@@ -13,7 +13,7 @@
 
 use crate::ui::core_view::use_core;
 use crate::ui::kit::Icon;
-use crate::ui::library::nav::NavMove;
+use crate::ui::library::nav::{LibraryCursorRing, LibraryNavRow, NavMove};
 use crate::ui::library::try_use_library_state;
 use crate::ui::theme::{ResolvedScheme, Rgba, ThemeRole, motion, use_theme};
 use freya::animation::*;
@@ -148,6 +148,19 @@ impl LibrarySearchBar {
         self.force_focused_ring = focused;
         self
     }
+
+    /// Builds walkable cursor rows (`filter:done` + `filter:{group}:{chip}`) for an open filter panel (`LIB-05`).
+    pub fn filter_nav_rows(groups: &[LibraryFilterGroup]) -> Vec<LibraryNavRow> {
+        let mut rows = vec![LibraryNavRow::new("filter:done", None)];
+        for group in groups {
+            for option in &group.options {
+                if !option.disabled {
+                    rows.push(LibraryNavRow::new(format!("filter:{}:{}", group.id, option.id), None));
+                }
+            }
+        }
+        rows
+    }
 }
 
 fn pill_colors(scheme: ResolvedScheme) -> (Color, Color, Color) {
@@ -175,6 +188,25 @@ impl Component for LibrarySearchBar {
         let mut filter_btn_hovered = use_state(|| false);
         let mut done_btn_hovered = use_state(|| false);
         let mut last_query = use_state(|| self.query.peek().clone());
+        let mut handled_activate_seq = use_state(|| library.map(|l| *l.nav.activate_seq.peek()).unwrap_or(0));
+        let mut last_open_focus_key =
+            use_state(|| (false, None::<zendia_browser_core::library::LibrarySection>, false));
+
+        let drop_filters_state = self.filters_open.unwrap_or(fallback_filters_open);
+        use_drop(move || {
+            if let Some(lib) = library {
+                let mut nav_fp = lib.nav.filter_panel_open;
+                if *nav_fp.peek() == Some(drop_filters_state) {
+                    nav_fp.set(None);
+                }
+                let mut nav_sid = lib.nav.search_a11y_id;
+                if *nav_sid.peek() == Some(input_a11y_id) {
+                    nav_sid.set(None);
+                }
+                let mut ins = lib.nav.inserting;
+                ins.set_if_modified(false);
+            }
+        });
 
         // Reset list cursor to the top match whenever the search query changes (`LIB-KB-02`).
         let current_query = self.query.read().clone();
@@ -189,8 +221,9 @@ impl Component for LibrarySearchBar {
         let filters_open_state = self.filters_open.unwrap_or(fallback_filters_open);
         let has_filters = !self.filter_groups.is_empty();
         let is_filters_open = has_filters && *filters_open_state.read();
+        let cursor_key = library.and_then(|lib| lib.nav.cursor.read().clone());
 
-        // Register this section's search input and filter panel with the keyboard layer.
+        // Register this section's search input and filter panel with the keyboard layer, and auto-focus search on open (`LIB-07`).
         if let Some(lib) = library {
             let mut nav_search_id = lib.nav.search_a11y_id;
             nav_search_id.set_if_modified(Some(input_a11y_id));
@@ -198,6 +231,43 @@ impl Component for LibrarySearchBar {
             let next_filter_panel = has_filters.then_some(filters_open_state);
             if *nav_filter_panel.peek() != next_filter_panel {
                 nav_filter_panel.set(next_filter_panel);
+            }
+
+            let is_open = *lib.open.read();
+            let active_sec = Some(*lib.section.read());
+            let focus_key = (is_open, active_sec, is_filters_open);
+            if *last_open_focus_key.peek() != focus_key {
+                last_open_focus_key.set(focus_key);
+                if is_open && !is_filters_open && *lib.nav.keyboard_focused.peek() {
+                    if *lib.nav.stay_in_list.peek() {
+                        let mut stay = lib.nav.stay_in_list;
+                        stay.set(false);
+                        lib.nav.focus_list();
+                    } else if self.auto_focus {
+                        let mut ins = lib.nav.inserting;
+                        ins.set_if_modified(true);
+                        input_a11y_id.request_focus();
+                    } else {
+                        lib.nav.focus_list();
+                    }
+                }
+            }
+
+            // Handle `<CR>` / `o` activation on filter panel controls (`LIB-05`).
+            let act_seq = *lib.nav.activate_seq.read();
+            if act_seq != *handled_activate_seq.peek() {
+                handled_activate_seq.set(act_seq);
+                if is_filters_open && let Some(key) = lib.nav.activated_key.peek().clone() {
+                    if key == "filter:done" {
+                        let mut open_state = filters_open_state;
+                        open_state.set(false);
+                    } else if let Some(rest) = key.strip_prefix("filter:")
+                        && let Some((gid, cid)) = rest.split_once(':')
+                        && let Some(handler) = &self.on_toggle_filter
+                    {
+                        handler.call((gid.to_string(), cid.to_string()));
+                    }
+                }
             }
         }
 
@@ -309,6 +379,8 @@ impl Component for LibrarySearchBar {
                         if let Some(lib) = library
                             && let Some(next) = lib.adjacent_visible_section(if shift { -1 } else { 1 })
                         {
+                            let mut stay = lib.nav.stay_in_list;
+                            stay.set_if_modified(false);
                             core.invoke_or_log(Command::LibraryOpen { section: Some(next) });
                         }
                         false
@@ -342,11 +414,32 @@ impl Component for LibrarySearchBar {
 
         let header: Element = if is_filters_open {
             let mut open_state = filters_open_state;
+            let done_focused = cursor_key.as_deref() == Some("filter:done");
             let done_bg = if *done_btn_hovered.read() {
                 pill_hover_bg
             } else {
                 pill_bg
             };
+            let done_btn = rect()
+                .a11y_role(AccessibilityRole::Button)
+                .a11y_alt("Done")
+                .height(Size::px(34.0))
+                .padding(Gaps::new(0.0, 14.0, 0.0, 14.0))
+                .corner_radius(CornerRadius::new_all(SEARCH_RADIUS))
+                .background(done_bg)
+                .main_align(Alignment::center())
+                .cross_align(Alignment::center())
+                .cursor(CursorIcon::Pointer)
+                .on_pointer_enter(move |_| done_btn_hovered.set_if_modified(true))
+                .on_pointer_leave(move |_| done_btn_hovered.set_if_modified(false))
+                .on_press(move |_| open_state.set(false))
+                .child(
+                    label()
+                        .text("Done")
+                        .font_size(13.5)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .color(text_color),
+                );
             rect()
                 .width(Size::fill())
                 .height(Size::px(SEARCH_BOX_HEIGHT))
@@ -362,26 +455,11 @@ impl Component for LibrarySearchBar {
                         .color(text_color),
                 )
                 .child(
-                    rect()
-                        .a11y_role(AccessibilityRole::Button)
-                        .a11y_alt("Done")
-                        .height(Size::px(34.0))
-                        .padding(Gaps::new(0.0, 14.0, 0.0, 14.0))
-                        .corner_radius(CornerRadius::new_all(SEARCH_RADIUS))
-                        .background(done_bg)
-                        .main_align(Alignment::center())
-                        .cross_align(Alignment::center())
-                        .cursor(CursorIcon::Pointer)
-                        .on_pointer_enter(move |_| done_btn_hovered.set_if_modified(true))
-                        .on_pointer_leave(move |_| done_btn_hovered.set_if_modified(false))
-                        .on_press(move |_| open_state.set(false))
-                        .child(
-                            label()
-                                .text("Done")
-                                .font_size(13.5)
-                                .font_weight(FontWeight::SEMI_BOLD)
-                                .color(text_color),
-                        ),
+                    rect().child(
+                        LibraryCursorRing::new(done_focused, done_btn)
+                            .corner_radius(SEARCH_RADIUS)
+                            .row_key("filter:done"),
+                    ),
                 )
                 .into_element()
         } else {
@@ -460,29 +538,38 @@ impl Component for LibrarySearchBar {
                                 .child(Icon::new("search-glass").size(15.0).role(ThemeRole::Text)),
                         )
                         .child(
-                            rect().width(Size::flex(1.0)).font_size(13.5).child(
-                                Input::new(self.query)
-                                    .a11y_id(input_a11y_id)
-                                    .auto_focus(self.auto_focus)
-                                    .flat()
-                                    .compact()
-                                    .placeholder(self.placeholder.clone())
-                                    .width(Size::fill())
-                                    .background(Color::TRANSPARENT)
-                                    .focus_background(Color::TRANSPARENT)
-                                    .border_fill(Color::TRANSPARENT)
-                                    .focus_border_fill(Color::TRANSPARENT)
-                                    .color(text_color)
-                                    .placeholder_color(placeholder_color)
-                                    .padding(Gaps::new(0.0, 2.0, 0.0, 2.0))
-                                    .corner_radius(CornerRadius::new_all(0.0))
-                                    .on_pre_key_down(on_pre_key_down)
-                                    .on_submit(move |_: String| {
-                                        if let Some(lib) = library {
-                                            lib.nav.activate_cursor(&submit_core);
-                                        }
-                                    }),
-                            ),
+                            rect()
+                                .width(Size::flex(1.0))
+                                .font_size(13.5)
+                                .on_pointer_down(move |_| {
+                                    if let Some(lib) = library {
+                                        let mut ins = lib.nav.inserting;
+                                        ins.set_if_modified(true);
+                                    }
+                                })
+                                .child(
+                                    Input::new(self.query)
+                                        .a11y_id(input_a11y_id)
+                                        .auto_focus(self.auto_focus)
+                                        .flat()
+                                        .compact()
+                                        .placeholder(self.placeholder.clone())
+                                        .width(Size::fill())
+                                        .background(Color::TRANSPARENT)
+                                        .focus_background(Color::TRANSPARENT)
+                                        .border_fill(Color::TRANSPARENT)
+                                        .focus_border_fill(Color::TRANSPARENT)
+                                        .color(text_color)
+                                        .placeholder_color(placeholder_color)
+                                        .padding(Gaps::new(0.0, 2.0, 0.0, 2.0))
+                                        .corner_radius(CornerRadius::new_all(0.0))
+                                        .on_pre_key_down(on_pre_key_down)
+                                        .on_submit(move |_: String| {
+                                            if let Some(lib) = library {
+                                                lib.nav.activate_cursor(&submit_core);
+                                            }
+                                        }),
+                                ),
                         ),
                 )
                 .maybe_child(filter_button)
@@ -506,9 +593,13 @@ impl Component for LibrarySearchBar {
                         .direction(Direction::Horizontal)
                         .spacing(8.0);
                     for option in row_chips {
+                        let chip_row_key = format!("filter:{}:{}", group.id, option.id);
+                        let chip_focused = cursor_key.as_deref() == Some(chip_row_key.as_str());
                         chips_row = chips_row.child(FilterChipButton {
                             group_id: group.id.clone(),
                             chip: option.clone(),
+                            focused: chip_focused,
+                            row_key: chip_row_key,
                             pill_bg,
                             pill_hover_bg,
                             pill_active_bg,
@@ -551,6 +642,8 @@ impl Component for LibrarySearchBar {
 struct FilterChipButton {
     group_id: String,
     chip: LibraryFilterChip,
+    focused: bool,
+    row_key: String,
     pill_bg: Color,
     pill_hover_bg: Color,
     pill_active_bg: Color,
@@ -576,7 +669,7 @@ impl Component for FilterChipButton {
         let group_id = self.group_id.clone();
         let option_id = self.chip.id.clone();
 
-        rect()
+        let chip_el = rect()
             .a11y_role(AccessibilityRole::Button)
             .a11y_alt(self.chip.label.clone())
             .padding(Gaps::new(8.0, 13.0, 8.0, 13.0))
@@ -615,7 +708,13 @@ impl Component for FilterChipButton {
                         FontWeight::NORMAL
                     })
                     .color(theme.color(ThemeRole::Text)),
-            )
+            );
+
+        rect().child(
+            LibraryCursorRing::new(self.focused && !disabled, chip_el)
+                .corner_radius(SEARCH_RADIUS)
+                .row_key(self.row_key.clone()),
+        )
     }
 
     fn render_key(&self) -> DiffKey {

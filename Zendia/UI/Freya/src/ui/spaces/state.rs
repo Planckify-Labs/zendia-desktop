@@ -63,6 +63,13 @@ pub struct SpaceEditingState {
     pub theme_picker_anchor: State<(f32, f32)>,
     pub preset_page: State<usize>,
 
+    // Live existing-space icon picker (`<leader><Tab>i` outside Library, `NAV-19`)
+    pub live_icon_picker_space: State<Option<SpaceId>>,
+    pub live_icon_picker_anchor: State<(f32, f32)>,
+
+    // Non-empty space delete confirmation dialog (`<leader><Tab>d`, `NAV-13`)
+    pub delete_confirm_space: State<Option<(SpaceId, String, usize)>>,
+
     // Sidebar swipe gesture state
     pub swipe: State<SpaceSwipeViewState>,
 }
@@ -142,9 +149,39 @@ impl SpaceEditingState {
         for_draft.set_if_modified(false);
     }
 
+    /// Opens the searchable icon picker anchored to the sidebar for an existing space (`NAV-19`).
+    pub fn open_live_icon_picker(&self, space_id: SpaceId, anchor: Option<(f32, f32)>) {
+        if let Some(pos) = anchor {
+            let mut a = self.live_icon_picker_anchor;
+            a.set(pos);
+        }
+        let mut space = self.live_icon_picker_space;
+        space.set(Some(space_id));
+    }
+
+    pub fn close_live_icon_picker(&self) {
+        let mut space = self.live_icon_picker_space;
+        space.set_if_modified(None);
+    }
+
+    /// Opens the confirmation dialog before deleting a non-empty space (`NAV-13`).
+    pub fn open_delete_confirm(&self, space_id: SpaceId, space_name: String, tab_count: usize) {
+        let mut confirm = self.delete_confirm_space;
+        confirm.set(Some((space_id, space_name, tab_count)));
+    }
+
+    pub fn close_delete_confirm(&self) {
+        let mut confirm = self.delete_confirm_space;
+        confirm.set_if_modified(None);
+    }
+
+    pub fn has_modal_open(&self) -> bool {
+        self.live_icon_picker_space.peek().is_some() || self.delete_confirm_space.peek().is_some()
+    }
+
     /// Whether the space creation form is open and capturing plain text input.
     pub fn captures_text_input(&self) -> bool {
-        *self.create_form_open.peek()
+        *self.create_form_open.peek() || self.live_icon_picker_space.peek().is_some()
     }
 
     /// Returns a live preview appearance when the space creation form is active and has dots or texture set.
@@ -162,6 +199,8 @@ impl SpaceEditingState {
     pub fn reset(&self) {
         self.close_create_form();
         self.close_theme_picker();
+        self.close_live_icon_picker();
+        self.close_delete_confirm();
         let mut page = self.preset_page;
         page.set_if_modified(0);
         let mut swipe = self.swipe;
@@ -186,6 +225,10 @@ pub fn use_provide_space_editing_state() -> SpaceEditingState {
     let theme_picker_anchor = use_state(|| (194.0f32, 86.0f32));
     let preset_page = use_state(|| 0usize);
 
+    let live_icon_picker_space = use_state(|| None::<SpaceId>);
+    let live_icon_picker_anchor = use_state(|| (194.0f32, 86.0f32));
+    let delete_confirm_space = use_state(|| None::<(SpaceId, String, usize)>);
+
     let swipe = use_state(SpaceSwipeViewState::default);
 
     use_provide_context(|| SpaceEditingState {
@@ -202,6 +245,9 @@ pub fn use_provide_space_editing_state() -> SpaceEditingState {
         theme_picker_for_draft,
         theme_picker_anchor,
         preset_page,
+        live_icon_picker_space,
+        live_icon_picker_anchor,
+        delete_confirm_space,
         swipe,
     })
 }

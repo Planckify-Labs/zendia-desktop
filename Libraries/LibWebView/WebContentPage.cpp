@@ -1049,7 +1049,7 @@ void WebContentPage::did_find_in_page(size_t current_match_index, Optional<size_
 
 void WebContentPage::did_reply_embedder_message(u64 request_id, bool ok, String result_json)
 {
-    if (displays_tab()) {
+    if (displays_tab() || request_id == 0) {
         if (view().on_embedder_reply)
             view().on_embedder_reply(request_id, ok, result_json);
     }

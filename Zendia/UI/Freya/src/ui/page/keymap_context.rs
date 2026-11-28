@@ -6,68 +6,89 @@
 
 //! Window-scoped keymap context resolving Freya keyboard events through [`zendia_keymap`] into core commands.
 //!
-//! With vim mode off, keys resolve through the standard table. With it on, they go through two vim key engines, as in
-//! the old fork: one for the page's modes (normal, insert, visual) and one for the browser's own surfaces (explorer,
-//! toolbar, library, window mode), so keys half typed in one never leak into the other. The core's input mode says
-//! which engine a key goes to, and the engine reports what it has pending back to the core for the mode indicator and
-//! which-key.
+//! With vim mode off, keys resolve through the standard table. With it on, they go through per-page vim key engines
+//! (one per tab or auxiliary view for normal, insert, and visual modes) plus one chrome engine for the browser's own
+//! surfaces (explorer, toolbar, library, window mode), falling back to `standard.toml` whenever an idle vim engine
+//! leaves a key unused (`RT-01`, `RT-02`, `MD-01`).
 
 use crate::input;
 use crate::ui::core_view::CoreView;
+use crate::ui::page::surface_store::PageSurfaceContext;
 use freya::prelude::*;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use zendia_browser_core::commands::Command;
-use zendia_browser_core::input_state::{mode_code, vim_profile};
-use zendia_browser_core::model::{BrowserModel, InputMode};
+use zendia_browser_core::input_state::{active_vim_profile, mode_code};
+use zendia_browser_core::model::{BrowserModel, InputMode, TabId};
 use zendia_browser_core::vim_keys::{VimCommand, commands_for_key};
 use zendia_keymap::{CommandInvocation, KeyEngine, KeyMatch, KeyResolver, KeyStroke, KeyTable, ModeTables, Resolution};
 
-/// Which of the two vim engines a key goes to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EngineKind {
-    Page,
+const MAX_HELD_KEYS: usize = 64;
+
+/// Which engine slot a key targets: either the window's chrome surface engine or a specific page's engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum EngineSlot {
+    Page(Option<TabId>),
     Chrome,
 }
 
-impl EngineKind {
-    fn for_mode(mode: InputMode) -> Self {
+impl EngineSlot {
+    fn for_model(mode: InputMode, page_id: Option<TabId>) -> Self {
         match mode {
             InputMode::Explorer | InputMode::Toolbar | InputMode::Library | InputMode::Window => Self::Chrome,
-            InputMode::Normal | InputMode::Insert | InputMode::Visual => Self::Page,
+            InputMode::Normal | InputMode::Insert | InputMode::Visual => Self::Page(page_id),
         }
     }
 }
 
+/// Insert-mode bindings that apply only while an editable field actually holds focus (`test_ctrl_w_outside_a_field_still_closes_the_tab`).
+fn insert_binding_requires_field(command: &str) -> bool {
+    command.starts_with("edit.") || command.starts_with("yank.put_")
+}
+
 struct VimEngines {
-    page: KeyEngine,
+    tables: Arc<ModeTables>,
+    pages: HashMap<TabId, KeyEngine>,
+    fallback_page: KeyEngine,
     chrome: KeyEngine,
-    /// The timer generation each engine has a task waiting on.
-    scheduled: [Option<u64>; 2],
+    /// Timer generation each engine slot currently has a task waiting on.
+    scheduled: HashMap<EngineSlot, u64>,
 }
 
 impl VimEngines {
     fn new() -> Self {
-        let tables = Arc::new(ModeTables::from_profile(vim_profile()));
+        let profile = active_vim_profile();
+        let tables = Arc::new(ModeTables::from_profile(&profile));
         // NB: which-key is always on, so a prefix that is no mapping itself waits for the next key with no timeout.
         Self {
-            page: KeyEngine::new(Arc::clone(&tables)).with_wait_for_prefix(true),
-            chrome: KeyEngine::for_chrome(tables).with_wait_for_prefix(true),
-            scheduled: [None, None],
+            fallback_page: KeyEngine::new(Arc::clone(&tables)).with_wait_for_prefix(true),
+            chrome: KeyEngine::for_chrome(Arc::clone(&tables)).with_wait_for_prefix(true),
+            tables,
+            pages: HashMap::new(),
+            scheduled: HashMap::new(),
         }
     }
 
-    fn engine(&mut self, kind: EngineKind) -> &mut KeyEngine {
-        match kind {
-            EngineKind::Page => &mut self.page,
-            EngineKind::Chrome => &mut self.chrome,
+    fn engine(&mut self, slot: EngineSlot) -> &mut KeyEngine {
+        match slot {
+            EngineSlot::Chrome => &mut self.chrome,
+            EngineSlot::Page(Some(tab_id)) => {
+                let tables = Arc::clone(&self.tables);
+                let timeoutlen = self.fallback_page.timeoutlen();
+                self.pages.entry(tab_id).or_insert_with(|| {
+                    KeyEngine::new(tables)
+                        .with_wait_for_prefix(true)
+                        .with_timeoutlen(timeoutlen)
+                })
+            }
+            EngineSlot::Page(None) => &mut self.fallback_page,
         }
     }
 
-    fn engine_in_mode(&mut self, mode: InputMode) -> &mut KeyEngine {
-        let engine = self.engine(EngineKind::for_mode(mode));
+    fn engine_in_mode(&mut self, slot: EngineSlot, mode: InputMode) -> &mut KeyEngine {
+        let engine = self.engine(slot);
         if engine.set_mode(mode_code(mode)).is_err() {
             eprintln!("zendia: the vim engine has no mode `{}`", mode_code(mode));
         }
@@ -77,20 +98,20 @@ impl VimEngines {
 
 /// What an engine did with a key or a timer, to act on once the engine is no longer borrowed.
 struct EngineOutcome {
-    kind: EngineKind,
+    slot: EngineSlot,
     matches: Vec<KeyMatch>,
     pending: Option<(Vec<String>, Option<u32>)>,
     timer: Option<(u64, std::time::Duration)>,
 }
 
 impl EngineOutcome {
-    fn collect(kind: EngineKind, engine: &mut KeyEngine, matches: Vec<KeyMatch>) -> Self {
+    fn collect(slot: EngineSlot, engine: &mut KeyEngine, matches: Vec<KeyMatch>) -> Self {
         let pending = engine.take_state_changed().then(|| {
             let pending = engine.pending();
             (pending.tokens, pending.count)
         });
         Self {
-            kind,
+            slot,
             matches,
             pending,
             timer: engine.armed_timer().map(|generation| (generation, engine.timeoutlen())),
@@ -103,6 +124,7 @@ struct KeymapInner {
     resolver: KeyResolver,
     consumed_key_codes: HashSet<Code>,
     vim: VimEngines,
+    held_keys: VecDeque<KeyboardEventData>,
 }
 
 /// Shared keymap state installed in Freya context so both global key handlers and [`PageSurface`]s share one table
@@ -126,6 +148,7 @@ impl KeymapController {
                 resolver: KeyResolver::new(),
                 consumed_key_codes: HashSet::new(),
                 vim: VimEngines::new(),
+                held_keys: VecDeque::new(),
             })),
         }
     }
@@ -141,9 +164,43 @@ impl KeymapController {
         let mut inner = self.inner.borrow_mut();
         let consumed = if model.vim_mode_enabled {
             let mode = model.input_mode;
-            let mut preview = inner.vim.engine(EngineKind::for_mode(mode)).clone();
+            let slot = EngineSlot::for_model(mode, model.effective_keyed_tab());
+            let mut preview = inner.vim.engine(slot).clone();
             let _ = preview.set_mode(mode_code(mode));
-            preview.will_use(stroke)
+            let pending_before = preview.pending();
+            let was_idle = pending_before.tokens.is_empty() && pending_before.count.is_none();
+            let mut matched = Vec::new();
+            let mut vim_used = preview.feed(stroke, &mut |_, m| matched.push(m));
+            if mode == InputMode::Insert
+                && !model.page_editing
+                && matched.len() == 1
+                && insert_binding_requires_field(&matched[0].binding.invocation.command)
+            {
+                vim_used = false;
+            }
+            if vim_used {
+                true
+            } else if was_idle && mode == InputMode::Window && stroke.is_some() {
+                // `WIN-21`: an unused key in Window mode closes Window mode and re-runs in Normal mode.
+                let page_slot = EngineSlot::Page(model.effective_keyed_tab());
+                let mut normal_preview = inner.vim.engine(page_slot).clone();
+                let _ = normal_preview.set_mode(mode_code(InputMode::Normal));
+                if normal_preview.feed(stroke, &mut |_, _| {}) {
+                    true
+                } else {
+                    match stroke {
+                        Some(stroke) => inner.resolver.will_consume(&inner.table, stroke),
+                        None => false,
+                    }
+                }
+            } else if was_idle {
+                match stroke {
+                    Some(stroke) => inner.resolver.will_consume(&inner.table, stroke),
+                    None => false,
+                }
+            } else {
+                false
+            }
         } else {
             match stroke {
                 Some(stroke) => inner.resolver.will_consume(&inner.table, stroke),
@@ -152,6 +209,8 @@ impl KeymapController {
         };
         if consumed {
             inner.consumed_key_codes.insert(e.code);
+        } else {
+            inner.consumed_key_codes.remove(&e.code);
         }
         consumed
     }
@@ -168,17 +227,78 @@ impl KeymapController {
         self.inner.borrow_mut().consumed_key_codes.remove(&code)
     }
 
+    /// Queues a `KeyDown` event while an async mode-changing page action is in flight (`RT-04`).
+    pub fn hold_key_down(&self, data: KeyboardEventData) {
+        let mut inner = self.inner.borrow_mut();
+        inner.consumed_key_codes.insert(data.code);
+        if inner.held_keys.len() < MAX_HELD_KEYS {
+            inner.held_keys.push_back(data);
+        }
+    }
+
+    /// Replays any queued keys once `mode_transition_pending` clears (`RT-04`).
+    pub fn replay_held_keys(&self, core: &CoreView, page_ctx: &PageSurfaceContext) {
+        loop {
+            if core.model().peek().mode_transition_pending {
+                break;
+            }
+            let next_ev = self.inner.borrow_mut().held_keys.pop_front();
+            let Some(ev) = next_ev else {
+                break;
+            };
+            let _ = self.take_consumed_key_up(ev.code);
+            if crate::ui::vim::handle_focus_key_down(&ev, core) {
+                continue;
+            }
+            let consumed_by_keymap = {
+                let model = core.model().peek();
+                self.will_consume_key_down(&ev, &model)
+            };
+            if consumed_by_keymap {
+                let _ = self.take_consumed_key_up(ev.code);
+                if !self.handle_global_key_down(&ev, core) {
+                    crate::ui::vim::leave_window_mode_on_unused_key(&ev, core, self);
+                }
+                continue;
+            }
+            let (keeps_keys, target_view) = {
+                let model = core.model().peek();
+                let keeps = crate::ui::vim::surface_keeps_keys(&model);
+                let vid = model
+                    .effective_keyed_tab()
+                    .and_then(|tid| model.tab(tid).and_then(|t| t.view_id).or(Some(tid.0)));
+                (keeps, vid)
+            };
+            if !keeps_keys && let Some(view_id) = target_view {
+                let down = input::key_event(true, &ev.key, ev.code, ev.modifiers);
+                let up = input::key_event(false, &ev.key, ev.code, ev.modifiers);
+                let tracker = page_ctx.tracker().borrow();
+                tracker.send_key(view_id, down);
+                tracker.send_key(view_id, up);
+            }
+        }
+    }
+
     /// Resolves a global `KeyDown` event and invokes the resulting commands on `core`. Returns whether the key was
     /// used.
     pub fn handle_global_key_down(&self, e: &KeyboardEventData, core: &CoreView) -> bool {
         let stroke = input::key_stroke_from_event(&e.key, e.code, e.modifiers);
-        let (vim_enabled, mode) = {
+        let (vim_enabled, mode, page_id, page_editing) = {
             let model = core.model().peek();
-            (model.vim_mode_enabled, model.input_mode)
+            (
+                model.vim_mode_enabled,
+                model.input_mode,
+                model.effective_keyed_tab(),
+                model.page_editing,
+            )
         };
         if vim_enabled {
-            return self.feed_vim(stroke, mode, core);
+            return self.feed_vim(stroke, mode, page_id, page_editing, core);
         }
+        self.resolve_standard(stroke, core)
+    }
+
+    fn resolve_standard(&self, stroke: Option<KeyStroke>, core: &CoreView) -> bool {
         let Some(stroke) = stroke else {
             return false;
         };
@@ -193,49 +313,133 @@ impl KeymapController {
         resolution.is_consumed()
     }
 
-    /// Drops whatever the vim engines have half typed, as when vim mode is turned off. The core clears what it shows
-    /// of them itself.
+    /// Drops whatever the vim engines have half typed, as when vim mode is turned off.
     pub fn reset_vim(&self) {
         let mut inner = self.inner.borrow_mut();
-        inner.vim.page.reset();
+        for engine in inner.vim.pages.values_mut() {
+            engine.reset();
+            engine.take_state_changed();
+        }
+        inner.vim.fallback_page.reset();
         inner.vim.chrome.reset();
-        inner.vim.page.take_state_changed();
+        inner.vim.fallback_page.take_state_changed();
         inner.vim.chrome.take_state_changed();
-        inner.vim.scheduled = [None, None];
+        inner.vim.scheduled.clear();
+        inner.held_keys.clear();
     }
 
-    fn feed_vim(&self, stroke: Option<KeyStroke>, mode: InputMode, core: &CoreView) -> bool {
-        let (consumed, outcome) = {
+    /// Rebuilds the compiled mode tables from [`active_vim_profile`] and applies `timeoutlen_ms` across all engines
+    /// (`CFG-02`, `CFG-04`, `CFG-05`).
+    pub fn reload_vim_profile(&self, timeoutlen_ms: u64) {
+        let profile = active_vim_profile();
+        let tables = Arc::new(ModeTables::from_profile(&profile));
+        let timeoutlen = std::time::Duration::from_millis(timeoutlen_ms.clamp(10, 10_000));
+        let mut inner = self.inner.borrow_mut();
+        inner.vim.tables = Arc::clone(&tables);
+        inner.vim.fallback_page.set_tables(Arc::clone(&tables));
+        inner.vim.fallback_page.set_timeoutlen(timeoutlen);
+        inner.vim.fallback_page.take_state_changed();
+        inner.vim.chrome.set_tables(Arc::clone(&tables));
+        inner.vim.chrome.set_timeoutlen(timeoutlen);
+        inner.vim.chrome.take_state_changed();
+        for engine in inner.vim.pages.values_mut() {
+            engine.set_tables(Arc::clone(&tables));
+            engine.set_timeoutlen(timeoutlen);
+            engine.take_state_changed();
+        }
+        inner.vim.scheduled.clear();
+    }
+
+    /// Removes the per-page engine for a closed tab or auxiliary view.
+    pub fn remove_page(&self, tab_id: TabId) {
+        let mut inner = self.inner.borrow_mut();
+        inner.vim.pages.remove(&tab_id);
+        inner.vim.scheduled.remove(&EngineSlot::Page(Some(tab_id)));
+    }
+
+    /// Resets pending keys on `tab_id`'s engine (e.g. when the page navigates to a new document, `MD-02`).
+    pub fn reset_page(&self, tab_id: TabId) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(engine) = inner.vim.pages.get_mut(&tab_id) {
+            engine.reset();
+            engine.take_state_changed();
+        }
+        inner.vim.scheduled.remove(&EngineSlot::Page(Some(tab_id)));
+    }
+
+    fn feed_vim(
+        &self,
+        stroke: Option<KeyStroke>,
+        mode: InputMode,
+        page_id: Option<TabId>,
+        page_editing: bool,
+        core: &CoreView,
+    ) -> bool {
+        let slot = EngineSlot::for_model(mode, page_id);
+        let (vim_consumed, was_idle, outcome) = {
             let mut inner = self.inner.borrow_mut();
-            let kind = EngineKind::for_mode(mode);
-            let engine = inner.vim.engine_in_mode(mode);
-            let mut matches = Vec::new();
-            let consumed = engine.feed(stroke, &mut |_, matched| matches.push(matched));
-            (consumed, EngineOutcome::collect(kind, engine, matches))
+            let engine = inner.vim.engine_in_mode(slot, mode);
+            let pending_before = engine.pending();
+            let was_idle = pending_before.tokens.is_empty() && pending_before.count.is_none();
+
+            if mode == InputMode::Insert && !page_editing {
+                let mut preview = engine.clone();
+                let mut preview_matches = Vec::new();
+                let preview_used = preview.feed(stroke, &mut |_, m| preview_matches.push(m));
+                if preview_used
+                    && preview_matches.len() == 1
+                    && insert_binding_requires_field(&preview_matches[0].binding.invocation.command)
+                {
+                    (false, was_idle, None)
+                } else {
+                    let mut matches = Vec::new();
+                    let consumed = engine.feed(stroke, &mut |_, matched| matches.push(matched));
+                    (consumed, was_idle, Some(EngineOutcome::collect(slot, engine, matches)))
+                }
+            } else {
+                let mut matches = Vec::new();
+                let consumed = engine.feed(stroke, &mut |_, matched| matches.push(matched));
+                (consumed, was_idle, Some(EngineOutcome::collect(slot, engine, matches)))
+            }
         };
-        self.act_on(outcome, core);
-        consumed
+
+        if let Some(outcome) = outcome {
+            self.act_on(outcome, core);
+        }
+        if vim_consumed {
+            return true;
+        }
+        if was_idle {
+            return self.resolve_standard(stroke, core);
+        }
+        false
     }
 
-    fn fire_timer(&self, kind: EngineKind, generation: u64, core: &CoreView) {
+    fn fire_timer(&self, slot: EngineSlot, generation: u64, core: &CoreView) {
         let outcome = {
             let mut inner = self.inner.borrow_mut();
-            if inner.vim.scheduled[kind as usize] == Some(generation) {
-                inner.vim.scheduled[kind as usize] = None;
+            if inner.vim.scheduled.get(&slot) == Some(&generation) {
+                inner.vim.scheduled.remove(&slot);
             }
-            let engine = inner.vim.engine(kind);
+            let engine = inner.vim.engine(slot);
             let mut matches = Vec::new();
             engine.fire_timer(generation, &mut |_, matched| matches.push(matched));
-            EngineOutcome::collect(kind, engine, matches)
+            EngineOutcome::collect(slot, engine, matches)
         };
         self.act_on(outcome, core);
     }
 
     fn act_on(&self, outcome: EngineOutcome, core: &CoreView) {
         if let Some((keys, count)) = outcome.pending {
-            report_pending(core, keys, count);
+            let is_current_slot = {
+                let model = core.model().peek();
+                EngineSlot::for_model(model.input_mode, model.effective_keyed_tab()) == outcome.slot
+            };
+            if is_current_slot {
+                report_pending(core, keys, count);
+            }
         }
-        let tab_before = core.model().peek().active_tab;
+        let tab_before = core.model().peek().effective_keyed_tab();
         for matched in &outcome.matches {
             let mut invocation = matched.binding.invocation.clone();
             if invocation.command == "visual.object" && !invocation.args.contains_key("keys") {
@@ -246,30 +450,26 @@ impl KeymapController {
             }
             dispatch_invocation(&invocation, matched.count, core);
             if invocation.command.starts_with("scroll.") {
-                // The visual mode cursor follows the page once it has scrolled.
                 crate::ui::vim::follow_page_scroll(core);
             }
         }
-        // A key that moved to another tab leaves that page in normal mode: a field it kept focused would turn the
-        // next <C-h> into a deleted character and the next J into a typed one. `gi` goes back to it.
-        if !outcome.matches.is_empty() && core.model().peek().active_tab != tab_before {
+        // A key that moved to another tab leaves any focused field there (`gi` returns to it), preserving Visual/`I`.
+        if !outcome.matches.is_empty() && core.model().peek().effective_keyed_tab() != tab_before {
             core.invoke_or_log(Command::Vim(VimCommand::LeaveField));
         }
         if let Some((generation, timeoutlen)) = outcome.timer {
             let needs_task = {
                 let mut inner = self.inner.borrow_mut();
-                let slot = &mut inner.vim.scheduled[outcome.kind as usize];
-                let needs_task = *slot != Some(generation);
-                *slot = Some(generation);
-                needs_task
+                let prev = inner.vim.scheduled.insert(outcome.slot, generation);
+                prev != Some(generation)
             };
             if needs_task {
                 let controller = self.clone();
                 let core = core.clone();
-                let kind = outcome.kind;
+                let slot = outcome.slot;
                 spawn(async move {
                     timer(timeoutlen).await;
-                    controller.fire_timer(kind, generation, &core);
+                    controller.fire_timer(slot, generation, &core);
                 });
             }
         }
@@ -344,7 +544,6 @@ mod tests {
             input::key_stroke_from_event(&Key::Named(NamedKey::F5), Code::F5, Modifiers::empty()),
             Some(KeyStroke::from_str("<F5>").unwrap())
         );
-        // X11 control char fallback (Ctrl+T -> 0x14, Ctrl+Alt+M -> 0x0d '\r' or NamedKey::Enter with Code::KeyM).
         assert_eq!(
             input::key_stroke_from_event(&Key::Character("\x14".to_string()), Code::KeyT, Modifiers::CONTROL),
             Some(KeyStroke::new(MapModifiers::CTRL, MapKeyCode::Char('t')))
@@ -372,7 +571,6 @@ mod tests {
             input::key_stroke_from_event(&Key::Named(NamedKey::Enter), Code::Enter, Modifiers::CONTROL),
             Some(KeyStroke::from_str("<C-CR>").unwrap())
         );
-        // Bare modifiers do not produce strokes.
         assert_eq!(
             input::key_stroke_from_event(&Key::Named(NamedKey::Control), Code::ControlLeft, Modifiers::CONTROL),
             None
@@ -381,7 +579,6 @@ mod tests {
 
     #[test]
     fn normalizes_keys_like_the_fork() {
-        // A chorded key is the physical key, whatever character the layout gives it.
         assert_eq!(
             input::key_stroke_from_event(&Key::Character("∆".to_string()), Code::KeyJ, Modifiers::ALT),
             Some(KeyStroke::from_str("<A-j>").unwrap())
@@ -394,7 +591,6 @@ mod tests {
             ),
             Some(KeyStroke::from_str("<C-S-d>").unwrap())
         );
-        // AltGr types the character it produces.
         assert_eq!(
             input::key_stroke_from_event(
                 &Key::Character("@".to_string()),
@@ -403,7 +599,6 @@ mod tests {
             ),
             Some(KeyStroke::char('@'))
         );
-        // Shift is part of a printable character.
         assert_eq!(
             input::key_stroke_from_event(&Key::Character("H".to_string()), Code::KeyH, Modifiers::SHIFT),
             Some(KeyStroke::from_str("H").unwrap())
@@ -430,19 +625,51 @@ mod tests {
     }
 
     #[test]
-    fn vim_mode_previews_keys_by_mode() {
+    fn vim_mode_previews_keys_by_mode_and_falls_back_to_standard_shortcuts() {
         let controller = KeymapController::standard();
         let mut model = BrowserModel {
             vim_mode_enabled: true,
+            active_tab: Some(TabId(1)),
             ..BrowserModel::default()
         };
         let j = KeyboardEventData::new(Key::Character("j".to_string()), Code::KeyJ, Modifiers::empty());
         let q = KeyboardEventData::new(Key::Character("q".to_string()), Code::KeyQ, Modifiers::empty());
+        let ctrl_t = KeyboardEventData::new(Key::Character("t".to_string()), Code::KeyT, Modifiers::CONTROL);
+        let ctrl_shift_t = KeyboardEventData::new(
+            Key::Character("T".to_string()),
+            Code::KeyT,
+            Modifiers::CONTROL | Modifiers::SHIFT,
+        );
+        let ctrl_w = KeyboardEventData::new(Key::Character("w".to_string()), Code::KeyW, Modifiers::CONTROL);
+
         assert!(controller.will_consume_key_down(&j, &model), "j scrolls in normal mode");
         assert!(!controller.will_consume_key_down(&q, &model), "q is the page's");
+        assert!(
+            controller.will_consume_key_down(&ctrl_t, &model),
+            "Ctrl+T falls back to standard.toml in normal mode (RT-01)"
+        );
+        assert!(
+            controller.will_consume_key_down(&ctrl_shift_t, &model),
+            "Ctrl+Shift+T reopens closed tab in standard.toml (RT-01)"
+        );
+        assert!(
+            controller.will_consume_key_down(&ctrl_w, &model),
+            "Ctrl+W closes tab in normal mode (RT-01)"
+        );
 
+        // Explicit Insert (`I`) outside a field still lets Ctrl+W close the tab via standard.toml, while plain letters pass to the page.
         model.input_mode = InputMode::Insert;
+        model.explicit_insert = true;
+        model.page_editing = false;
         assert!(!controller.will_consume_key_down(&j, &model), "j types in insert mode");
+        assert!(
+            controller.will_consume_key_down(&ctrl_w, &model),
+            "Ctrl+W outside a field still closes the tab via standard.toml"
+        );
+
+        // Inside a focused field, Ctrl+W is consumed as edit.delete_word_backward.
+        model.page_editing = true;
+        assert!(controller.will_consume_key_down(&ctrl_w, &model));
 
         model.input_mode = InputMode::Visual;
         assert!(

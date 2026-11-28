@@ -8,6 +8,7 @@
 
 use crate::commands::{Command, CommandDescriptor, CommandError};
 use crate::library::LibrarySection;
+use crate::model::{FolderId, TabId};
 
 /// Half-page jump distance in explorer and library lists.
 pub const HALF_PAGE_STEP: isize = 8;
@@ -23,6 +24,8 @@ pub enum LibraryVimAction {
     Last,
     HalfPageDown,
     HalfPageUp,
+    Activate,
+    Quit,
     Menu,
     Delete,
     Yank,
@@ -37,6 +40,7 @@ pub enum LibraryVimAction {
     MoveSpaceRight,
     NextSection,
     PrevSection,
+    GotoSection(LibrarySection),
 }
 
 impl LibraryVimAction {
@@ -50,6 +54,8 @@ impl LibraryVimAction {
             Self::Last => "library.last",
             Self::HalfPageDown => "library.half_page_down",
             Self::HalfPageUp => "library.half_page_up",
+            Self::Activate => "library.open",
+            Self::Quit => "library.quit",
             Self::Menu => "library.menu",
             Self::Delete => "library.delete",
             Self::Yank => "library.yank",
@@ -64,6 +70,11 @@ impl LibraryVimAction {
             Self::MoveSpaceRight => "library.move_space_right",
             Self::NextSection => "library.next_section",
             Self::PrevSection => "library.prev_section",
+            Self::GotoSection(LibrarySection::History) => "library.goto_history",
+            Self::GotoSection(LibrarySection::Downloads) => "library.goto_downloads",
+            Self::GotoSection(LibrarySection::Spaces) => "library.goto_spaces",
+            Self::GotoSection(LibrarySection::Media) => "library.goto_media",
+            Self::GotoSection(LibrarySection::SpaceRouting) => "library.goto_routing",
         }
     }
 }
@@ -71,14 +82,38 @@ impl LibraryVimAction {
 /// Explorer, toolbar, and library vim actions.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChromeAction {
-    ExplorerHalfPageDown,
-    ExplorerHalfPageUp,
+    ExplorerHalfPageDown {
+        count: Option<u32>,
+    },
+    ExplorerHalfPageUp {
+        count: Option<u32>,
+    },
     ExplorerPreview,
     ExplorerFoldToggle,
     ExplorerFoldOpen,
     ExplorerFoldClose,
     ExplorerFind,
-    ExplorerYank { markdown: bool },
+    ExplorerEscape,
+    ExplorerAdd,
+    ExplorerAddFolder,
+    ExplorerDelete,
+    ExplorerRename,
+    ExplorerDuplicate,
+    ExplorerTogglePin,
+    ExplorerToggleEssential,
+    ExplorerReload,
+    ExplorerUnload,
+    ExplorerToggleMute,
+    ExplorerMoveToFolderPick,
+    ExplorerMoveToFolderApply {
+        folder_id: Option<FolderId>,
+        create_new: bool,
+        tab_ids: Vec<TabId>,
+        rename_new: bool,
+    },
+    ExplorerYank {
+        markdown: bool,
+    },
     ExplorerMoveOutOfFolder,
     ExplorerMoveDown,
     ExplorerMoveUp,
@@ -88,21 +123,38 @@ pub enum ChromeAction {
     ExplorerCreate,
     ToolbarJump,
     ToolbarMenu,
+    ToolbarUrlbar,
     LibraryQuit,
     LibraryGoto(LibrarySection),
-    Library(LibraryVimAction),
+    Library {
+        action: LibraryVimAction,
+        count: Option<u32>,
+    },
 }
 
 impl ChromeAction {
     pub fn name(&self) -> &'static str {
         match self {
-            Self::ExplorerHalfPageDown => "explorer.half_page_down",
-            Self::ExplorerHalfPageUp => "explorer.half_page_up",
+            Self::ExplorerHalfPageDown { .. } => "explorer.half_page_down",
+            Self::ExplorerHalfPageUp { .. } => "explorer.half_page_up",
             Self::ExplorerPreview => "explorer.preview",
             Self::ExplorerFoldToggle => "explorer.fold_toggle",
             Self::ExplorerFoldOpen => "explorer.fold_open",
             Self::ExplorerFoldClose => "explorer.fold_close",
             Self::ExplorerFind => "explorer.find",
+            Self::ExplorerEscape => "explorer.escape",
+            Self::ExplorerAdd => "explorer.add",
+            Self::ExplorerAddFolder => "explorer.add_folder",
+            Self::ExplorerDelete => "explorer.delete",
+            Self::ExplorerRename => "explorer.rename",
+            Self::ExplorerDuplicate => "explorer.duplicate",
+            Self::ExplorerTogglePin => "explorer.toggle_pin",
+            Self::ExplorerToggleEssential => "explorer.toggle_essential",
+            Self::ExplorerReload => "explorer.reload",
+            Self::ExplorerUnload => "explorer.unload",
+            Self::ExplorerToggleMute => "explorer.toggle_mute",
+            Self::ExplorerMoveToFolderPick => "explorer.move_to_folder",
+            Self::ExplorerMoveToFolderApply { .. } => "explorer.move_to_folder_apply",
             Self::ExplorerYank { markdown: false } => "explorer.yank",
             Self::ExplorerYank { markdown: true } => "explorer.yank_markdown",
             Self::ExplorerMoveOutOfFolder => "explorer.move_out_of_folder",
@@ -114,6 +166,7 @@ impl ChromeAction {
             Self::ExplorerCreate => "explorer.create",
             Self::ToolbarJump => "toolbar.jump",
             Self::ToolbarMenu => "toolbar.menu",
+            Self::ToolbarUrlbar => "toolbar.urlbar",
             Self::LibraryQuit => "library.quit",
             Self::LibraryGoto(section) => match section {
                 LibrarySection::History => "library.goto_history",
@@ -122,21 +175,89 @@ impl ChromeAction {
                 LibrarySection::Media => "library.goto_media",
                 LibrarySection::SpaceRouting => "library.goto_routing",
             },
-            Self::Library(action) => action.name(),
+            Self::Library { action, .. } => action.name(),
         }
     }
 }
 
+fn find_arg<'a>(args: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    args.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+fn parse_count_arg(command: &str, args: &[(String, String)]) -> Result<Option<u32>, CommandError> {
+    match find_arg(args, "count") {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<u64>()
+            .map(|v| Some(v.min(u64::from(u32::MAX)) as u32))
+            .map_err(|_| CommandError::InvalidArgument {
+                command: command.to_string(),
+                message: format!("expected integer `count`, got `{raw}`"),
+            }),
+    }
+}
+
 /// Parses the commands of this module, or returns `None` for a name it does not own.
-pub fn parse_command(name: &str, _args: &[(String, String)]) -> Result<Option<Command>, CommandError> {
+pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Command>, CommandError> {
     let action = match name {
-        "explorer.half_page_down" => ChromeAction::ExplorerHalfPageDown,
-        "explorer.half_page_up" => ChromeAction::ExplorerHalfPageUp,
+        "explorer.half_page_down" => ChromeAction::ExplorerHalfPageDown {
+            count: parse_count_arg(name, args)?,
+        },
+        "explorer.half_page_up" => ChromeAction::ExplorerHalfPageUp {
+            count: parse_count_arg(name, args)?,
+        },
         "explorer.preview" => ChromeAction::ExplorerPreview,
         "explorer.fold_toggle" => ChromeAction::ExplorerFoldToggle,
         "explorer.fold_open" => ChromeAction::ExplorerFoldOpen,
         "explorer.fold_close" => ChromeAction::ExplorerFoldClose,
         "explorer.find" => ChromeAction::ExplorerFind,
+        "explorer.escape" => ChromeAction::ExplorerEscape,
+        "explorer.add" => ChromeAction::ExplorerAdd,
+        "explorer.add_folder" => ChromeAction::ExplorerAddFolder,
+        "explorer.delete" => ChromeAction::ExplorerDelete,
+        "explorer.rename" => ChromeAction::ExplorerRename,
+        "explorer.duplicate" => ChromeAction::ExplorerDuplicate,
+        "explorer.toggle_pin" => ChromeAction::ExplorerTogglePin,
+        "explorer.toggle_essential" => ChromeAction::ExplorerToggleEssential,
+        "explorer.reload" => ChromeAction::ExplorerReload,
+        "explorer.unload" => ChromeAction::ExplorerUnload,
+        "explorer.toggle_mute" => ChromeAction::ExplorerToggleMute,
+        "explorer.move_to_folder" => ChromeAction::ExplorerMoveToFolderPick,
+        "explorer.move_to_folder_apply" => {
+            let folder_id = match find_arg(args, "folder_id") {
+                None | Some("") => None,
+                Some(raw) => Some(FolderId(raw.parse::<u64>().map_err(|_| {
+                    CommandError::InvalidArgument {
+                        command: name.to_string(),
+                        message: format!("invalid `folder_id`: `{raw}`"),
+                    }
+                })?)),
+            };
+            let create_new = find_arg(args, "create_new") == Some("true");
+            let rename_new = find_arg(args, "rename_new") == Some("true");
+            let tab_ids = match find_arg(args, "tab_ids") {
+                None | Some("") => Vec::new(),
+                Some(raw) => raw
+                    .split(',')
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|part| {
+                        part.trim()
+                            .parse::<u64>()
+                            .map(TabId)
+                            .map_err(|_| CommandError::InvalidArgument {
+                                command: name.to_string(),
+                                message: format!("invalid tab id `{part}`"),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
+            ChromeAction::ExplorerMoveToFolderApply {
+                folder_id,
+                create_new,
+                tab_ids,
+                rename_new,
+            }
+        }
         "explorer.yank" => ChromeAction::ExplorerYank { markdown: false },
         "explorer.yank_markdown" => ChromeAction::ExplorerYank { markdown: true },
         "explorer.move_out_of_folder" => ChromeAction::ExplorerMoveOutOfFolder,
@@ -148,34 +269,101 @@ pub fn parse_command(name: &str, _args: &[(String, String)]) -> Result<Option<Co
         "explorer.create" => ChromeAction::ExplorerCreate,
         "toolbar.jump" => ChromeAction::ToolbarJump,
         "toolbar.menu" => ChromeAction::ToolbarMenu,
+        "toolbar.urlbar" => ChromeAction::ToolbarUrlbar,
         "library.quit" => ChromeAction::LibraryQuit,
         "library.goto_history" => ChromeAction::LibraryGoto(LibrarySection::History),
         "library.goto_downloads" => ChromeAction::LibraryGoto(LibrarySection::Downloads),
         "library.goto_spaces" => ChromeAction::LibraryGoto(LibrarySection::Spaces),
         "library.goto_media" => ChromeAction::LibraryGoto(LibrarySection::Media),
         "library.goto_routing" => ChromeAction::LibraryGoto(LibrarySection::SpaceRouting),
-        "library.down" => ChromeAction::Library(LibraryVimAction::Down),
-        "library.up" => ChromeAction::Library(LibraryVimAction::Up),
-        "library.left" => ChromeAction::Library(LibraryVimAction::Left),
-        "library.right" => ChromeAction::Library(LibraryVimAction::Right),
-        "library.first" => ChromeAction::Library(LibraryVimAction::First),
-        "library.last" => ChromeAction::Library(LibraryVimAction::Last),
-        "library.half_page_down" => ChromeAction::Library(LibraryVimAction::HalfPageDown),
-        "library.half_page_up" => ChromeAction::Library(LibraryVimAction::HalfPageUp),
-        "library.menu" => ChromeAction::Library(LibraryVimAction::Menu),
-        "library.delete" => ChromeAction::Library(LibraryVimAction::Delete),
-        "library.yank" => ChromeAction::Library(LibraryVimAction::Yank),
-        "library.jump" => ChromeAction::Library(LibraryVimAction::Jump),
-        "library.search" => ChromeAction::Library(LibraryVimAction::Search),
-        "library.filter" => ChromeAction::Library(LibraryVimAction::Filter),
-        "library.add" => ChromeAction::Library(LibraryVimAction::Add),
-        "library.rename_space" => ChromeAction::Library(LibraryVimAction::RenameSpace),
-        "library.space_theme" => ChromeAction::Library(LibraryVimAction::SpaceTheme),
-        "library.space_icon" => ChromeAction::Library(LibraryVimAction::SpaceIcon),
-        "library.move_space_left" => ChromeAction::Library(LibraryVimAction::MoveSpaceLeft),
-        "library.move_space_right" => ChromeAction::Library(LibraryVimAction::MoveSpaceRight),
-        "library.next_section" => ChromeAction::Library(LibraryVimAction::NextSection),
-        "library.prev_section" => ChromeAction::Library(LibraryVimAction::PrevSection),
+        "library.down" => ChromeAction::Library {
+            action: LibraryVimAction::Down,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.up" => ChromeAction::Library {
+            action: LibraryVimAction::Up,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.left" => ChromeAction::Library {
+            action: LibraryVimAction::Left,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.right" => ChromeAction::Library {
+            action: LibraryVimAction::Right,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.first" => ChromeAction::Library {
+            action: LibraryVimAction::First,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.last" => ChromeAction::Library {
+            action: LibraryVimAction::Last,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.half_page_down" => ChromeAction::Library {
+            action: LibraryVimAction::HalfPageDown,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.half_page_up" => ChromeAction::Library {
+            action: LibraryVimAction::HalfPageUp,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.menu" => ChromeAction::Library {
+            action: LibraryVimAction::Menu,
+            count: None,
+        },
+        "library.delete" => ChromeAction::Library {
+            action: LibraryVimAction::Delete,
+            count: None,
+        },
+        "library.yank" => ChromeAction::Library {
+            action: LibraryVimAction::Yank,
+            count: None,
+        },
+        "library.jump" => ChromeAction::Library {
+            action: LibraryVimAction::Jump,
+            count: None,
+        },
+        "library.search" => ChromeAction::Library {
+            action: LibraryVimAction::Search,
+            count: None,
+        },
+        "library.filter" => ChromeAction::Library {
+            action: LibraryVimAction::Filter,
+            count: None,
+        },
+        "library.add" => ChromeAction::Library {
+            action: LibraryVimAction::Add,
+            count: None,
+        },
+        "library.rename_space" => ChromeAction::Library {
+            action: LibraryVimAction::RenameSpace,
+            count: None,
+        },
+        "library.space_theme" => ChromeAction::Library {
+            action: LibraryVimAction::SpaceTheme,
+            count: None,
+        },
+        "library.space_icon" => ChromeAction::Library {
+            action: LibraryVimAction::SpaceIcon,
+            count: None,
+        },
+        "library.move_space_left" => ChromeAction::Library {
+            action: LibraryVimAction::MoveSpaceLeft,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.move_space_right" => ChromeAction::Library {
+            action: LibraryVimAction::MoveSpaceRight,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.next_section" => ChromeAction::Library {
+            action: LibraryVimAction::NextSection,
+            count: parse_count_arg(name, args)?,
+        },
+        "library.prev_section" => ChromeAction::Library {
+            action: LibraryVimAction::PrevSection,
+            count: parse_count_arg(name, args)?,
+        },
         _ => return Ok(None),
     };
     Ok(Some(Command::Chrome(action)))
@@ -218,6 +406,71 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             "explorer.find",
             "Explorer: Filter Rows",
             "Jump to a sidebar row by filtering",
+        ),
+        (
+            "explorer.escape",
+            "Explorer: Clear Selection or Close",
+            "Clear explorer selection if active, otherwise leave explorer",
+        ),
+        (
+            "explorer.add",
+            "Explorer: New Tab",
+            "Close explorer and open a new tab via the URL bar",
+        ),
+        (
+            "explorer.add_folder",
+            "Explorer: New Folder",
+            "Create a new folder in the active space and start renaming it",
+        ),
+        (
+            "explorer.delete",
+            "Explorer: Close or Delete",
+            "Close selected tabs or delete the folder under the explorer cursor",
+        ),
+        (
+            "explorer.rename",
+            "Explorer: Rename",
+            "Rename the tab or folder under the explorer cursor",
+        ),
+        (
+            "explorer.duplicate",
+            "Explorer: Duplicate",
+            "Duplicate the selected or focused explorer tabs",
+        ),
+        (
+            "explorer.toggle_pin",
+            "Explorer: Toggle Pin",
+            "Pin or unpin the selected or focused explorer tabs",
+        ),
+        (
+            "explorer.toggle_essential",
+            "Explorer: Toggle Essential",
+            "Add or remove the selected or focused explorer tabs from Essentials",
+        ),
+        (
+            "explorer.reload",
+            "Explorer: Reload Tab",
+            "Reload the selected or focused explorer tabs",
+        ),
+        (
+            "explorer.unload",
+            "Explorer: Unload Tab",
+            "Unload the selected or focused explorer tabs",
+        ),
+        (
+            "explorer.toggle_mute",
+            "Explorer: Toggle Mute",
+            "Mute or unmute the selected or focused explorer tabs",
+        ),
+        (
+            "explorer.move_to_folder",
+            "Explorer: Move to Folder",
+            "Pick a folder for the selected or focused explorer tabs",
+        ),
+        (
+            "toolbar.urlbar",
+            "Toolbar: Focus Address Bar",
+            "Leave toolbar focus and focus the address bar",
         ),
         (
             "explorer.yank",

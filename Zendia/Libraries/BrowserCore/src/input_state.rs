@@ -11,8 +11,8 @@
 
 use crate::model::{InputMode, WhichKeyEntry, WhichKeyState};
 use std::cmp::Ordering;
-use std::sync::OnceLock;
-use zendia_keymap::{KeySequence, KeyStroke, KeyTable, Profile};
+use std::sync::{Arc, OnceLock, RwLock};
+use zendia_keymap::{KeySequence, KeyStroke, KeyTable, Profile, UserConfigMeta};
 
 /// Default duration in milliseconds for transient statusline announcements.
 pub const DEFAULT_ANNOUNCEMENT_TIMEOUT_MS: u64 = 2200;
@@ -161,15 +161,48 @@ pub fn vim_profile() -> &'static Profile {
     PROFILE.get_or_init(Profile::vim)
 }
 
-/// Returns a compiled [`KeyTable`] for `mode` from the default vim profile.
+fn live_vim_profile_cell() -> &'static RwLock<Arc<Profile>> {
+    static ACTIVE: OnceLock<RwLock<Arc<Profile>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| RwLock::new(Arc::new(Profile::vim())))
+}
+
+/// Returns the active configured vim [`Profile`] (including custom leader and `zendia.json` user keymaps, `CFG-04`, `CFG-05`).
+pub fn active_vim_profile() -> Arc<Profile> {
+    live_vim_profile_cell()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Replaces the active configured vim [`Profile`] used by which-key and keymap tables.
+pub fn set_active_vim_profile(profile: Profile) -> Arc<Profile> {
+    let arc = Arc::new(profile);
+    *live_vim_profile_cell().write().unwrap_or_else(|e| e.into_inner()) = Arc::clone(&arc);
+    arc
+}
+
+/// Rebuilds and installs the active configured vim [`Profile`] from `leader_override` and optional `zendia.json` text.
+pub fn rebuild_active_vim_profile(
+    leader_override: Option<&str>,
+    user_json: Option<&str>,
+) -> (Arc<Profile>, UserConfigMeta) {
+    let (profile, meta) = Profile::vim_configured_with_meta(leader_override, user_json);
+    let arc = set_active_vim_profile(profile);
+    (arc, meta)
+}
+
+/// Returns a compiled [`KeyTable`] for `mode` from the active vim profile.
 pub fn vim_table_for_mode(mode: InputMode) -> KeyTable {
-    KeyTable::from_profile_for_mode(vim_profile(), mode_code(mode))
+    let profile = active_vim_profile();
+    KeyTable::from_profile_for_mode(&profile, mode_code(mode))
 }
 
 fn parse_prefix_strokes(profile: &Profile, tokens: &[String]) -> Option<Vec<KeyStroke>> {
     let mut strokes = Vec::with_capacity(tokens.len());
     for token in tokens {
-        let parsed = KeySequence::parse(token).ok()?.expand_leader(profile.leader);
+        let parsed = KeySequence::parse(token)
+            .ok()?
+            .expand_leader_strokes(profile.leader_sequence.strokes());
         strokes.extend_from_slice(parsed.strokes());
     }
     Some(strokes)
@@ -316,15 +349,15 @@ pub fn which_key_for_prefix(mode: InputMode, pending_tokens: &[String]) -> Optio
     if pending_tokens.is_empty() {
         return None;
     }
-    let profile = vim_profile();
-    let table = KeyTable::from_profile_for_mode(profile, mode_code(mode));
-    let prefix = parse_prefix_strokes(profile, pending_tokens)?;
+    let profile = active_vim_profile();
+    let table = KeyTable::from_profile_for_mode(&profile, mode_code(mode));
+    let prefix = parse_prefix_strokes(&profile, pending_tokens)?;
     let items = compute_which_key_items(&table, &prefix);
     if items.is_empty() {
         return None;
     }
     Some(WhichKeyView {
-        title: breadcrumb_for_prefix(&table, profile, pending_tokens),
+        title: breadcrumb_for_prefix(&table, &profile, pending_tokens),
         items,
         is_all_keymaps: false,
     })
@@ -343,12 +376,12 @@ pub fn which_key_all_keymaps(mode: InputMode) -> WhichKeyView {
 
 /// Resolves the configured group color token (for example `"pink"` or `"blue"`) for a group label shown in `mode`.
 pub fn group_color_for_entry(mode: InputMode, pending_tokens: &[String], display_key: &str) -> Option<String> {
-    let profile = vim_profile();
-    let table = KeyTable::from_profile_for_mode(profile, mode_code(mode));
+    let profile = active_vim_profile();
+    let table = KeyTable::from_profile_for_mode(&profile, mode_code(mode));
     let mut strokes = if pending_tokens.is_empty() {
         Vec::new()
     } else {
-        parse_prefix_strokes(profile, pending_tokens)?
+        parse_prefix_strokes(&profile, pending_tokens)?
     };
     let raw_token = match display_key {
         "SPC" => "<Space>",
@@ -362,7 +395,9 @@ pub fn group_color_for_entry(mode: InputMode, pending_tokens: &[String], display
         "\\" => "<Bslash>",
         other => other,
     };
-    let next = KeySequence::parse(raw_token).ok()?.expand_leader(profile.leader);
+    let next = KeySequence::parse(raw_token)
+        .ok()?
+        .expand_leader_strokes(profile.leader_sequence.strokes());
     strokes.extend_from_slice(next.strokes());
     table.group_for(&strokes).and_then(|group| group.color.clone())
 }

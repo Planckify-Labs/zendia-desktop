@@ -197,6 +197,7 @@ impl Component for SidebarFrame {
         let mut space_slide_dir = use_state(|| 0.0_f32);
         let mut bottom_overflow_open = use_state(|| false);
         let mut top_overflow_open = use_state(|| false);
+        let mut last_reported_vp = use_state(|| (0usize, 0usize, 0usize));
         // Where the `»` menu and its button are, as `(x, y, width, height)`.
         let mut top_overflow_area = use_state(|| (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32));
         let mut top_overflow_button_area = use_state(|| (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32));
@@ -217,6 +218,8 @@ impl Component for SidebarFrame {
             show_essentials_promo,
             split_groups,
             explorer_cursor,
+            pinned_collapsed_for_space,
+            explorer_targets_list,
         ) = {
             let model = core.model().read();
             let active_space_id = model.active_space;
@@ -244,6 +247,8 @@ impl Component for SidebarFrame {
             let ex_cursor = (model.vim_mode_enabled && model.input_mode == InputMode::Explorer)
                 .then(|| model.focus.cursor.clone())
                 .flatten();
+            let pinned_col = active_space_id.is_some_and(|sid| model.collapsed_pinned_spaces.contains(&sid));
+            let ex_targets = zendia_browser_core::focus::explorer_targets(&model);
             (
                 model.layout.clone(),
                 model.settings.clone(),
@@ -258,6 +263,8 @@ impl Component for SidebarFrame {
                 model.show_essentials_promo,
                 model.split_groups.clone(),
                 ex_cursor,
+                pinned_col,
+                ex_targets,
             )
         };
 
@@ -538,10 +545,6 @@ impl Component for SidebarFrame {
             sidebar_width: displayed_width,
         };
 
-        let pinned_collapsed_for_space = active_space_id
-            .zip(sidebar_state)
-            .is_some_and(|(sid, st)| st.is_pinned_collapsed(sid));
-
         // SPC-03: 250ms horizontal spring slide on the tab strip whenever active_space_id changes.
         let current_space_idx = active_space_id
             .and_then(|id| spaces.iter().position(|s| s.id == id))
@@ -580,28 +583,35 @@ impl Component for SidebarFrame {
         let mut cursor_y = 2.0f32;
         let mut active_tab_y: Option<f32> = None;
         let mut explorer_focus_y: Option<f32> = None;
+        let mut scroll_target_ys: Vec<(FocusTarget, f32)> = Vec::new();
 
         if !pinned_collapsed_for_space {
             for tab in &pinned_tabs {
+                let target = FocusTarget::PinnedTab(tab.id);
+                scroll_target_ys.push((target.clone(), cursor_y));
                 if active_tab_id == Some(tab.id) {
                     active_tab_y = Some(cursor_y);
                 }
-                if explorer_cursor.as_ref() == Some(&FocusTarget::PinnedTab(tab.id)) {
+                if explorer_cursor.as_ref() == Some(&target) {
                     explorer_focus_y = Some(cursor_y);
                 }
                 cursor_y += row_step;
             }
             for (folder, tabs, _) in &folders_with_tabs {
-                if explorer_cursor.as_ref() == Some(&FocusTarget::Folder(folder.id)) {
+                let f_target = FocusTarget::Folder(folder.id);
+                scroll_target_ys.push((f_target.clone(), cursor_y));
+                if explorer_cursor.as_ref() == Some(&f_target) {
                     explorer_focus_y = Some(cursor_y);
                 }
                 cursor_y += row_step; // Folder header row
                 if !folder.collapsed {
                     for tab in tabs {
+                        let t_target = FocusTarget::Tab(tab.id);
+                        scroll_target_ys.push((t_target.clone(), cursor_y));
                         if active_tab_id == Some(tab.id) {
                             active_tab_y = Some(cursor_y);
                         }
-                        if explorer_cursor.as_ref() == Some(&FocusTarget::Tab(tab.id)) {
+                        if explorer_cursor.as_ref() == Some(&t_target) {
                             explorer_focus_y = Some(cursor_y);
                         }
                         cursor_y += row_step;
@@ -688,10 +698,12 @@ impl Component for SidebarFrame {
                     continue;
                 }
                 drawn_groups.push(group.id);
+                let g_target = FocusTarget::SplitGroup(group.id);
+                scroll_target_ys.push((g_target.clone(), cursor_y));
                 if active_tab_id.is_some_and(|aid| group.tab_ids.contains(&aid)) {
                     active_tab_y = Some(cursor_y);
                 }
-                if explorer_cursor.as_ref() == Some(&FocusTarget::SplitGroup(group.id)) {
+                if explorer_cursor.as_ref() == Some(&g_target) {
                     explorer_focus_y = Some(cursor_y);
                 }
                 cursor_y += row_step;
@@ -711,10 +723,12 @@ impl Component for SidebarFrame {
                 );
                 continue;
             }
+            let n_target = FocusTarget::Tab(tab.id);
+            scroll_target_ys.push((n_target.clone(), cursor_y));
             if active_tab_id == Some(tab.id) {
                 active_tab_y = Some(cursor_y);
             }
-            if explorer_cursor.as_ref() == Some(&FocusTarget::Tab(tab.id)) {
+            if explorer_cursor.as_ref() == Some(&n_target) {
                 explorer_focus_y = Some(cursor_y);
             }
             cursor_y += row_step;
@@ -1013,6 +1027,46 @@ impl Component for SidebarFrame {
         // SPC-05: Show floating "Scroll to active tab" pill when the active tab is scrolled out of view.
         let (_, scroll_y_i32): (i32, i32) = tab_scroll.into();
         let scroll_top = (-scroll_y_i32 as f32).max(0.0);
+
+        // EXP-06 & EXP-15: Report measured visible row capacity and visible target slice to BrowserCore.
+        {
+            let visible_rows = ((viewport_h / row_step).floor() as usize).max(1);
+            let mut first_vis = None;
+            let mut last_vis = None;
+            for (idx, target) in explorer_targets_list.iter().enumerate() {
+                let is_vis = match target {
+                    FocusTarget::Essential(_) => true,
+                    _ => scroll_target_ys
+                        .iter()
+                        .find(|(t, _)| t == target)
+                        .is_some_and(|(_, y)| {
+                            *y + TAB_ROW_HEIGHT > scroll_top + 2.0 && *y < scroll_top + viewport_h - 2.0
+                        }),
+                };
+                if is_vis {
+                    if first_vis.is_none() {
+                        first_vis = Some(idx);
+                    }
+                    last_vis = Some(idx + 1);
+                }
+            }
+            let first_visible = first_vis.unwrap_or(0);
+            let end_visible = last_vis.unwrap_or(explorer_targets_list.len());
+            let next_vp = (visible_rows, first_visible, end_visible);
+            if *last_reported_vp.peek() != next_vp {
+                last_reported_vp.set(next_vp);
+                let vp_core = core.clone();
+                spawn(async move {
+                    vp_core.invoke_or_log(Command::Vim(
+                        zendia_browser_core::vim_keys::VimCommand::ReportExplorerViewport {
+                            visible_rows,
+                            first_visible,
+                            end_visible,
+                        },
+                    ));
+                });
+            }
+        }
         let scroll_to_tab_pill = (!is_collapsed_visual && total_tab_content_h > viewport_h + 4.0)
             .then(|| {
                 let item_y = active_tab_y?;
@@ -1540,7 +1594,7 @@ impl Component for SidebarPinnedExtensionTile {
             ContributionSource::Extension { extension_id } => Some(extension_id.clone()),
             _ => None,
         };
-        let (ext_info, paused) = {
+        let (ext_info, paused, tb_bg_override, tb_border, hint_badge) = {
             let model = core.model().read();
             let info = ext_id
                 .as_ref()
@@ -1549,17 +1603,35 @@ impl Component for SidebarPinnedExtensionTile {
                 service_status_in(&model.services, ServiceId::ExtensionServer),
                 ServiceStatus::Running
             );
-            (info, is_paused)
+            let target = FocusTarget::ToolbarItem(self.item.id.clone());
+            let base_border = crate::ui::kit::focus_ring_border(focus() == Focus::Keyboard, &theme, Border::new());
+            (
+                info,
+                is_paused,
+                crate::ui::vim::toolbar_focus::is_toolbar_cursor(&model, self.item.id.as_str()),
+                crate::ui::vim::toolbar_focus::apply_toolbar_cursor_border(
+                    base_border,
+                    &model,
+                    self.item.id.as_str(),
+                    &theme,
+                ),
+                crate::ui::vim::hints::hint_badge_for_corner(&model, &target, &theme),
+            )
         };
 
         let effective_enabled = self.item.enabled && !paused;
         let feedback = use_interactive_feedback(effective_enabled);
 
-        let bg = feedback.background(
+        let base_bg = feedback.background(
             palette.surface_pill,
             palette.surface_pill_hover,
             palette.surface_pill_hover,
         );
+        let bg = if tb_bg_override {
+            theme.rgba(ThemeRole::ModeToolbar).with_alpha(0.30).to_color()
+        } else {
+            base_bg
+        };
         let icon_role = if paused {
             ThemeRole::Warning
         } else if effective_enabled {
@@ -1629,6 +1701,7 @@ impl Component for SidebarPinnedExtensionTile {
         let ctx_core = core.clone();
         let ctx_ext_id = ext_id;
 
+        let item_anchor_id = self.item.id.as_str().to_string();
         let tile = rect()
             .a11y_id(a11y_id)
             .a11y_focusable(effective_enabled)
@@ -1639,12 +1712,16 @@ impl Component for SidebarPinnedExtensionTile {
             .height(Size::px(26.0))
             .corner_radius(CornerRadius::new_all(6.0))
             .background(bg)
-            .border(crate::ui::kit::focus_ring_border(
-                focus() == Focus::Keyboard,
-                &theme,
-                Border::new(),
-            ))
+            .border(tb_border)
             .scale(feedback.scale())
+            .on_sized(move |e: Event<SizedEventData>| {
+                if let Some(state) = menu_state {
+                    state.set_toolbar_item_anchor(
+                        &item_anchor_id,
+                        crate::ui::chrome::menus::AnchorRect::from_area(e.area),
+                    );
+                }
+            })
             .opacity(if paused {
                 0.58
             } else if effective_enabled {
@@ -1694,7 +1771,8 @@ impl Component for SidebarPinnedExtensionTile {
                         icon_role,
                     ))
                     .maybe_child(badge),
-            );
+            )
+            .maybe_child(hint_badge);
 
         rect()
             .width(Size::flex(1.0))

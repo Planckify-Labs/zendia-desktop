@@ -11,18 +11,42 @@
 //
 // Its behaviour follows the old Zendia's vim mode: which elements are controls, where `j` scrolls, how jump targets
 // are matched and ordered, how visual mode's motions and text objects move the selection, and how fields are chosen.
-(function () {
+(function zendiaAutomationInstall() {
   "use strict";
 
   if (typeof globalThis.__zendiaAutomation === "function") {
     return;
   }
 
+  const RUNTIME_SOURCE = "(" + zendiaAutomationInstall.toString() + ")();";
+
   // ---------------------------------------------------------------------------------------------------------------
   // The DOM, across open shadow roots
   // ---------------------------------------------------------------------------------------------------------------
 
-  const NOT_TEXT = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "SELECT"]);
+  const NOT_TEXT_TAGS = new Set([
+    "script",
+    "style",
+    "noscript",
+    "textarea",
+    "select",
+    "datalist",
+    "option",
+    "input",
+    "template",
+    "head",
+    "defs",
+    "symbol",
+    "clippath",
+    "mask",
+    "pattern",
+    "filter",
+    "lineargradient",
+    "radialgradient",
+    "metadata",
+    "title",
+    "desc",
+  ]);
   const NON_TEXT_INPUTS = new Set([
     "button",
     "checkbox",
@@ -35,6 +59,30 @@
     "reset",
     "submit",
   ]);
+
+  function isNotTextElement(node) {
+    if (!node || node.nodeType !== 1) return false;
+    return NOT_TEXT_TAGS.has((node.localName || node.tagName || "").toLowerCase());
+  }
+
+  function shadowRootOf(node) {
+    if (!node || node.nodeType !== 1) return null;
+    if (typeof globalThis.__zendiaShadowRoot === "function") {
+      try {
+        const root = globalThis.__zendiaShadowRoot(node);
+        if (root) return root;
+      } catch (_) {}
+    }
+    return node.shadowRoot || null;
+  }
+
+  function postEvent(payload) {
+    if (typeof globalThis.__zendiaPost === "function") {
+      try {
+        globalThis.__zendiaPost(JSON.stringify(payload));
+      } catch (_) {}
+    }
+  }
 
   function composedParent(node) {
     if (!node) return null;
@@ -52,8 +100,10 @@
 
   function deepActiveElement() {
     let element = document.activeElement;
-    while (element && element.shadowRoot && element.shadowRoot.activeElement) {
-      element = element.shadowRoot.activeElement;
+    let shadow = shadowRootOf(element);
+    while (shadow && shadow.activeElement) {
+      element = shadow.activeElement;
+      shadow = shadowRootOf(element);
     }
     return element;
   }
@@ -62,11 +112,12 @@
     if (!root || !root.querySelectorAll) return;
     for (const element of root.querySelectorAll("*")) {
       yield element;
-      if (element.shadowRoot) yield* deepElements(element.shadowRoot);
+      const shadow = shadowRootOf(element);
+      if (shadow) yield* deepElements(shadow);
     }
   }
 
-  // Text nodes in document order, those of a shadow root before its host's own children.
+  // Text nodes in document order, those of a shadow root before its host's own children, skipping non-text subtrees.
   function* deepTextNodes(root) {
     if (!root) return;
     const stack = [root];
@@ -76,8 +127,10 @@
         yield node;
         continue;
       }
+      if (node.nodeType === 1 && isNotTextElement(node)) continue;
       const children = [];
-      if (node.shadowRoot) children.push(...node.shadowRoot.childNodes);
+      const shadow = shadowRootOf(node);
+      if (shadow) children.push(...shadow.childNodes);
       children.push(...node.childNodes);
       for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
     }
@@ -85,10 +138,12 @@
 
   function deepElementFromPoint(x, y) {
     let element = document.elementFromPoint(x, y);
-    while (element && element.shadowRoot && typeof element.shadowRoot.elementFromPoint === "function") {
-      const inner = element.shadowRoot.elementFromPoint(x, y);
+    let shadow = shadowRootOf(element);
+    while (shadow && typeof shadow.elementFromPoint === "function") {
+      const inner = shadow.elementFromPoint(x, y);
       if (!inner || inner === element) break;
       element = inner;
+      shadow = shadowRootOf(element);
     }
     return element;
   }
@@ -131,21 +186,166 @@
     return false;
   }
 
-  // Whether an element is rendered and not hidden, as `checkVisibility()` with opacity and visibility checks says.
+  // Whether a control is rendered, matching the fork's `element.checkVisibility()` with no options (`JMP-02`):
+  // `opacity: 0` controls (styled checkboxes, radios, file inputs) remain eligible when paired with `shownPoint`.
   function isRendered(element) {
     if (!element || !element.isConnected) return false;
     if (typeof element.checkVisibility === "function") {
       try {
-        return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        return element.checkVisibility();
       } catch (_) {}
     }
     for (let each = element; each && each.nodeType === 1; each = composedParent(each)) {
       const style = getComputedStyle(each);
       if (!style || style.display === "none" || style.contentVisibility === "hidden") return false;
-      if (each === element && (style.visibility === "hidden" || style.visibility === "collapse")) return false;
-      if (parseFloat(style.opacity) === 0) return false;
     }
     return element.getClientRects().length > 0;
+  }
+
+  const ZERO_CLIP_PATH = /^inset\(\s*(?:50%|100%)|^circle\(\s*0(?![.\d])|^polygon\(\s*0(?:\s|px|%)+\s*0(?:\s|px|%)+\s*,\s*0(?:\s|px|%)+\s*0(?:\s|px|%)+\s*(?:,\s*0(?:\s|px|%)+\s*0(?:\s|px|%)+\s*)*\)/i;
+
+  function isTextAncestorBoxRendered(element, ancCache) {
+    if (!element || element.nodeType !== 1) return true;
+    if (!element.isConnected) return false;
+    if (ancCache && ancCache.has(element)) return ancCache.get(element);
+    const style = getComputedStyle(element);
+    let ok =
+      !!style &&
+      style.display !== "none" &&
+      style.contentVisibility !== "hidden" &&
+      !(parseFloat(style.opacity) < 0.05) &&
+      !ZERO_CLIP_PATH.test(style.clipPath || "");
+    if (ok) {
+      const parent = composedParent(element);
+      if (parent && parent.nodeType === 1) ok = isTextAncestorBoxRendered(parent, ancCache);
+    }
+    if (ancCache) ancCache.set(element, ok);
+    return ok;
+  }
+
+  // Whether an element's text is visibly rendered on the page (excluding `visibility: hidden`/`collapse`, `opacity: 0`
+  // dropdowns/tooltips, `display: none`, `content-visibility: hidden`, and `font-size: 0`, while supporting `display: contents`).
+  function isTextRendered(element, cache, ancCache) {
+    if (!element || element.nodeType !== 1 || !element.isConnected || isNotTextElement(element)) return false;
+    if (cache && cache.has(element)) return cache.get(element);
+    const style = getComputedStyle(element);
+    let ok =
+      !!style &&
+      style.visibility !== "hidden" &&
+      style.visibility !== "collapse" &&
+      (style.display === "contents" || parseFloat(style.fontSize) !== 0) &&
+      isTextAncestorBoxRendered(element, ancCache);
+    if (ok && style.display !== "contents" && typeof element.checkVisibility === "function") {
+      try {
+        ok = element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+      } catch (_) {}
+    }
+    if (cache) cache.set(element, ok);
+    return ok;
+  }
+
+  // Child frame discovery, coordinate mapping, and isolated-world evaluation (`FRM-01`).
+  const frameIds = new WeakMap();
+  let nextFrameId = 0;
+
+  function frameId(frame) {
+    let id = frameIds.get(frame);
+    if (!id) {
+      id = "f" + nextFrameId++;
+      frameIds.set(frame, id);
+    }
+    return id;
+  }
+
+  function evalInFrame(frame, requestObj) {
+    if (typeof globalThis.__zendiaEvalFrame !== "function" || !frame || frame.nodeType !== 1) return null;
+    const payload = JSON.stringify(JSON.stringify(requestObj));
+    try {
+      let raw = globalThis.__zendiaEvalFrame(
+        frame,
+        "typeof __zendiaAutomation === 'function' ? __zendiaAutomation(" + payload + ") : '__NEED_RUNTIME__'"
+      );
+      if (raw === "__NEED_RUNTIME__") {
+        raw = globalThis.__zendiaEvalFrame(frame, RUNTIME_SOURCE + "\n__zendiaAutomation(" + payload + ")");
+      }
+      return typeof raw === "string" ? JSON.parse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function frameVisible(frame) {
+    if (!frame || !frame.isConnected) return false;
+    if (typeof frame.checkVisibility === "function") {
+      try {
+        if (!frame.checkVisibility({ visibilityProperty: true })) return false;
+      } catch (_) {
+        try {
+          if (!frame.checkVisibility()) return false;
+        } catch (_) {}
+      }
+    } else {
+      const st = getComputedStyle(frame);
+      if (!st || st.display === "none" || st.visibility === "hidden" || st.visibility === "collapse") return false;
+    }
+    return getComputedStyle(frame).pointerEvents !== "none";
+  }
+
+  function allFrames() {
+    const root = document.body || document.documentElement;
+    if (!root) return [];
+    const found = [];
+    for (const el of deepElements(root)) {
+      if (el.localName === "iframe" || el.localName === "frame") found.push(el);
+    }
+    return sortComposed(found);
+  }
+
+  function visibleFrames() {
+    return allFrames().filter(frame => frameVisible(frame) && isInWindow(frame.getBoundingClientRect()));
+  }
+
+  function initChildFrames() {
+    for (const frame of allFrames()) {
+      evalInFrame(frame, { op: "init" });
+    }
+  }
+
+  function frameBox(frame) {
+    const box = frame.getBoundingClientRect();
+    const scale = (drawn, laid) => {
+      const value = laid ? drawn / laid : 1;
+      return Number.isFinite(value) && value > 0 ? value : 1;
+    };
+    const scaleX = scale(box.width, frame.offsetWidth);
+    const scaleY = scale(box.height, frame.offsetHeight);
+    const left = box.left + frame.clientLeft * scaleX;
+    const top = box.top + frame.clientTop * scaleY;
+    const width = frame.clientWidth * scaleX;
+    const height = frame.clientHeight * scaleY;
+    return { left, top, width, height, right: left + width, bottom: top + height, scaleX, scaleY };
+  }
+
+  function fromFrame(box, rect) {
+    const rx = rect.left !== undefined ? rect.left : rect.x;
+    const ry = rect.top !== undefined ? rect.top : rect.y;
+    const left = box.left + rx * box.scaleX;
+    const top = box.top + ry * box.scaleY;
+    const width = rect.width * box.scaleX;
+    const height = rect.height * box.scaleY;
+    return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top };
+  }
+
+  function frameShowsAt(frame, x, y) {
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return true;
+    const hit = deepElementFromPoint(x, y);
+    return !hit || hit === frame || composedContains(frame, hit);
+  }
+
+  function uncoveredInFrame(frame, box, mappedRect) {
+    const cx = mappedRect.left + mappedRect.width / 2;
+    const cy = mappedRect.top + mappedRect.height / 2;
+    return cx >= box.left && cx <= box.right && cy >= box.top && cy <= box.bottom && frameShowsAt(frame, cx, cy);
   }
 
   function plainRect(rect) {
@@ -172,10 +372,16 @@
   }
 
   // ---------------------------------------------------------------------------------------------------------------
-  // Controls: what a user can press, type in or toggle
+  // Controls & CAPTCHA recognition (`ZendiaControls.sys.mjs`, `ZendiaCaptcha.sys.mjs`, `ZendiaPointerContent.sys.mjs`, `CAP-01`..`CAP-09`)
   // ---------------------------------------------------------------------------------------------------------------
 
   const CONTROLS = [
+    "checkbox",
+    "radio",
+    "menulist",
+    "richlistitem",
+    "tab",
+    "toolbarbutton",
     "a[href]",
     "button",
     "input:not([type=hidden])",
@@ -198,8 +404,7 @@
     "[onclick]",
   ].join(",");
   const FIELDS = "input, textarea, select, [contenteditable='true'], [contenteditable='']";
-  const HANDS = new Set([
-    "pointer",
+  const DRAG_CURSORS = new Set([
     "grab",
     "grabbing",
     "move",
@@ -209,6 +414,11 @@
     "w-resize",
     "col-resize",
   ]);
+  const HANDS = new Set(["pointer", ...DRAG_CURSORS]);
+  const DRAG_NAME = /slider|handle|knob|thumb|drag|puzzle|jigsaw|press-?(?:and-?)?hold/i;
+  const HOLD_WORDS = /\bpress\s*(?:&|and)\s*hold\b|\b(?:click|tap) and hold\b|\bhold (?:the|this) button\b/i;
+  const HOLD_TEXT_MAX = 80;
+  const SLIDER_NAME = /slid|knob|thumb/i;
   const MIN_SIZE = 4;
   const FRAGMENTS_MAX = 4;
   // Where in a box to look for the control: the middle first, then around it.
@@ -219,6 +429,291 @@
     [0.5, 0.25],
     [0.5, 0.75],
   ];
+
+  const CAPTCHAS = [
+    {
+      name: "reCAPTCHA",
+      frame: /google\.com\/recaptcha\/|recaptcha\.net\//,
+      challenge: /\/bframe/,
+      kind: "image",
+      widgetKind: "checkbox",
+      score: /[?&]render=(?!(?:explicit|onload)\b)/,
+    },
+    {
+      name: "hCaptcha",
+      frame: /hcaptcha\.com\//,
+      challenge: /frame=challenge/,
+      kind: "image",
+      widgetKind: "checkbox",
+    },
+    {
+      name: "Cloudflare Turnstile",
+      frame: /challenges\.cloudflare\.com\/|\/cdn-cgi\/challenge-platform\//,
+      challenge: null,
+      kind: "managed",
+    },
+    { name: "Arkose", frame: /arkoselabs\.com\/|funcaptcha\.com\/|octocaptcha\.com\//, challenge: /./, kind: "game" },
+    { name: "GeeTest", frame: /geetest\.com\/|geevisit\.com\/|geetest\.cn\//, challenge: /./, kind: "slider" },
+    {
+      name: "HUMAN",
+      frame: /px-cdn\.net\/|px-cloud\.net\/|perimeterx\.(?:net|com)\/|human\.com\/captcha/,
+      challenge: /./,
+      kind: "behavioral",
+    },
+    { name: "DataDome", frame: /captcha-delivery\.com\//, challenge: /./, kind: "slider" },
+    {
+      name: "Yandex SmartCaptcha",
+      frame: /smartcaptcha\.yandexcloud\.net\/|captcha\.yandex\./,
+      challenge: /advanced/,
+      kind: "puzzle",
+      widgetKind: "checkbox",
+    },
+    { name: "Tencent Captcha", frame: /captcha\.qcloud\.com\/|turing\.captcha\.gtimg\.com\//, challenge: /./, kind: "slider" },
+    { name: "NetEase Yidun", frame: /(?:c|captcha)\.dun\.163\.com\//, challenge: /./, kind: "slider" },
+    { name: "MTCaptcha", frame: /mtcaptcha\.com\//, challenge: null, kind: "text" },
+    {
+      name: "Friendly Captcha",
+      frame: /\bfrcapi\.com\/|\b(?:eu-)?api\.friendlycaptcha\.(?:com|eu)\//,
+      challenge: null,
+      kind: "proof-of-work",
+    },
+    { name: "AWS WAF", frame: /awswaf\.com\//, challenge: /./, kind: "puzzle" },
+    { name: "Lemin", frame: /leminnow\.com\//, challenge: /./, kind: "puzzle" },
+    { name: "KeyCAPTCHA", frame: /keycaptcha\.com\//, challenge: /./, kind: "puzzle" },
+  ];
+
+  const WIDGETS = [
+    ".g-recaptcha",
+    ".grecaptcha-badge",
+    ".h-captcha",
+    ".cf-turnstile",
+    ".frc-captcha",
+    "#lemin-cropped-captcha",
+    ".lemin-captcha-popup",
+    "altcha-widget",
+    ".altcha",
+    ".mtcaptcha",
+    "#mtcaptcha",
+    ".mcaptcha__widget-container",
+    "[class*='geetest_']",
+    ".gt_holder",
+    ".gt_popup",
+    "[class*='yidun']",
+    "[id*='tcaptcha']",
+    "form[action*='validateCaptcha']",
+    "#px-captcha",
+    "#cf-challenge-running",
+    "#challenge-stage",
+    "#challenge-form",
+    "#amzn-captcha-verify-button",
+    ".amzn-captcha-modal",
+    "awswaf-captcha",
+  ].join(",");
+
+  const TOKEN_FIELDS = [
+    "g-recaptcha-response",
+    "h-captcha-response",
+    "cf-turnstile-response",
+    "frc-captcha-solution",
+    "frc-captcha-response",
+    "mtcaptcha-verifiedtoken",
+    "aws-waf-token",
+    "fc-token",
+    "altcha",
+    "geetest_challenge",
+    "geetest_validate",
+    "geetest_seccode",
+    "lemin_answer",
+  ];
+
+  const OWN_CAPTCHA_NAMES =
+    /captcha|security[\s_-]?code|verification[\s_-]?code|verify[\s_-]?code|anti[\s_-]?bot|human[\s_-]?check|enter (?:the )?(?:characters|code|text|letters|numbers) (?:you see|shown|above|below|in the (?:image|picture))/i;
+  const NOT_OWN_CAPTCHA = /logo|icon|badge|recaptcha-response|captcha-response/i;
+  const SERVICE_SITES =
+    /^https?:\/\/www\.(?:hcaptcha|arkoselabs|geetest|mtcaptcha|friendlycaptcha|leminnow|keycaptcha)\.(?:com|cn|eu)\//;
+
+  const CHALLENGE_PROMPTS = [
+    [
+      "image",
+      /^(?:please )?(?:select|click|tap|pick)(?: on)?(?: all| each| every| any)?(?: of)?(?: the)? (?:images?|squares?|pictures?|tiles?|photos?|boxes)\b/i,
+    ],
+    [
+      "text",
+      /^(?:please )?(?:type|enter)(?: in)?(?: the)? (?:characters?|letters?|text|code|words?|numbers?)\b.*\b(?:see|shown|image|picture|above|below)\b/i,
+    ],
+    [
+      "slider",
+      /^(?:please )?(?:slide|drag)\b.*\b(?:into place|gap|to (?:complete|fit|verify)|right)\b/i,
+    ],
+    ["rotate", /^(?:please )?(?:rotate|turn) the (?:image|picture|object)\b/i],
+    [
+      "click",
+      /^(?:please )?(?:click|tap|select)(?: on)?(?: the)?(?: (?:icons?|characters?|symbols?|letters?|objects?))? in (?:the |this )?(?:following |given )?order\b/i,
+    ],
+    ["math", /^(?:what is|solve|calculate|how much is) \d+ ?[-+x×*÷/] ?\d+/i],
+    ["behavioral", /^press (?:&|and) hold\b/i],
+    [
+      "checkbox",
+      /^(?:i['’]?m|i am) (?:not a robot|a human|human)\.?$|^verify (?:that )?you(?:['’]re| are)(?: a)? human\.?$|^(?:are you a )?robot or human\??$|^click (?:here )?to verify\.?$/i,
+    ],
+  ];
+  const PROMPT_WORDS = [
+    "select",
+    "click",
+    "tap",
+    "pick",
+    "type",
+    "enter",
+    "slide",
+    "drag",
+    "rotate",
+    "turn",
+    "robot",
+    "human",
+    "press",
+    "what is",
+    "solve",
+    "calculate",
+    "how much",
+  ];
+  const PROMPT_MAX = 120;
+
+  const PURPOSES = ["answer", "play", "visual", "audio", "reload", "verify"];
+  const NOT_A_PURPOSE = /download|help|privacy|terms|report|feedback|logo/i;
+  const PURPOSE_RULES = [
+    ["play", /\bplay\b|\breplay\b|listen again|play-?button/i],
+    ["visual", /\bvisual\b|image-?button|get an? (?:image|picture)|(?:image|picture) challenge instead/i],
+    ["audio", /\baudio\b|\blisten\b|headphone|\bsound\b|\bvoice\b/i],
+    [
+      "reload",
+      /reload|refresh|new challenge|another challenge|try another|try again|start over|restart|^reset\b|new (?:image|picture|puzzle|question)s?\b/i,
+    ],
+    [
+      "verify",
+      /\bverify\b|\bsubmit\b|^next\b|\bskip\b|^check\b|\bconfirm\b|^done\b|^continue\b|^ok\b|verify-?button|button-?submit/i,
+    ],
+  ];
+  const ANSWER_TYPES = new Set(["", "text", "search", "tel", "number", "email", "url"]);
+  const SOLVED_CLASS = /(?:^|[_-])(?:success|verified|solved|passed)$/i;
+  const SOLVED_MARKS = `:is(${WIDGETS}):is([class*=success], [class*=verified], [class*=solved], [class*=passed], [data-state=verified])`;
+
+  function serviceOfUrl(url) {
+    const s = String(url || "");
+    return SERVICE_SITES.test(s) ? null : CAPTCHAS.find(c => c.frame.test(s)) || null;
+  }
+
+  function nameOfUrl(url) {
+    const svc = serviceOfUrl(url);
+    return svc ? svc.name : null;
+  }
+
+  function isChallengeUrl(url) {
+    const svc = serviceOfUrl(url);
+    return !!(svc && svc.challenge && svc.challenge.test(String(url || "")));
+  }
+
+  function frameSrcOf(frame) {
+    return (frame && (frame.src || frame.getAttribute("src"))) || "";
+  }
+
+  function promptKind(text) {
+    const s = String(text || "").replace(/\s+/g, " ").trim();
+    if (!s || s.length > PROMPT_MAX) return null;
+    const hit = CHALLENGE_PROMPTS.find(entry => entry[1].test(s));
+    return hit ? hit[0] : null;
+  }
+
+  function isTokenField(name) {
+    const field = String(name || "").toLowerCase();
+    return TOKEN_FIELDS.some(
+      token => field === token || field.startsWith(token + "-") || field.startsWith(token + "[")
+    );
+  }
+
+  function marksSolved(classes, state) {
+    if (state === "verified") return true;
+    for (const name of classes || []) {
+      if (SOLVED_CLASS.test(name)) return true;
+    }
+    return false;
+  }
+
+  function namesOwnCaptcha(names) {
+    const text = String(names || "").slice(0, 1000);
+    return OWN_CAPTCHA_NAMES.test(text) && !NOT_OWN_CAPTCHA.test(text);
+  }
+
+  function purposeOfControl(control) {
+    const tag = String(control.tag || "").toLowerCase();
+    const type = String(control.type || "").toLowerCase();
+    if (control.editable && tag !== "select" && (tag !== "input" || ANSWER_TYPES.has(type))) {
+      return "answer";
+    }
+    if (tag === "input" && (type === "checkbox" || type === "radio")) {
+      return null;
+    }
+    const label = String(control.label || "").replace(/\s+/g, " ").trim().slice(0, 200);
+    const name = String(control.name || "").replace(/[_\s]+/g, " ").slice(0, 200);
+    if (NOT_A_PURPOSE.test(label) || NOT_A_PURPOSE.test(name)) {
+      return null;
+    }
+    for (const text of [label, name]) {
+      for (const [purpose, rule] of PURPOSE_RULES) {
+        if (text && rule.test(text)) return purpose;
+      }
+    }
+    return null;
+  }
+
+  function rawTrackOf(element) {
+    const knob = element.getBoundingClientRect();
+    if (knob.height < 28 || knob.width < 28) return null;
+    let track = composedParent(element);
+    for (let level = 0; track && level < 3; level++) {
+      const box = track.getBoundingClientRect ? track.getBoundingClientRect() : null;
+      if (
+        box &&
+        box.width >= knob.width * 3 &&
+        box.height >= knob.height * 0.5 &&
+        box.height <= knob.height * 1.6 &&
+        (Math.abs(knob.left - box.left) < 12 || Math.abs(knob.right - box.right) < 12) &&
+        ![...track.querySelectorAll(CONTROLS)].some(other => other !== element && !element.contains(other))
+      ) {
+        return box;
+      }
+      track = composedParent(track);
+    }
+    return null;
+  }
+
+  function sitsInATrack(element) {
+    return !!rawTrackOf(element);
+  }
+
+  function isDraggable(element) {
+    return (
+      DRAG_CURSORS.has(getComputedStyle(element).cursor) ||
+      element.matches("[role=slider], [draggable=true]") ||
+      DRAG_NAME.test((element.getAttribute("class") || "") + " " + (element.id || "")) ||
+      HOLD_WORDS.test((element.getAttribute("aria-label") || "") + " " + (element.textContent || "").slice(0, HOLD_TEXT_MAX)) ||
+      sitsInATrack(element)
+    );
+  }
+
+  function isSlider(element) {
+    return (
+      element.matches("[role=slider], input[type=range]") ||
+      SLIDER_NAME.test((element.getAttribute("class") || "") + " " + (element.id || "")) ||
+      sitsInATrack(element)
+    );
+  }
+
+  function trackOf(element) {
+    const parent = composedParent(element);
+    const box = rawTrackOf(element) || (parent && parent.getBoundingClientRect ? parent.getBoundingClientRect() : null);
+    if (!box) return null;
+    return { x: box.left, y: box.top, left: box.left, top: box.top, width: box.width, height: box.height };
+  }
 
   function isInWindow(rect) {
     return (
@@ -373,28 +868,660 @@
     );
   }
 
-  // The controls of the page; with `fields` "exclude" (`s`) or "only" (`i`). With a pattern only those whose text
-  // contains it, each with the characters that follow the matches.
-  function controlTargets(fields, pattern) {
+  // ---------------------------------------------------------------------------------------------------------------
+  // Site-own CAPTCHAs, drawn challenges (`ownChallenges`), areas & controls (`CAP-01`..`CAP-07`)
+  // ---------------------------------------------------------------------------------------------------------------
+
+  const PICTURE_MIN = { width: 100, height: 60 };
+  const OWN_CAPTCHA_LEVELS = 4;
+  const OWN_CAPTCHA_WIDEN = 4;
+  const OWN_PICTURE_MIN = { width: 40, height: 24 };
+  const OTHER_FIELDS =
+    "input:not([type=hidden], [type=submit], [type=button], [type=reset], [type=image]), textarea, select";
+  const DRAWN_MAX = 400;
+  const DRAWN_CACHE_MS = 400;
+  let drawnChallengesCache = { at: 0, boxes: [] };
+
+  const WATCH_MIN_SIDE = 20;
+  const WATCH_BOX_MAX_WIDTH = 520;
+  const WATCH_BOX_MAX_HEIGHT = 720;
+  const WATCH_PROMPT_LEVELS = 6;
+  const WATCH_LINE_MAX = 80;
+  const WATCH_LINE_LEVELS = 2;
+  const WATCH_MAX_PROMPT_TEXTS = 200;
+  const WATCH_MAX_OWN = 5;
+  const WATCH_CONTROLS =
+    "img, canvas, svg, video, button, input:not([type=hidden]), select, [role=button], [role=checkbox], [role=slider], [draggable=true], [tabindex]";
+  const WATCH_ANSWER_FIELDS =
+    "input:not([type]), input[type=text], input[type=tel], input[type=number], input[type=search], textarea";
+  const WATCH_NOT_PROMPT = "a[href], h1, h2, option, [hidden], [aria-hidden=true]";
+  const WATCH_VISIBILITY = { opacityProperty: true, visibilityProperty: true };
+
+  function checkVisibleStrict(element) {
+    if (!element || !element.isConnected) return false;
+    if (typeof element.checkVisibility === "function") {
+      try {
+        return element.checkVisibility(WATCH_VISIBILITY);
+      } catch (_) {}
+    }
+    const st = getComputedStyle(element);
+    return !!st && st.display !== "none" && st.visibility !== "hidden" && parseFloat(st.opacity || "1") > 0;
+  }
+
+  function watchIsShown(element) {
+    if (!checkVisibleStrict(element)) return false;
+    const rect = element.getBoundingClientRect();
+    return (
+      rect.width >= WATCH_MIN_SIDE &&
+      rect.height >= WATCH_MIN_SIDE &&
+      rect.right + scrollX > 0 &&
+      rect.bottom + scrollY > 0
+    );
+  }
+
+  function boxAround(element, levels, growth) {
+    const maxGrowth = growth === undefined ? Infinity : growth;
+    const own = element.getBoundingClientRect();
+    const most = own.width * own.height * maxGrowth;
+    let box = element;
+    let node = element.parentElement;
+    for (let level = 0; node && level < levels; level++) {
+      if (node === document.body || node === document.documentElement || node.localName === "form") break;
+      const rect = node.getBoundingClientRect();
+      const holds =
+        rect.left <= own.left + 1 &&
+        rect.top <= own.top + 1 &&
+        rect.right >= own.right - 1 &&
+        rect.bottom >= own.bottom - 1;
+      if (!holds || rect.width > WATCH_BOX_MAX_WIDTH || rect.height > WATCH_BOX_MAX_HEIGHT || rect.width * rect.height > most) {
+        break;
+      }
+      box = node;
+      node = node.parentElement;
+    }
+    return box;
+  }
+
+  function promptTextNodes() {
+    const lower = "translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
+    const words = PROMPT_WORDS.map(word => `contains(${lower}, '${word}')`).join(" or ");
+    const query =
+      `//body//text()[string-length(normalize-space(.)) > 3 and ` +
+      `string-length(.) < ${PROMPT_MAX * 3} and (${words}) and ` +
+      `not(ancestor::script or ancestor::style or ancestor::noscript or ` +
+      `ancestor::template or ancestor::textarea or ancestor::title)]`;
+    try {
+      if (typeof document.evaluate === "function") {
+        const found = document.evaluate(query, document, null, 7, null);
+        const texts = [];
+        const limit = Math.min(found.snapshotLength, WATCH_MAX_PROMPT_TEXTS);
+        for (let i = 0; i < limit; i++) texts.push(found.snapshotItem(i));
+        return texts;
+      }
+    } catch (_) {}
+    const fallback = [];
+    if (!document.body) return fallback;
+    for (const node of deepTextNodes(document.body)) {
+      if (fallback.length >= WATCH_MAX_PROMPT_TEXTS) break;
+      const raw = node.data || "";
+      if (raw.length >= PROMPT_MAX * 3 || raw.trim().length <= 3) continue;
+      const lc = raw.toLowerCase();
+      if (PROMPT_WORDS.some(w => lc.includes(w))) fallback.push(node);
+    }
+    return fallback;
+  }
+
+  function cleanText(text) {
+    return String(text || "").replace(/\s+/g, " ").trim();
+  }
+
+  function ownChallenges() {
+    if (!document.body || nameOfUrl(location.href) !== null) return [];
+    const found = [];
+    for (const text of promptTextNodes()) {
+      let element = text.parentElement;
+      if (!element || element.closest(WATCH_NOT_PROMPT) || !checkVisibleStrict(element)) continue;
+      const kind = promptKind(text.data) || promptKind(element.textContent);
+      if (!kind) continue;
+      const matched = element;
+      for (
+        let level = 0;
+        level < WATCH_LINE_LEVELS &&
+        element.parentElement &&
+        element.parentElement !== document.body &&
+        cleanText(element.parentElement.textContent).length <= WATCH_LINE_MAX;
+        level++
+      ) {
+        element = element.parentElement;
+      }
+      if (element.closest(WIDGETS)) continue;
+      const box = boxAround(element, WATCH_PROMPT_LEVELS);
+      if (!watchIsShown(box) || !box.querySelector(WATCH_CONTROLS)) continue;
+      const line = cleanText(element.innerText);
+      const own = cleanText(matched.innerText || text.data);
+      found.push({ box, kind, prompt: line.includes(own) ? line : own });
+    }
+    for (const element of document.querySelectorAll(
+      "input[placeholder], input[aria-label], textarea[placeholder], img[alt], canvas[aria-label]"
+    )) {
+      const label = element.getAttribute("placeholder") || element.getAttribute("aria-label") || element.getAttribute("alt");
+      const kind = promptKind(label);
+      if (!kind || kind === "checkbox" || element.closest(WIDGETS) || !checkVisibleStrict(element)) continue;
+      const box = boxAround(element, WATCH_PROMPT_LEVELS);
+      if (watchIsShown(box) && (kind !== "text" || box.querySelector("img, canvas, svg"))) {
+        found.push({ box, kind, prompt: cleanText(label) });
+      }
+    }
+    for (const picture of document.querySelectorAll("img, canvas")) {
+      const names = ["src", "alt", "id", "class", "name", "title", "aria-label"]
+        .map(n => picture.getAttribute(n) || "")
+        .join(" ");
+      if (!namesOwnCaptcha(names) || picture.closest(WIDGETS) || !watchIsShown(picture)) continue;
+      let box = picture.parentElement;
+      for (let level = 0; box && level < OWN_CAPTCHA_LEVELS && !box.querySelector(WATCH_ANSWER_FIELDS); level++) {
+        box = box.parentElement;
+      }
+      if (!box || !box.querySelector(WATCH_ANSWER_FIELDS)) continue;
+      const r = box.getBoundingClientRect();
+      if (r.width <= WATCH_BOX_MAX_WIDTH && r.height <= WATCH_BOX_MAX_HEIGHT) {
+        found.push({ box, kind: "text", prompt: "picture and answer field" });
+      }
+    }
+    const rank = item => (item.kind === "checkbox" ? 1 : 0);
+    const kept = [];
+    for (const item of found) {
+      const other = kept.find(o => o.box === item.box || o.box.contains(item.box) || item.box.contains(o.box));
+      if (!other) {
+        kept.push(Object.assign({}, item));
+        continue;
+      }
+      if (item.box.contains(other.box)) other.box = item.box;
+      if (rank(item) < rank(other)) {
+        other.kind = item.kind;
+        other.prompt = item.prompt;
+      }
+    }
+    return kept.filter(item => !kept.some(other => other !== item && other.box.contains(item.box))).slice(0, WATCH_MAX_OWN);
+  }
+
+  function drawnChallenges() {
+    const now = Date.now();
+    if (drawnChallengesCache.at && now - drawnChallengesCache.at < DRAWN_CACHE_MS) {
+      return drawnChallengesCache.boxes.filter(box => box && box.isConnected);
+    }
+    let boxes = [];
+    try {
+      boxes = ownChallenges().map(item => item.box);
+    } catch (_) {}
+    drawnChallengesCache = { at: now, boxes };
+    return boxes;
+  }
+
+  function widenOwnBox(box) {
+    const base = box.getBoundingClientRect();
+    let best = box;
+    for (
+      let each = box.parentElement, level = 0;
+      each && each !== document.body && each !== document.documentElement && level < OWN_CAPTCHA_WIDEN;
+      each = each.parentElement, level++
+    ) {
+      const rect = each.getBoundingClientRect();
+      if (
+        rect.height > base.height * 2 + 120 ||
+        rect.width * rect.height > Math.max(base.width * base.height * 12, 160000) ||
+        [...each.querySelectorAll(OTHER_FIELDS)].some(field => !box.contains(field))
+      ) {
+        break;
+      }
+      best = each;
+      if (each.localName === "form") break;
+    }
+    return best;
+  }
+
+  function ownCaptchas() {
+    const named = [];
+    try {
+      for (const element of document.querySelectorAll("img, canvas, input:not([type=hidden]), textarea")) {
+        const attrs = ["src", "alt", "id", "class", "name", "placeholder", "aria-label", "title"]
+          .map(n => element.getAttribute(n) || "")
+          .join(" ");
+        if (!namesOwnCaptcha(attrs)) continue;
+        const rect = element.getBoundingClientRect();
+        const field = element.localName === "input" || element.localName === "textarea";
+        const least = field ? { width: 20, height: 10 } : OWN_PICTURE_MIN;
+        if (
+          rect.width >= least.width &&
+          rect.height >= least.height &&
+          rect.bottom > 0 &&
+          rect.top < innerHeight &&
+          isRendered(element) &&
+          !element.closest(WIDGETS) &&
+          (field || !element.closest("a[href]"))
+        ) {
+          named.push(element);
+        }
+      }
+    } catch (_) {}
+    const pics = named.filter(e => e.localName !== "input" && e.localName !== "textarea");
+    const flds = named.filter(e => !pics.includes(e));
+    const boxes = new Set();
+    for (const field of flds) {
+      let box = field.parentElement;
+      for (let level = 0; box && level < OWN_CAPTCHA_LEVELS && !pics.some(p => box.contains(p)); level++) {
+        box = box.parentElement;
+      }
+      boxes.add(box && pics.some(p => box.contains(p)) ? box : field.parentElement || field);
+    }
+    for (const pic of pics) {
+      if (![...boxes].some(b => b.contains(pic))) boxes.add(pic.parentElement || pic);
+    }
+    const widened = new Set([...boxes].filter(Boolean).map(widenOwnBox));
+    for (const box of drawnChallenges()) widened.add(box);
+    const list = [...widened];
+    return list.filter(box => !list.some(other => other !== box && other.contains(box)));
+  }
+
+  function inPageCaptcha(element, own) {
+    for (let each = element; each; each = composedParent(each)) {
+      if (each.matches && each.matches(WIDGETS)) return true;
+    }
+    return own.some(box => composedContains(box, element));
+  }
+
+  function purposeOfElement(element) {
+    return purposeOfControl({
+      tag: element.localName,
+      type: element.getAttribute("type") || "",
+      editable: isEditable(element),
+      label: textOf(element) + " " + (element.getAttribute("title") || ""),
+      name: (element.id || "") + " " + (element.getAttribute("class") || ""),
+    });
+  }
+
+  function isPictureRect(rect) {
+    return rect.width >= 150 && rect.height >= 100;
+  }
+
+  function visibleElementRect(element) {
+    const rect = element.getBoundingClientRect();
+    let left = rect.left;
+    let top = rect.top;
+    let right = rect.right;
+    let bottom = rect.bottom;
+    for (let each = composedParent(element), level = 0; each && level < 12; each = composedParent(each), level++) {
+      const st = getComputedStyle(each);
+      if (!st || (st.overflowX === "visible" && st.overflowY === "visible")) continue;
+      const box = each.getBoundingClientRect();
+      if (st.overflowX !== "visible") {
+        left = Math.max(left, box.left);
+        right = Math.min(right, box.right);
+      }
+      if (st.overflowY !== "visible") {
+        top = Math.max(top, box.top);
+        bottom = Math.min(bottom, box.bottom);
+      }
+    }
+    if (right <= left || bottom <= top) return rect;
+    return { left, top, width: right - left, height: bottom - top, right, bottom };
+  }
+
+  function isUncoveredCenter(element, rect) {
+    const cx = Math.min(Math.max(rect.left + rect.width / 2, 0), Math.max(innerWidth - 1, 0));
+    const cy = Math.min(Math.max(rect.top + rect.height / 2, 0), Math.max(innerHeight - 1, 0));
+    const hit = deepElementFromPoint(cx, cy);
+    return !hit || hit === element || composedContains(element, hit) || composedContains(hit, element);
+  }
+
+  function findPictures(selector, root) {
+    const scope = root || document;
+    const found = [];
+    try {
+      for (const element of scope.querySelectorAll(selector)) {
+        const rect = element.getBoundingClientRect();
+        if (
+          rect.width >= PICTURE_MIN.width &&
+          rect.height >= PICTURE_MIN.height &&
+          rect.bottom > 0 &&
+          rect.right > 0 &&
+          rect.top < innerHeight &&
+          rect.left < innerWidth &&
+          isRendered(element) &&
+          isUncoveredCenter(element, rect)
+        ) {
+          found.push(element);
+        }
+      }
+    } catch (_) {}
+    return found;
+  }
+
+  function drawnRect(element) {
+    const box = element.getBoundingClientRect();
+    let left = box.left;
+    let top = box.top;
+    let right = box.right;
+    let bottom = box.bottom;
+    const clips = new Map([[composedParent(element), null]]);
+    const clipOf = node => {
+      if (!node) return null;
+      if (clips.has(node)) return clips.get(node);
+      const above = clipOf(composedParent(node));
+      let clip = above;
+      const st = getComputedStyle(node);
+      const clipsX = st && st.overflowX !== "visible";
+      const clipsY = st && st.overflowY !== "visible";
+      if (clipsX || clipsY) {
+        const own = node.getBoundingClientRect();
+        clip = {
+          left: clipsX ? own.left : -Infinity,
+          top: clipsY ? own.top : -Infinity,
+          right: clipsX ? own.right : Infinity,
+          bottom: clipsY ? own.bottom : Infinity,
+        };
+        if (above) {
+          clip = {
+            left: Math.max(clip.left, above.left),
+            top: Math.max(clip.top, above.top),
+            right: Math.min(clip.right, above.right),
+            bottom: Math.min(clip.bottom, above.bottom),
+          };
+        }
+      }
+      clips.set(node, clip);
+      return clip;
+    };
+    let looked = 0;
+    const roots = [element, shadowRootOf(element)].filter(Boolean);
+    for (const root of roots) {
+      for (const each of deepElements(root)) {
+        if (++looked > DRAWN_MAX) break;
+        const rect = each.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4 || !checkVisibleStrict(each)) continue;
+        const clip = clipOf(composedParent(each)) || {
+          left: -Infinity,
+          top: -Infinity,
+          right: Infinity,
+          bottom: Infinity,
+        };
+        const shownLeft = Math.max(rect.left, clip.left);
+        const shownTop = Math.max(rect.top, clip.top);
+        const shownRight = Math.min(rect.right, clip.right);
+        const shownBottom = Math.min(rect.bottom, clip.bottom);
+        if (shownRight - shownLeft < 4 || shownBottom - shownTop < 4) continue;
+        left = Math.min(left, shownLeft);
+        top = Math.min(top, shownTop);
+        right = Math.max(right, shownRight);
+        bottom = Math.max(bottom, shownBottom);
+      }
+    }
+    left = Math.max(left, 0);
+    top = Math.max(top, 0);
+    right = Math.min(right, innerWidth);
+    bottom = Math.min(bottom, innerHeight);
+    if (right <= left || bottom <= top) {
+      return { left: box.left, top: box.top, width: box.width, height: box.height, right: box.right, bottom: box.bottom };
+    }
+    return { left, top, width: right - left, height: bottom - top, right, bottom };
+  }
+
+  function outermostRects(rects) {
+    return rects.filter(
+      rect =>
+        !rects.some(
+          other =>
+            other !== rect &&
+            other.left <= rect.left &&
+            other.top <= rect.top &&
+            other.right >= rect.right &&
+            other.bottom >= rect.bottom &&
+            (other.width > rect.width || other.height > rect.height)
+        )
+    );
+  }
+
+  function captchaAreas() {
+    const found = [];
+    for (const frame of visibleFrames()) {
+      const box = frameBox(frame);
+      if (nameOfUrl(frameSrcOf(frame)) !== null) {
+        found.push(box);
+        continue;
+      }
+      const sub = evalInFrame(frame, { op: "captcha_areas" });
+      if (!sub || !Array.isArray(sub.areas)) continue;
+      for (const area of sub.areas) {
+        const mapped = fromFrame(box, area);
+        if (mapped.right > box.left && mapped.left < box.right && mapped.bottom > box.top && mapped.top < box.bottom) {
+          found.push(mapped);
+        }
+      }
+    }
+    try {
+      const all = [...document.querySelectorAll(WIDGETS), ...ownCaptchas()];
+      const outer = all.filter(el => !all.some(other => other !== el && other.contains(el)));
+      for (const element of outer) {
+        const rect = drawnRect(element);
+        if (isRendered(element) && rect.width >= 20 && rect.height >= 20 && rect.bottom > 0 && rect.top < innerHeight) {
+          found.push(rect);
+        }
+      }
+    } catch (_) {}
+    return outermostRects(found).map(r => ({ x: r.left, y: r.top, width: r.width, height: r.height }));
+  }
+
+  function captchaTokens() {
+    let count = 0;
+    try {
+      for (const field of document.querySelectorAll("input[name], textarea[name]")) {
+        if (field.value && isTokenField(field.name)) count++;
+      }
+      for (const widget of document.querySelectorAll(SOLVED_MARKS)) {
+        const state = widget.dataset ? widget.dataset.state || "" : "";
+        if (marksSolved(widget.classList, state) && isRendered(widget)) count++;
+      }
+    } catch (_) {}
+    for (const frame of visibleFrames()) {
+      const sub = evalInFrame(frame, { op: "captcha_tokens" });
+      if (sub && typeof sub.tokens === "number") count += sub.tokens;
+    }
+    return count;
+  }
+
+  // Raw frame control collection (`ZendiaJumpContent.collectControls`), including bare `<canvas>` pictures for parent frames.
+  function collectControlsRaw() {
+    const own = ownCaptchas();
+    const offered = new Map();
+    const controls = findControls();
+    const items = [];
+    for (const element of controls) {
+      const id = controlId(element);
+      offered.set(id, { control: element });
+      let box = element.getBoundingClientRect();
+      if (isPictureRect(box)) box = visibleElementRect(element);
+      const slider = isSlider(element);
+      const tr = slider ? trackOf(element) : null;
+      items.push({
+        id,
+        text: textOf(element),
+        x: box.left,
+        y: box.top,
+        width: box.width,
+        height: box.height,
+        field: isField(element),
+        href: element.localName === "a" && element.href ? element.href : null,
+        captcha: inPageCaptcha(element, own),
+        challenge: false,
+        drag: isDraggable(element),
+        slider,
+        track: tr ? { x: tr.x, y: tr.y, width: tr.width, height: tr.height } : null,
+        canvas: false,
+        purpose: purposeOfElement(element),
+      });
+    }
+    const known = new Set(items.map(i => i.id));
+    for (const canvas of findPictures("canvas", document)) {
+      const id = controlId(canvas);
+      if (known.has(id)) continue;
+      offered.set(id, { pictureOnly: canvas });
+      const box = visibleElementRect(canvas);
+      items.push({
+        id,
+        text: "",
+        x: box.left,
+        y: box.top,
+        width: box.width,
+        height: box.height,
+        field: false,
+        href: null,
+        captcha: inPageCaptcha(canvas, own),
+        challenge: false,
+        drag: false,
+        slider: false,
+        track: null,
+        canvas: true,
+        purpose: null,
+      });
+    }
+    for (const frame of visibleFrames()) {
+      const box = frameBox(frame);
+      const fSrc = frameSrcOf(frame);
+      const sub = evalInFrame(frame, { op: "collect_controls" });
+      if (!sub || !Array.isArray(sub.items)) continue;
+      const prefix = frameId(frame) + "/";
+      for (const item of sub.items) {
+        const mapped = fromFrame(box, item);
+        if (!uncoveredInFrame(frame, box, mapped)) continue;
+        const id = prefix + item.id;
+        offered.set(id, { frame, childId: item.id });
+        const mappedTrack = item.track ? fromFrame(box, item.track) : null;
+        items.push({
+          id,
+          text: String(item.text || "").slice(0, 200),
+          x: mapped.left,
+          y: mapped.top,
+          width: mapped.width,
+          height: mapped.height,
+          field: !!item.field,
+          href: item.href || null,
+          challenge: isChallengeUrl(fSrc) || item.challenge === true,
+          captcha: nameOfUrl(fSrc) !== null || item.captcha === true,
+          drag: item.drag === true,
+          slider: item.slider === true,
+          track: mappedTrack ? { x: mappedTrack.x, y: mappedTrack.y, width: mappedTrack.width, height: mappedTrack.height } : null,
+          canvas: item.canvas === true,
+          purpose: PURPOSES.includes(item.purpose) ? item.purpose : null,
+        });
+      }
+    }
+    pickable = offered;
+    return items;
+  }
+
+  // The controls of the page and its frames (`FRM-01`, `CAP-01`..`CAP-07`), with `scope` `"all" | "challenge" | "captcha"`
+  // and `fields` `"include" | "exclude" | "only"`.
+  function controlTargets(fields, pattern, scope, topOnly) {
+    const modeScope = scope || "all";
     const from = center();
+    const own = ownCaptchas();
     const targets = [];
     const offered = new Map();
-    for (const element of findControls()) {
+    const localControls = findControls();
+    for (const element of localControls) {
+      const inCap = inPageCaptcha(element, own);
       const field = isField(element);
+      if (modeScope !== "all" && !inCap) continue;
       if (fields !== "include" && field !== (fields === "only")) continue;
       const text = pattern ? textOf(element) : "";
       const found = pattern ? findMatches(text, pattern) : [];
       if (pattern && !found.length) continue;
-      const rect = element.getBoundingClientRect();
+      let rect = element.getBoundingClientRect();
+      if (inCap && isPictureRect(rect)) rect = visibleElementRect(element);
       const id = controlId(element);
       offered.set(id, { control: element });
+      const slider = inCap && isSlider(element);
+      const tr = slider ? trackOf(element) : null;
       targets.push(
         target(id, rect, field ? "field" : "control", {
           nexts: found.map(match => match.next),
           distance: distance(rect, from),
           href: element.localName === "a" && element.href ? element.href : null,
+          challenge: inCap,
+          drag: inCap && isDraggable(element),
+          slider,
+          track: tr ? { x: tr.x, y: tr.y, width: tr.width, height: tr.height } : null,
+          picture: inCap && isPictureRect(rect),
+          purpose: inCap ? purposeOfElement(element) : null,
         })
       );
+    }
+    if (modeScope !== "all" && fields !== "only" && !pattern) {
+      const seen = new Set(localControls);
+      const roots = [...own];
+      try {
+        roots.push(...document.querySelectorAll(WIDGETS));
+      } catch (_) {}
+      for (const root of roots) {
+        for (const pic of findPictures("img, canvas", root)) {
+          if (seen.has(pic) || localControls.some(each => each.contains(pic))) continue;
+          seen.add(pic);
+          const rect = visibleElementRect(pic);
+          const id = controlId(pic);
+          offered.set(id, { pictureOnly: pic });
+          targets.push(
+            target(id, rect, "control", {
+              distance: distance(rect, from),
+              challenge: true,
+              drag: false,
+              slider: false,
+              track: null,
+              picture: true,
+              purpose: null,
+            })
+          );
+        }
+      }
+    }
+    for (const frame of topOnly ? [] : visibleFrames()) {
+      const box = frameBox(frame);
+      const fSrc = frameSrcOf(frame);
+      const sub = evalInFrame(frame, { op: "collect_controls" });
+      if (!sub || !Array.isArray(sub.items)) continue;
+      const prefix = frameId(frame) + "/";
+      for (const item of sub.items) {
+        if (fields !== "include" && !!item.field !== (fields === "only")) continue;
+        const itemChallenge = isChallengeUrl(fSrc) || item.challenge === true;
+        const itemCaptcha = nameOfUrl(fSrc) !== null || item.captcha === true;
+        if (modeScope === "all") {
+          if (item.canvas) continue;
+        } else if (modeScope === "challenge") {
+          if (!itemChallenge) continue;
+        } else if (!itemCaptcha) {
+          continue;
+        }
+        const found = pattern ? findMatches(item.text || "", pattern) : [];
+        if (pattern && !found.length) continue;
+        const mapped = fromFrame(box, item);
+        if (!uncoveredInFrame(frame, box, mapped)) continue;
+        const id = prefix + item.id;
+        offered.set(id, { frame, childId: item.id });
+        const inCap = itemChallenge || itemCaptcha;
+        const slider = !!item.slider && inCap;
+        const mappedTrack = slider && item.track ? fromFrame(box, item.track) : null;
+        targets.push(
+          target(id, mapped, item.field ? "field" : "control", {
+            nexts: found.map(match => match.next),
+            distance: distance(mapped, from),
+            href: item.href || null,
+            challenge: modeScope === "captcha" || itemChallenge,
+            drag: !!item.drag && inCap,
+            slider,
+            track: mappedTrack ? { x: mappedTrack.x, y: mappedTrack.y, width: mappedTrack.width, height: mappedTrack.height } : null,
+            picture: inCap && (!!item.canvas || isPictureRect(mapped)),
+            purpose: inCap && PURPOSES.includes(item.purpose) ? item.purpose : null,
+          })
+        );
+      }
     }
     pickable = offered;
     return targets;
@@ -416,16 +1543,22 @@
     }
   }
 
-  // The places a pattern occurs in the text on screen (`S`), nearest the cursor first once labeled.
+  // The places a pattern occurs in the text on screen (`S`), frames included (`FRM-01`), nearest the cursor first.
   function textTargets(pattern) {
     const from = caretPoint() || center();
+    const visible = new Map();
+    const ancVisible = new Map();
+    const clips = new Map();
     const segments = [];
     for (const node of deepTextNodes(document.body || document.documentElement)) {
       if (segments.length >= MAX_SEGMENTS) break;
       const parent = composedParent(node);
-      if (!node.data.trim() || !parent || NOT_TEXT.has(parent.tagName) || !isRendered(parent)) continue;
+      if (!node.data.trim() || !parent || !isTextRendered(parent, visible, ancVisible)) continue;
       const box = parent.getBoundingClientRect();
-      if (box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth) segments.push(node);
+      const contents = getComputedStyle(parent).display === "contents";
+      if (contents || (box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth)) {
+        segments.push(node);
+      }
     }
     const targets = [];
     const offered = new Map();
@@ -435,13 +1568,35 @@
         const range = document.createRange();
         range.setStart(node, match.index);
         range.setEnd(node, match.index + pattern.length);
-        const rect = range.getBoundingClientRect();
-        if (rect.width && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth) {
+        const rect = firstRangeRect(range);
+        if (rect && onScreen(rect) && wordShows(range, rect, clips)) {
           const id = s + ":" + match.index;
           offered.set(id, { caret: { node, offset: match.index } });
           targets.push(target(id, rect, "match", { nexts: [match.next], distance: distance(rect, from) }));
         }
         if (targets.length >= MAX_MATCHES) break outer;
+      }
+    }
+    if (targets.length < MAX_MATCHES) {
+      for (const frame of visibleFrames()) {
+        if (targets.length >= MAX_MATCHES) break;
+        const box = frameBox(frame);
+        const sub = evalInFrame(frame, { op: "jump_scan", jump: "text", pattern });
+        if (!sub || !Array.isArray(sub.targets)) continue;
+        const prefix = frameId(frame) + "/";
+        for (const item of sub.targets) {
+          const mapped = fromFrame(box, item);
+          if (!onScreen(mapped) || !uncoveredInFrame(frame, box, mapped)) continue;
+          const id = prefix + item.id;
+          offered.set(id, { frame, childId: item.id, isVisual: true });
+          targets.push(
+            target(id, mapped, "match", {
+              nexts: Array.isArray(item.nexts) ? item.nexts : [],
+              distance: distance(mapped, from),
+            })
+          );
+          if (targets.length >= MAX_MATCHES) break;
+        }
       }
     }
     pickable = offered;
@@ -456,19 +1611,36 @@
   }
   // The most labels at once: two letters of the alphabet make 576.
   const MAX_WORD_TARGETS = 560;
+  const PAINTED_ELEMENTS = new Set(["img", "video", "canvas", "iframe", "svg", "embed", "object", "picture"]);
+  const INTERACTIVE_ANCESTORS =
+    "a[href], button, label, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=option], [role=radio], [role=checkbox], [role=switch]";
 
-  // The part of an element that its scrolling and clipping ancestors leave to be seen, as the fork's visibleRect.
+  function firstRangeRect(range) {
+    if (!range) return null;
+    const clientRects = range.getClientRects();
+    for (let i = 0; i < clientRects.length; i++) {
+      if (clientRects[i].width > 0 && clientRects[i].height > 0) return clientRects[i];
+    }
+    const rect = range.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 ? rect : null;
+  }
+
+  // Intersection of overflow-clipping boxes from `element` upwards (leaving inline / `display: contents` elements
+  // unclipped by their own bounding rect so multi-link words and wrapped inline spans are preserved, `VIS-04`).
   function clippedRect(element, cache) {
     if (cache.has(element)) return cache.get(element);
-    const rect = element.getBoundingClientRect();
-    let left = rect.left;
-    let top = rect.top;
-    let right = rect.right;
-    let bottom = rect.bottom;
-    let level = 0;
-    for (let each = composedParent(element); each && level < 12; each = composedParent(each), level++) {
+    let left = -Infinity;
+    let top = -Infinity;
+    let right = Infinity;
+    let bottom = Infinity;
+    for (
+      let each = element, level = 0;
+      each && each !== document.body && each !== document.documentElement && level < 16;
+      each = composedParent(each), level++
+    ) {
       if (each.nodeType !== 1) continue;
       const style = getComputedStyle(each);
+      if (!style || style.display === "inline" || style.display === "contents") continue;
       if (style.overflowX === "visible" && style.overflowY === "visible") continue;
       const box = each.getBoundingClientRect();
       if (style.overflowX !== "visible") {
@@ -485,12 +1657,10 @@
     return clipped;
   }
 
-  const PAINTED_ELEMENTS = new Set(["img", "video", "canvas", "iframe", "svg", "embed", "object", "picture"]);
-
-  // Whether an element draws something that hides what is under it: a picture, or a background that is mostly opaque.
   function paintsOver(element) {
     if (PAINTED_ELEMENTS.has(element.localName)) return true;
     const style = getComputedStyle(element);
+    if (!style) return false;
     if (style.backgroundImage && style.backgroundImage !== "none") return true;
     const color = style.backgroundColor || "";
     if (!color || color === "transparent") return false;
@@ -501,42 +1671,51 @@
     return alpha >= 0.5;
   }
 
-  // Whether what the pointer hits over an element hides it: something between the hit and the element's nearest
-  // shared ancestor draws over it. A link laid over a whole card to make it clickable draws nothing, so the text under
-  // it still shows.
-  function coveredBy(hit, element) {
-    for (let each = hit; each && !composedContains(each, element); each = composedParent(each)) {
+  function coveredBy(hit, startEl, endEl) {
+    for (
+      let each = hit;
+      each && !composedContains(each, startEl) && (!endEl || !composedContains(each, endEl));
+      each = composedParent(each)
+    ) {
       if (each.nodeType === 1 && paintsOver(each)) return true;
     }
     return false;
   }
 
-  // Whether a word of a text shows where it is: inside what clips its element, and not under something drawn over
-  // it, such as a popup or a banner over the page.
-  function wordShows(node, rect, clips, hits) {
-    const element = composedParent(node);
-    if (!element || element.nodeType !== 1) return false;
-    if (rect.width < 2 || rect.height < 4) return false;
-    const x = Math.min(Math.max(rect.left + rect.width / 2, 0), innerWidth - 1);
-    const y = Math.min(Math.max(rect.top + rect.height / 2, 0), innerHeight - 1);
-    const clip = clippedRect(element, clips);
-    if (x < clip.left || x > clip.right || y < clip.top || y > clip.bottom) return false;
-    const key = Math.round(y);
-    let byLine = hits.get(element);
-    if (!byLine) hits.set(element, (byLine = new Map()));
-    if (!byLine.has(key)) {
-      const hit = deepElementFromPoint(x, y);
-      byLine.set(key, !hit || composedContains(element, hit) || !coveredBy(hit, element));
+  // Whether a word range is genuinely visible on screen: unclipped by `overflow: hidden`/`scroll` ancestors and not
+  // painted over by an opaque foreground card, modal, or header, while preserving buttons and adjacent links (`VIS-04`).
+  function wordShows(range, rect, clips) {
+    const startEl = range.startContainer.nodeType === 1 ? range.startContainer : composedParent(range.startContainer);
+    if (!startEl || startEl.nodeType !== 1) return false;
+    const endEl = range.endContainer.nodeType === 1 ? range.endContainer : composedParent(range.endContainer);
+    const clip = clippedRect(startEl, clips);
+    const visLeft = Math.max(rect.left, clip.left, 0);
+    const visTop = Math.max(rect.top, clip.top, 0);
+    const visRight = Math.min(rect.right, clip.right, innerWidth);
+    const visBottom = Math.min(rect.bottom, clip.bottom, innerHeight);
+    if (visRight - visLeft < 2 || visBottom - visTop < 4) return false;
+    const x = Math.min(Math.max(visLeft + Math.min((visRight - visLeft) * 0.5, 8), 0), Math.max(innerWidth - 1, 0));
+    const y = Math.min(Math.max((visTop + visBottom) * 0.5, 0), Math.max(innerHeight - 1, 0));
+    const hit = deepElementFromPoint(x, y);
+    if (!hit) return true;
+    if (
+      hit === startEl ||
+      composedContains(startEl, hit) ||
+      composedContains(hit, startEl) ||
+      (endEl && (hit === endEl || composedContains(endEl, hit) || composedContains(hit, endEl)))
+    ) {
+      return true;
     }
-    return byLine.get(key);
+    const control = startEl.closest ? startEl.closest(INTERACTIVE_ANCESTORS) : null;
+    if (control && composedContains(control, hit)) return true;
+    return !coveredBy(hit, startEl, endEl);
   }
 
-  // The lines a paragraph's words that show are on, from its first: a block's text set apart elsewhere on the page
-  // (a caption, a badge placed far away) is not part of its bar.
   function paragraphRect(rects) {
     if (!rects.length) return null;
     let { left, top, right, bottom } = rects[0];
-    for (const rect of rects.slice(1)) {
+    for (let i = 1; i < rects.length; i++) {
+      const rect = rects[i];
       if (rect.top > bottom + Math.max(rect.height, 8)) break;
       left = Math.min(left, rect.left);
       top = Math.min(top, rect.top);
@@ -546,8 +1725,7 @@
     return { left, top, width: right - left, height: bottom - top, right, bottom };
   }
 
-  // Every paragraph and word on screen that shows: a word label puts the cursor there (`land`) or grows the selection
-  // to it, and a paragraph label selects the paragraph.
+  // Every visible paragraph and word on screen (`VIS-04`, `FRM-01`).
   function wordTargets() {
     const page = new PageText();
     const from = caretPoint() || center();
@@ -561,7 +1739,6 @@
       return range;
     };
     const clips = new Map();
-    const hits = new Map();
     const paragraphs = [];
     const words = [];
     const offered = new Map();
@@ -577,19 +1754,41 @@
       WORD.lastIndex = 0;
       for (const match of line.matchAll(WORD)) {
         const range = rangeOf(start + match.index, start + match.index + match[0].length);
-        const rect = range ? range.getBoundingClientRect() : null;
-        if (!rect || !onScreen(rect) || !wordShows(range.startContainer, rect, clips, hits)) continue;
-        shown.push(rect);
+        const rect = firstRangeRect(range);
+        if (!rect || !onScreen(rect) || !wordShows(range, rect, clips)) continue;
+        const clientRects = range.getClientRects();
+        if (clientRects.length) {
+          for (let i = 0; i < clientRects.length; i++) {
+            const cr = clientRects[i];
+            if (cr.width > 0 && cr.height > 0 && onScreen(cr)) shown.push(cr);
+          }
+        } else {
+          shown.push(rect);
+        }
         const wid = "w" + (start + match.index);
         offered.set(wid, { caret: { node: range.startContainer, offset: range.startOffset } });
         words.push(target(wid, rect, "word", { distance: distance(rect, from) }));
       }
-      // A paragraph none of whose words show is not there to pick.
-      const rect = paragraphRect(shown);
-      if (!rect) continue;
+      const pRect = paragraphRect(shown);
+      if (!pRect) continue;
       const pid = "p" + start;
       offered.set(pid, { paragraph: lineRange });
-      paragraphs.push(target(pid, rect, "paragraph", { distance: distance(rect, from) }));
+      paragraphs.push(target(pid, pRect, "paragraph", { distance: distance(pRect, from) }));
+    }
+    for (const frame of visibleFrames()) {
+      const box = frameBox(frame);
+      const sub = evalInFrame(frame, { op: "jump_scan", jump: "words", pattern: "" });
+      if (!sub || !Array.isArray(sub.targets)) continue;
+      const prefix = frameId(frame) + "/";
+      for (const item of sub.targets) {
+        const mapped = fromFrame(box, item);
+        if (!onScreen(mapped) || !uncoveredInFrame(frame, box, mapped)) continue;
+        const id = prefix + item.id;
+        offered.set(id, { frame, childId: item.id, isVisual: true });
+        const t = target(id, mapped, item.kind, { distance: distance(mapped, from) });
+        if (item.kind === "paragraph") paragraphs.push(t);
+        else words.push(t);
+      }
     }
     pickable = offered;
     words.sort((a, b) => a.distance - b.distance);
@@ -618,14 +1817,13 @@
         return blocks.get(element);
       };
       const visible = new Map();
+      const ancVisible = new Map();
       let previousBlock = null;
       const parts = [];
       let length = 0;
       for (const node of deepTextNodes(document.body || document.documentElement)) {
         const parent = composedParent(node);
-        if (!node.data || !parent || NOT_TEXT.has(parent.tagName)) continue;
-        if (!visible.has(parent)) visible.set(parent, isRendered(parent));
-        if (!visible.get(parent) || !node.data.trim()) continue;
+        if (!node.data || !parent || !isTextRendered(parent, visible, ancVisible) || !node.data.trim()) continue;
         const block = blockOf(parent);
         if (previousBlock && block !== previousBlock) {
           parts.push("\n");
@@ -1003,6 +2201,11 @@
   }
 
   function scroll(request) {
+    const activeEl = deepActiveElement();
+    if (activeEl && (activeEl.localName === "iframe" || activeEl.localName === "frame")) {
+      const sub = evalInFrame(activeEl, Object.assign({ op: "scroll_if_able" }, request));
+      if (sub && sub.scrolled) return { kind: "ok" };
+    }
     const step = 60;
     const count = Math.max(1, request.count || 1);
     const behavior = request.smooth === false ? "instant" : "smooth";
@@ -1031,9 +2234,22 @@
     return { kind: "ok" };
   }
 
+  function scrollIfAble(request) {
+    const motion = request.motion;
+    const vertical = motion !== "left" && motion !== "right";
+    const target = scrollTarget(vertical);
+    if (!target || !canScroll(target, vertical)) return { kind: "scroll_result", scrolled: false };
+    const before = vertical ? target.scrollTop : target.scrollLeft;
+    scroll(Object.assign({}, request, { smooth: false }));
+    const after = vertical ? target.scrollTop : target.scrollLeft;
+    return { kind: "scroll_result", scrolled: Math.abs(after - before) > 0.5 };
+  }
+
   // ---------------------------------------------------------------------------------------------------------------
   // Visual mode
   // ---------------------------------------------------------------------------------------------------------------
+
+  let activeVisualFrame = null;
 
   function focusRect() {
     const selection = getSelection();
@@ -1056,11 +2272,37 @@
     return rect ? { x: rect.left, y: rect.top, width: 2, height: rect.height } : null;
   }
 
-  // Scroll the selection's moving end into view, as little as it takes.
-  function reveal() {
-    const rect = focusRect();
-    if (!rect) return;
+  // Scroll every scrollable ancestor from `startElement` up through shadow roots and the document (`VIS-01`).
+  function revealRectInAncestors(startElement, readRect) {
     const margin = 8;
+    for (
+      let anc = startElement;
+      anc && anc !== document.body && anc !== document.documentElement;
+      anc = composedParent(anc)
+    ) {
+      if (anc.nodeType !== 1) continue;
+      const style = getComputedStyle(anc);
+      if (SCROLLABLE_OVERFLOW.has(style.overflowY) && anc.scrollHeight > anc.clientHeight + 1) {
+        const rect = readRect();
+        if (rect) {
+          const boxTop = anc.getBoundingClientRect().top + anc.clientTop;
+          const boxBottom = boxTop + anc.clientHeight;
+          if (rect.top < boxTop) anc.scrollBy({ top: rect.top - boxTop - margin, behavior: "instant" });
+          else if (rect.bottom > boxBottom) anc.scrollBy({ top: rect.bottom - boxBottom + margin, behavior: "instant" });
+        }
+      }
+      if (SCROLLABLE_OVERFLOW.has(style.overflowX) && anc.scrollWidth > anc.clientWidth + 1) {
+        const rect = readRect();
+        if (rect) {
+          const boxLeft = anc.getBoundingClientRect().left + anc.clientLeft;
+          const boxRight = boxLeft + anc.clientWidth;
+          if (rect.left < boxLeft) anc.scrollBy({ left: rect.left - boxLeft - margin, behavior: "instant" });
+          else if (rect.right > boxRight) anc.scrollBy({ left: rect.right - boxRight + margin, behavior: "instant" });
+        }
+      }
+    }
+    const rect = readRect();
+    if (!rect) return;
     let dy = 0;
     if (rect.top < 0) dy = rect.top - margin;
     else if (rect.bottom > innerHeight) dy = rect.bottom - innerHeight + margin;
@@ -1068,29 +2310,69 @@
     if (rect.left < 0) dx = rect.left - margin;
     else if (rect.right > innerWidth) dx = rect.right - innerWidth + margin;
     if (dy) {
-      const target = scrollTarget(true);
+      const root = document.scrollingElement;
+      const target = root && canScroll(root, true) ? root : largestScrollable(true) || root;
       if (target) target.scrollBy({ top: dy, behavior: "instant" });
     }
     if (dx) {
-      const target = scrollTarget(false);
+      const root = document.scrollingElement;
+      const target = root && canScroll(root, false) ? root : largestScrollable(false) || root;
       if (target) target.scrollBy({ left: dx, behavior: "instant" });
     }
   }
 
+  function reveal() {
+    const selection = getSelection();
+    if (!selection || !selection.focusNode) return;
+    const startEl = selection.focusNode.nodeType === 1 ? selection.focusNode : composedParent(selection.focusNode);
+    revealRectInAncestors(startEl, focusRect);
+  }
+
+  function mapFrameVisualState(frame, sub, scrollFrameIntoView) {
+    if (!sub || sub.kind !== "visual_state") return sub || visualState(false);
+    if (scrollFrameIntoView && sub.caret) {
+      revealRectInAncestors(frame, () => {
+        const b = frameBox(frame);
+        const m = fromFrame(b, sub.caret);
+        return { top: m.top, bottom: m.bottom, left: m.left, right: m.right };
+      });
+    }
+    const box = frameBox(frame);
+    let mappedCaret = null;
+    if (sub.caret) {
+      const c = fromFrame(box, sub.caret);
+      mappedCaret = { x: c.x, y: c.y, width: 2, height: c.height };
+    }
+    const mappedFlash = Array.isArray(sub.flash)
+      ? sub.flash.map(r => {
+          const m = fromFrame(box, r);
+          return { x: m.x, y: m.y, width: m.width, height: m.height };
+        })
+      : [];
+    if (!sub.active && activeVisualFrame === frame) activeVisualFrame = null;
+    return Object.assign({}, sub, { caret: mappedCaret, flash: mappedFlash });
+  }
+
   function visualState(active, extra) {
-    return Object.assign({ kind: "visual_state", active, yanked: null, caret: active ? caret() : null }, extra);
+    return Object.assign(
+      { kind: "visual_state", active, yanked: null, copied_by_page: false, caret: active ? caret() : null },
+      extra
+    );
   }
 
   function firstVisibleText() {
+    const visible = new Map();
+    const ancVisible = new Map();
+    const clips = new Map();
     for (const node of deepTextNodes(document.body || document.documentElement)) {
       const parent = composedParent(node);
-      if (!node.data.trim() || !parent || NOT_TEXT.has(parent.tagName) || !isRendered(parent)) continue;
+      if (!node.data.trim() || !parent || !isTextRendered(parent, visible, ancVisible)) continue;
       const offset = node.data.search(/\S/);
       const range = document.createRange();
       range.setStart(node, offset);
       range.setEnd(node, offset + 1);
-      const rect = range.getBoundingClientRect();
-      if (rect.width && rect.bottom > 0 && rect.top < innerHeight) return { node, offset };
+      const rect = firstRangeRect(range);
+      if (rect && onScreen(rect) && wordShows(range, rect, clips)) return { node, offset };
     }
     return null;
   }
@@ -1103,24 +2385,48 @@
   // `v`: the cursor stays where the selection is when it is on screen, else it starts at the first text on screen.
   // A collapsed cursor asks for labels on every word and paragraph, to say where to land.
   function visualEnter() {
+    if (activeVisualFrame && activeVisualFrame.isConnected && frameVisible(activeVisualFrame)) {
+      const sub = evalInFrame(activeVisualFrame, { op: "visual_enter" });
+      if (sub && sub.active) return mapFrameVisualState(activeVisualFrame, sub, false);
+      activeVisualFrame = null;
+    }
     const selection = getSelection();
-    if (!selection) return visualState(false);
-    if (!selection.rangeCount || !focusOnScreen()) {
+    if (selection && (!selection.rangeCount || !focusOnScreen())) {
       const start = firstVisibleText();
-      if (!start) return visualState(false);
-      selection.collapse(start.node, start.offset);
+      if (start) {
+        selection.collapse(start.node, start.offset);
+      } else {
+        for (const frame of visibleFrames()) {
+          const sub = evalInFrame(frame, { op: "visual_enter" });
+          if (sub && sub.active) {
+            activeVisualFrame = frame;
+            return mapFrameVisualState(frame, sub, false);
+          }
+        }
+        return visualState(false);
+      }
+    } else if (!selection) {
+      return visualState(false);
     }
     return visualState(true, { land: selection.isCollapsed });
   }
 
   // The cursor stays where the selection ended.
   function visualExit() {
+    if (activeVisualFrame && activeVisualFrame.isConnected) {
+      const frame = activeVisualFrame;
+      activeVisualFrame = null;
+      evalInFrame(frame, { op: "visual_exit" });
+    }
     const selection = getSelection();
     if (selection && selection.focusNode) selection.collapse(selection.focusNode, selection.focusOffset);
     return visualState(false);
   }
 
   function visualSwapEnds() {
+    if (activeVisualFrame && activeVisualFrame.isConnected) {
+      return mapFrameVisualState(activeVisualFrame, evalInFrame(activeVisualFrame, { op: "visual_swap_ends" }), true);
+    }
     const selection = getSelection();
     if (selection && selection.anchorNode && selection.focusNode) {
       const { anchorNode, anchorOffset, focusNode, focusOffset } = selection;
@@ -1142,6 +2448,13 @@
   };
 
   function visualMove(motion, count) {
+    if (activeVisualFrame && activeVisualFrame.isConnected) {
+      return mapFrameVisualState(
+        activeVisualFrame,
+        evalInFrame(activeVisualFrame, { op: "visual_move", motion, count }),
+        true
+      );
+    }
     const selection = getSelection();
     if (!selection || !selection.focusNode) return visualState(true);
     const times = Math.max(1, count || 1);
@@ -1194,6 +2507,13 @@
   }
 
   function visualObject(keys, count) {
+    if (activeVisualFrame && activeVisualFrame.isConnected) {
+      return mapFrameVisualState(
+        activeVisualFrame,
+        evalInFrame(activeVisualFrame, { op: "visual_text_object", keys, count }),
+        true
+      );
+    }
     const selection = getSelection();
     if (!selection || !selection.rangeCount) return visualState(true);
     const kind = keys[0];
@@ -1227,19 +2547,128 @@
     return visualState(true);
   }
 
-  // `y`: the selection's text, the rects to flash, and the cursor at where the yank began.
+  function performPageCopy() {
+    if (typeof globalThis.__zendiaCopy === "function") {
+      try {
+        return !!globalThis.__zendiaCopy();
+      } catch (_) {}
+    }
+    try {
+      return !!document.execCommand("copy");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function performPageCut() {
+    if (typeof globalThis.__zendiaCut === "function") {
+      try {
+        return !!globalThis.__zendiaCut();
+      } catch (_) {}
+    }
+    try {
+      return !!document.execCommand("cut");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function copySelection() {
+    const editFrame = focusedEditableFrame();
+    if (editFrame) {
+      evalInFrame(editFrame, { op: "copy_selection" });
+      return { kind: "ok" };
+    }
+    const sel = getSelection();
+    if (!sel || sel.isCollapsed) {
+      for (const frame of visibleFrames()) {
+        const res = evalInFrame(frame, { op: "copy_selection_if_any" });
+        if (res && res.copied) return { kind: "ok" };
+      }
+    }
+    performPageCopy();
+    return { kind: "ok" };
+  }
+
+  function cutSelection() {
+    const editFrame = focusedEditableFrame();
+    if (editFrame) {
+      evalInFrame(editFrame, { op: "cut_selection" });
+      return { kind: "ok" };
+    }
+    for (const frame of visibleFrames()) {
+      const res = evalInFrame(frame, { op: "cut_selection_if_any" });
+      if (res && res.cut) return { kind: "ok" };
+    }
+    performPageCut();
+    return { kind: "ok" };
+  }
+
+  function cutSelectionIfAny() {
+    const active = deepActiveElement();
+    if (active && isTextField(active) && active.selectionStart !== active.selectionEnd) {
+      return { kind: "cut_result", cut: performPageCut() };
+    }
+    if (active && active.isContentEditable) {
+      const sel = getSelection();
+      if (sel && sel.rangeCount && !sel.isCollapsed) {
+        return { kind: "cut_result", cut: performPageCut() };
+      }
+    }
+    for (const frame of visibleFrames()) {
+      const res = evalInFrame(frame, { op: "cut_selection_if_any" });
+      if (res && res.cut) return res;
+    }
+    return { kind: "cut_result", cut: false };
+  }
+
+  function copySelectionIfAny() {
+    const active = deepActiveElement();
+    if (active && isTextField(active) && active.selectionStart !== active.selectionEnd) {
+      return { kind: "copy_result", copied: performPageCopy() };
+    }
+    const sel = getSelection();
+    if (sel && sel.rangeCount && !sel.isCollapsed) {
+      return { kind: "copy_result", copied: performPageCopy() };
+    }
+    for (const frame of visibleFrames()) {
+      const res = evalInFrame(frame, { op: "copy_selection_if_any" });
+      if (res && res.copied) return res;
+    }
+    return { kind: "copy_result", copied: false };
+  }
+
+  // `y`: copy as the page's own copy does (`text/html` + `text/plain`, `VIS-02`), flash, and collapse at the start.
   function visualYank() {
+    if (activeVisualFrame && activeVisualFrame.isConnected) {
+      const frame = activeVisualFrame;
+      activeVisualFrame = null;
+      return mapFrameVisualState(frame, evalInFrame(frame, { op: "visual_yank" }), false);
+    }
+    const active = deepActiveElement();
+    if (active && active.localName === "input" && (active.type || "").toLowerCase() === "password") {
+      return { kind: "visual_state", active: false, yanked: null, copied_by_page: false, caret: null, flash: [] };
+    }
     const selection = getSelection();
     let yanked = null;
+    let copied_by_page = false;
     let flash = [];
     if (selection && selection.rangeCount && !selection.isCollapsed) {
       yanked = selection.toString();
       const ranges = [];
       for (let i = 0; i < selection.rangeCount; i++) ranges.push(selection.getRangeAt(i).cloneRange());
       for (const range of ranges) for (const rect of range.getClientRects()) flash.push(plainRect(rect));
+      copied_by_page = performPageCopy();
       selection.collapse(ranges[0].startContainer, ranges[0].startOffset);
     }
-    return { kind: "visual_state", active: false, yanked, caret: null, flash };
+    return { kind: "visual_state", active: false, yanked, copied_by_page, caret: null, flash };
+  }
+
+  function visualCaret() {
+    if (activeVisualFrame && activeVisualFrame.isConnected) {
+      return mapFrameVisualState(activeVisualFrame, evalInFrame(activeVisualFrame, { op: "caret" }), false);
+    }
+    return visualState(true);
   }
 
   // A label pick on text: the selection grows to it in visual mode; otherwise visual mode starts there.
@@ -1257,16 +2686,149 @@
 
   const ROW_TOLERANCE = 4;
   let lastField = null;
+  let lastFieldFrame = null;
   let lastPut = null;
+  let reportedEditing = null;
+  let focusSyncScheduled = false;
+
+  function anyChildFrameEditing() {
+    for (const frame of allFrames()) {
+      const res = evalInFrame(frame, { op: "has_editable_focus" });
+      if (res && res.editing) return true;
+    }
+    return false;
+  }
+
+  function focusedEditableFrame() {
+    const active = deepActiveElement();
+    if (active && (active.localName === "iframe" || active.localName === "frame")) {
+      const res = evalInFrame(active, { op: "has_editable_focus" });
+      if (res && res.editing) return active;
+    }
+    for (const frame of allFrames()) {
+      const res = evalInFrame(frame, { op: "has_editable_focus" });
+      if (res && res.editing) return frame;
+    }
+    return null;
+  }
+
+  function rememberFocusedEditable() {
+    const active = deepActiveElement();
+    const editing = isEditable(active);
+    if (editing && active) {
+      lastField = typeof WeakRef === "function" ? new WeakRef(active) : active;
+      lastFieldFrame = null;
+    }
+    if (editing !== reportedEditing) {
+      const wasEditing = reportedEditing === true;
+      reportedEditing = editing;
+      if (editing) {
+        postEvent({ kind: "editable_focus", editing: true });
+      } else if ((wasEditing || window.top === window) && !anyChildFrameEditing()) {
+        postEvent({ kind: "editable_focus", editing: false });
+      }
+    }
+  }
+
+  function scheduleFocusSync() {
+    if (focusSyncScheduled) return;
+    focusSyncScheduled = true;
+    Promise.resolve().then(() => {
+      focusSyncScheduled = false;
+      rememberFocusedEditable();
+    });
+  }
+
+  // Seed lastField if a field was already focused before the runtime loaded into this document.
+  {
+    const initialActive = deepActiveElement();
+    if (isEditable(initialActive) && initialActive) {
+      lastField = typeof WeakRef === "function" ? new WeakRef(initialActive) : initialActive;
+    }
+  }
 
   document.addEventListener(
     "focusin",
     event => {
       const element = event.composedPath ? event.composedPath()[0] : event.target;
-      if (isEditable(element)) lastField = typeof WeakRef === "function" ? new WeakRef(element) : element;
+      if (isEditable(element)) {
+        lastField = typeof WeakRef === "function" ? new WeakRef(element) : element;
+        lastFieldFrame = null;
+      }
+      scheduleFocusSync();
     },
     true
   );
+  document.addEventListener("focusout", scheduleFocusSync, true);
+  document.addEventListener(
+    "load",
+    event => {
+      const t = event.target;
+      if (t && t.nodeType === 1 && (t.localName === "iframe" || t.localName === "frame")) {
+        evalInFrame(t, { op: "init" });
+      }
+    },
+    true
+  );
+
+  // Throttle scroll, resize, and optional popup DOM mutation reports to one per animation frame (`JMP-04`, `SL-02`, `EXT-01`).
+  let enableMutationWatch = () => {};
+  {
+    let moveRaf = 0;
+    let moveScrolled = false;
+    let mutationObserver = null;
+    const scheduleMove = scrolled => {
+      if (scrolled) moveScrolled = true;
+      if (moveRaf) return;
+      moveRaf = requestAnimationFrame(() => {
+        const didScroll = moveScrolled;
+        moveRaf = 0;
+        moveScrolled = false;
+        postEvent({ kind: "page_moved", scrolled: didScroll });
+      });
+    };
+    window.addEventListener("scroll", () => scheduleMove(true), { capture: true, passive: true });
+    window.addEventListener("resize", () => scheduleMove(false), { passive: true });
+    enableMutationWatch = () => {
+      if (mutationObserver || typeof MutationObserver !== "function" || !document.documentElement) return;
+      mutationObserver = new MutationObserver(() => scheduleMove(false));
+      mutationObserver.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        characterData: true,
+      });
+    };
+
+    const onCopyOrCut = event => {
+      const active = deepActiveElement();
+      if (active && active.localName === "input" && (active.type || "").toLowerCase() === "password") {
+        return;
+      }
+      let text = "";
+      if (event.clipboardData && typeof event.clipboardData.getData === "function") {
+        try {
+          text = event.clipboardData.getData("text/plain") || "";
+        } catch (_) {}
+      }
+      if (!text && active && (active.localName === "input" || active.localName === "textarea")) {
+        try {
+          if (typeof active.selectionStart === "number" && typeof active.selectionEnd === "number") {
+            text = (active.value || "").slice(active.selectionStart, active.selectionEnd);
+          }
+        } catch (_) {}
+      }
+      if (!text) {
+        const sel = getSelection();
+        if (sel) text = sel.toString();
+      }
+      if (text && text.trim() && text.length <= 100000) {
+        postEvent({ kind: "page_yank", text, host: location.hostname || "" });
+      }
+    };
+    document.addEventListener("copy", onCopyOrCut, true);
+    document.addEventListener("cut", onCopyOrCut, true);
+  }
 
   function lastInput() {
     const element = lastField && lastField.deref ? lastField.deref() : lastField;
@@ -1279,7 +2841,7 @@
     return rect.width > 0 && rect.height > 0;
   }
 
-  // The page's fields in reading order: top to bottom, then left to right.
+  // Local fields in reading order.
   function fields() {
     return [...deepElements(document)]
       .filter(isShownField)
@@ -1288,9 +2850,38 @@
       .map(item => item.element);
   }
 
-  function inViewport(element) {
-    const rect = element.getBoundingClientRect();
-    return rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
+  // All fields across this document and child frames in reading order (`FRM-01`).
+  function allFieldEntries() {
+    const entries = fields().map((element, index) => ({
+      frame: null,
+      element,
+      childIndex: index,
+      rect: plainRect(element.getBoundingClientRect()),
+      active: element === deepActiveElement(),
+    }));
+    for (const frame of allFrames()) {
+      if (!frameVisible(frame)) continue;
+      const box = frameBox(frame);
+      const sub = evalInFrame(frame, { op: "frame_fields" });
+      if (!sub || !Array.isArray(sub.fields)) continue;
+      for (const f of sub.fields) {
+        const mapped = fromFrame(box, f.rect);
+        entries.push({
+          frame,
+          element: null,
+          childIndex: f.index,
+          rect: { x: mapped.x, y: mapped.y, width: mapped.width, height: mapped.height },
+          active: !!f.active,
+        });
+      }
+    }
+    return entries.sort((a, b) =>
+      Math.abs(a.rect.y - b.rect.y) > ROW_TOLERANCE ? a.rect.y - b.rect.y : a.rect.x - b.rect.x
+    );
+  }
+
+  function rectInViewport(rect) {
+    return rect.y + rect.height > 0 && rect.x + rect.width > 0 && rect.y < innerHeight && rect.x < innerWidth;
   }
 
   // Continue typing after what is there, as `A` would in vim.
@@ -1303,11 +2894,30 @@
     return { kind: "activated", mode: "i", url: null, message: null };
   }
 
+  function focusFieldEntry(entry) {
+    if (!entry.frame) {
+      lastFieldFrame = null;
+      return focusField(entry.element);
+    }
+    lastFieldFrame = entry.frame;
+    try {
+      entry.frame.focus();
+    } catch (_) {}
+    return (
+      evalInFrame(entry.frame, { op: "frame_focus_field", index: entry.childIndex }) || {
+        kind: "activated",
+        mode: "i",
+        url: null,
+        message: null,
+      }
+    );
+  }
+
   function inputFirst(count) {
-    const visible = fields().filter(inViewport);
+    const visible = allFieldEntries().filter(entry => rectInViewport(entry.rect));
     // No field to type in: the keys go to the page, as with `I`.
     if (!visible.length) return { kind: "explicit_insert" };
-    return focusField(visible[Math.min(Math.max(count || 1, 1), visible.length) - 1]);
+    return focusFieldEntry(visible[Math.min(Math.max(count || 1, 1), visible.length) - 1]);
   }
 
   // `i`: a count says which field and one field needs no choosing; several are labeled.
@@ -1321,33 +2931,129 @@
   }
 
   function inputLast(count) {
+    if (lastFieldFrame && lastFieldFrame.isConnected) {
+      const sub = evalInFrame(lastFieldFrame, { op: "frame_focus_last" });
+      if (sub && sub.kind === "activated") return sub;
+    }
     const last = lastInput();
     if (last && isEditable(last) && isRendered(last)) return focusField(last);
-    const list = fields();
-    if (list.length) return focusField(list[Math.min(Math.max(count || 1, 1), list.length) - 1]);
+    const list = allFieldEntries();
+    if (list.length) return focusFieldEntry(list[Math.min(Math.max(count || 1, 1), list.length) - 1]);
     return { kind: "ok" };
   }
 
   function inputStep(offset) {
-    const list = fields();
+    const list = allFieldEntries();
     if (!list.length) return { kind: "ok" };
-    const current = list.indexOf(deepActiveElement());
+    const current = list.findIndex(entry => entry.active);
     let index;
     if (current === -1) {
-      // Nothing focused: start from what is on screen.
-      const shown = list.findIndex(inViewport);
+      const shown = list.findIndex(entry => rectInViewport(entry.rect));
       const start = shown === -1 ? 0 : shown;
       index = offset > 0 ? start + offset - 1 : start + offset;
     } else {
       index = current + offset;
     }
-    return focusField(list[((index % list.length) + list.length) % list.length]);
+    return focusFieldEntry(list[((index % list.length) + list.length) % list.length]);
   }
 
-  // `<Esc>` in insert mode: the field gives up the focus, so typing no longer reaches it.
+  // `<Esc>` in insert mode: the field gives up the focus, in child frames too (`FRM-01`).
   function blurField() {
+    const editFrame = focusedEditableFrame();
+    if (editFrame) {
+      evalInFrame(editFrame, { op: "blur_field" });
+    }
     const active = deepActiveElement();
     if (isEditable(active)) active.blur();
+    return { kind: "ok" };
+  }
+
+  // `<C-u>`: delete back to the start of the current line without deleting a preceding newline.
+  function editDeleteToLineStart() {
+    const editFrame = focusedEditableFrame();
+    if (editFrame) return evalInFrame(editFrame, { op: "edit_delete_to_line_start" }) || { kind: "ok" };
+    const field = deepActiveElement();
+    if (!isEditable(field) || field.localName === "select") return { kind: "ok" };
+    if (isTextField(field)) {
+      try {
+        if (typeof field.selectionStart === "number" && typeof field.selectionEnd === "number") {
+          const start = field.selectionStart;
+          const end = field.selectionEnd;
+          if (start !== end) {
+            document.execCommand("delete", false, null);
+            return { kind: "ok" };
+          }
+          const value = field.value || "";
+          const lineStart = start > 0 ? value.lastIndexOf("\n", start - 1) + 1 : 0;
+          if (lineStart < start) {
+            field.setSelectionRange(lineStart, start);
+            document.execCommand("delete", false, null);
+          }
+          return { kind: "ok" };
+        }
+      } catch (_) {}
+      if (field.value) {
+        if (typeof field.select === "function") field.select();
+        document.execCommand("delete", false, null);
+      }
+      return { kind: "ok" };
+    }
+    const sel = getSelection();
+    if (sel && sel.rangeCount) {
+      if (sel.isCollapsed && typeof sel.modify === "function") {
+        sel.modify("extend", "backward", "lineboundary");
+      }
+      if (!sel.isCollapsed) {
+        document.execCommand("delete", false, null);
+      }
+    }
+    return { kind: "ok" };
+  }
+
+  function editDeleteToLineEnd() {
+    const editFrame = focusedEditableFrame();
+    if (editFrame) return evalInFrame(editFrame, { op: "edit_delete_to_line_end" }) || { kind: "ok" };
+    const field = deepActiveElement();
+    if (!isEditable(field) || field.localName === "select") return { kind: "ok" };
+    if (isTextField(field)) {
+      try {
+        if (typeof field.selectionStart === "number" && typeof field.selectionEnd === "number") {
+          const start = field.selectionStart;
+          const end = field.selectionEnd;
+          if (start !== end) {
+            document.execCommand("delete", false, null);
+            return { kind: "ok" };
+          }
+          const value = field.value || "";
+          const nl = value.indexOf("\n", start);
+          const lineEnd = nl === -1 ? value.length : nl;
+          if (start < lineEnd) {
+            field.setSelectionRange(start, lineEnd);
+            document.execCommand("delete", false, null);
+          }
+          return { kind: "ok" };
+        }
+      } catch (_) {}
+      return { kind: "ok" };
+    }
+    const sel = getSelection();
+    if (sel && sel.rangeCount) {
+      if (sel.isCollapsed && typeof sel.modify === "function") {
+        sel.modify("extend", "forward", "lineboundary");
+      }
+      if (!sel.isCollapsed) {
+        document.execCommand("delete", false, null);
+      }
+    }
+    return { kind: "ok" };
+  }
+
+  function editDeleteCharForward() {
+    const editFrame = focusedEditableFrame();
+    if (editFrame) return evalInFrame(editFrame, { op: "edit_delete_char_forward" }) || { kind: "ok" };
+    const field = deepActiveElement();
+    if (!isEditable(field) || field.localName === "select") return { kind: "ok" };
+    document.execCommand("forwardDelete", false, null);
     return { kind: "ok" };
   }
 
@@ -1358,6 +3064,20 @@
   // Put a yank where the caret is, or over the put the caret still sits at the end of. The editor's own insert keeps
   // undo and fires input events, so the page sees typing.
   function yankPut(text, index, replace) {
+    const editFrame = focusedEditableFrame();
+    if (editFrame) {
+      const sub = evalInFrame(editFrame, { op: "yank_put", text, index, replace });
+      if (sub && sub.kind === "put") {
+        const box = frameBox(editFrame);
+        const flash = Array.isArray(sub.flash)
+          ? sub.flash.map(r => {
+              const m = fromFrame(box, r);
+              return { x: m.x, y: m.y, width: m.width, height: m.height };
+            })
+          : [];
+        return { kind: "put", ok: !!sub.ok, text: sub.text, flash };
+      }
+    }
     const field = deepActiveElement();
     if (!isEditable(field) || field.localName === "select") return { kind: "put", ok: false, text };
     const last = replace ? cyclingPut() : null;
@@ -1378,6 +3098,8 @@
   // Which yank `<A-p>` (older, step 1) or `<A-n>` (newer, step -1) puts: the next one from the put the caret sits
   // after, or the newest.
   function yankCycle(step) {
+    const editFrame = focusedEditableFrame();
+    if (editFrame) return evalInFrame(editFrame, { op: "yank_cycle", step }) || { kind: "ok" };
     const field = deepActiveElement();
     if (!isEditable(field) || field.localName === "select") return { kind: "ok" };
     const last = cyclingPut();
@@ -1388,21 +3110,63 @@
   // Picking a target
   // ---------------------------------------------------------------------------------------------------------------
 
-  // A field takes the focus in insert mode; any other control is pressed by the browser where it is on top, as a
-  // user's click would be; text moves the cursor.
+  // A field takes the focus in insert mode; any other control is pressed by the browser where it is on top (`ctrl`
+  // holds Ctrl on capital hints so page handlers run, `JMP-03`); text moves the cursor (`FRM-01`).
   function pick(id, newTab, extend) {
     const entry = pickable.get(id);
     if (!entry) return { kind: "ok" };
+    if (entry.frame) {
+      if (!entry.frame.isConnected) return { kind: "ok" };
+      if (entry.isVisual) {
+        const sameFrame = activeVisualFrame === entry.frame;
+        if (!sameFrame) {
+          const sel = getSelection();
+          if (sel) sel.removeAllRanges();
+        }
+        activeVisualFrame = entry.frame;
+        const sub = evalInFrame(entry.frame, {
+          op: "jump_pick",
+          id: entry.childId,
+          new_tab: !!newTab,
+          extend: !!(extend && sameFrame),
+        });
+        return mapFrameVisualState(entry.frame, sub, true);
+      }
+      const box = frameBox(entry.frame);
+      const sub = evalInFrame(entry.frame, {
+        op: "jump_pick",
+        id: entry.childId,
+        new_tab: !!newTab,
+        extend: !!extend,
+      });
+      if (!sub) return { kind: "ok" };
+      if (sub.kind === "press") {
+        return {
+          kind: "press",
+          x: box.left + sub.x * box.scaleX,
+          y: box.top + sub.y * box.scaleY,
+          ctrl: !!sub.ctrl,
+        };
+      }
+      if (sub.kind === "activated" && sub.mode === "i") {
+        lastFieldFrame = entry.frame;
+        try {
+          entry.frame.focus();
+        } catch (_) {}
+      }
+      return sub;
+    }
     if (entry.control) {
       const element = entry.control;
       if (!element.isConnected) return { kind: "ok" };
-      if (isEditable(element)) return focusField(element);
-      if (newTab && element.localName === "a" && element.href) {
-        return { kind: "activated", mode: "n", url: element.href, message: null };
+      if (isEditable(element)) {
+        lastFieldFrame = null;
+        return focusField(element);
       }
       const point = pointOf(element);
-      return { kind: "press", x: point.x, y: point.y };
+      return { kind: "press", x: point.x, y: point.y, ctrl: !!newTab };
     }
+    activeVisualFrame = null;
     if (entry.paragraph) {
       const range = entry.paragraph;
       getSelection().setBaseAndExtent(range.startContainer, range.startOffset, range.endContainer, range.endOffset);
@@ -1414,50 +3178,157 @@
   }
 
   // ---------------------------------------------------------------------------------------------------------------
-  // CAPTCHA helpers (the keys' simple form; the fork's full CAPTCHA jump is not ported)
+  // CAPTCHA actions, fill, touch drag & top-window refocus (`CAP-05`..`CAP-07`)
   // ---------------------------------------------------------------------------------------------------------------
 
-  function isCaptchaControl(element) {
-    const name = ((typeof element.className === "string" ? element.className : "") + " " + (element.id || "")).toLowerCase();
-    const label = (element.getAttribute("aria-label") || "").toLowerCase();
-    const src = (element.getAttribute("src") || "").toLowerCase();
-    return /captcha|rc-image|rc-anchor|challenge|turnstile/.test(name + " " + label + " " + src);
-  }
-
-  function captchaTargets() {
-    const from = center();
-    const targets = [];
-    const offered = new Map();
-    for (const element of findControls()) {
-      let inCaptcha = false;
-      for (let each = element; each && !inCaptcha; each = composedParent(each)) inCaptcha = each.nodeType === 1 && isCaptchaControl(each);
-      if (!inCaptcha) continue;
-      const rect = element.getBoundingClientRect();
-      const id = controlId(element);
-      offered.set(id, { control: element });
-      targets.push(target(id, rect, isField(element) ? "field" : "control", { distance: distance(rect, from) }));
-    }
-    pickable = offered;
-    return targets;
+  function refocusTop() {
+    try {
+      const focused = document.activeElement;
+      if (focused && (focused.localName === "iframe" || focused.localName === "frame")) {
+        focused.blur();
+      }
+      window.focus();
+    } catch (_) {}
+    return { kind: "ok" };
   }
 
   function captchaAction(action) {
-    const patterns = {
-      verify: /verify|next|skip|submit|continue|confirm/i,
-      reload: /reload|refresh|new challenge|another/i,
-      audio: /audio|image challenge|visual challenge/i,
-      play: /play|listen/i,
-    };
-    const controls = captchaTargets().map(each => pickable.get(each.id).control);
-    if (action === "answer") {
-      const field = controls.find(isField);
-      return field ? focusField(field) : { kind: "ok" };
+    const purposes = action === "audio" ? ["audio", "visual"] : [action];
+    const targets = controlTargets("include", "", "captcha");
+    let chosen = null;
+    for (const p of purposes) {
+      chosen = targets.find(each => each.purpose === p);
+      if (chosen) break;
     }
-    const pattern = patterns[action];
-    const control = pattern && controls.find(each => !isField(each) && pattern.test(textOf(each) + " " + (each.id || "")));
-    if (!control) return { kind: "ok" };
-    const point = pointOf(control);
-    return { kind: "press", x: point.x, y: point.y };
+    if (!chosen) return { kind: "ok" };
+    const result = pick(chosen.id, false, false);
+    if (result && result.kind === "press") {
+      refocusTop();
+    }
+    return result;
+  }
+
+  function isTypeableField(element) {
+    if (!element) return false;
+    if (element.localName === "textarea" || element.isContentEditable) return true;
+    return (
+      element.localName === "input" &&
+      !/^(checkbox|radio|button|submit|image|file|range|color|hidden)$/i.test(element.type || "text")
+    );
+  }
+
+  function captchaFill(text) {
+    const val = String(text || "");
+    const targets = controlTargets("include", "", "captcha");
+    const localOf = item => {
+      const entry = pickable.get(item.id);
+      return entry && entry.control ? entry.control : null;
+    };
+    const match =
+      targets.find(each => each.purpose === "answer" && isTypeableField(localOf(each))) ||
+      targets.find(each => isTypeableField(localOf(each)));
+    const element = match ? localOf(match) : null;
+    if (!element) return { kind: "ok" };
+    element.focus();
+    if (element.localName === "input" || element.localName === "textarea") {
+      try {
+        const proto = element.localName === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, "value");
+        if (desc && typeof desc.set === "function") desc.set.call(element, val);
+        else element.value = val;
+      } catch (_) {
+        element.value = val;
+      }
+    } else {
+      const sel = getSelection();
+      if (sel) sel.selectAllChildren(element);
+      document.execCommand("insertText", false, val);
+    }
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return { kind: "ok" };
+  }
+
+  let activeTouchFrame = null;
+  let activeTouchTarget = null;
+
+  function dispatchTouch(stage, x, y, resetChain) {
+    if (resetChain) {
+      activeTouchFrame = null;
+      activeTouchTarget = null;
+    }
+    const frames = visibleFrames();
+    let inner = null;
+    if (stage !== "start" && activeTouchFrame) {
+      inner = activeTouchFrame.isConnected ? activeTouchFrame : null;
+    } else if (stage === "start") {
+      for (let i = frames.length - 1; i >= 0; i--) {
+        const box = frameBox(frames[i]);
+        if (x >= box.left && x < box.right && y >= box.top && y < box.bottom) {
+          inner = frames[i];
+          break;
+        }
+      }
+      activeTouchFrame = inner;
+    }
+    if (inner) {
+      const box = frameBox(inner);
+      evalInFrame(inner, {
+        op: "dispatch_touch",
+        stage,
+        x: (x - box.left) / box.scaleX,
+        y: (y - box.top) / box.scaleY,
+        reset_chain: !!resetChain,
+      });
+      if (stage === "end") activeTouchFrame = null;
+      return { kind: "ok" };
+    }
+    const typeMap = { start: "touchstart", move: "touchmove", end: "touchend" };
+    const eventType = typeMap[stage];
+    if (!eventType) return { kind: "ok" };
+    const el =
+      (stage === "start" ? deepElementFromPoint(x, y) : activeTouchTarget) ||
+      deepElementFromPoint(x, y) ||
+      document.body ||
+      document.documentElement;
+    if (stage === "start") activeTouchTarget = el;
+    if (stage === "end") activeTouchTarget = null;
+    if (!el) return { kind: "ok" };
+    try {
+      if (typeof Touch === "function" && typeof TouchEvent === "function") {
+        const touchObj = new Touch({
+          identifier: 0,
+          target: el,
+          clientX: x,
+          clientY: y,
+          pageX: x + scrollX,
+          pageY: y + scrollY,
+          screenX: x,
+          screenY: y,
+        });
+        const list = stage === "end" ? [] : [touchObj];
+        el.dispatchEvent(
+          new TouchEvent(eventType, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            touches: list,
+            targetTouches: list,
+            changedTouches: [touchObj],
+          })
+        );
+        return { kind: "ok" };
+      }
+    } catch (_) {}
+    try {
+      const ev = new UIEvent(eventType, { bubbles: true, cancelable: true, composed: true });
+      const pt = { identifier: 0, target: el, clientX: x, clientY: y, pageX: x + scrollX, pageY: y + scrollY };
+      ev.touches = stage === "end" ? [] : [pt];
+      ev.targetTouches = stage === "end" ? [] : [pt];
+      ev.changedTouches = [pt];
+      el.dispatchEvent(ev);
+    } catch (_) {}
+    return { kind: "ok" };
   }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -1466,20 +3337,28 @@
 
   function jumpTargets(request) {
     const pattern = request.pattern || "";
+    const topOnly = !!request.top_only;
     switch (request.jump) {
-      case "hints":
-        return controlTargets("exclude", "");
+      case "hints": {
+        const items = controlTargets(request.include_fields ? "include" : "exclude", "", "all", topOnly);
+        if (topOnly) {
+          items.sort((a, b) => (Math.abs(a.y - b.y) > ROW_TOLERANCE ? a.y - b.y : a.x - b.x));
+        }
+        return items;
+      }
       case "controls":
-        return controlTargets("include", pattern);
+        return controlTargets("include", pattern, "all", topOnly);
       case "inputs":
-        return controlTargets("only", "");
+        return controlTargets("only", "", "all", topOnly);
       case "text":
         return pattern ? textTargets(pattern) : [];
       case "words":
       case "land":
         return wordTargets();
       case "captcha":
-        return captchaTargets();
+        return controlTargets("include", "", "captcha", topOnly);
+      case "challenge":
+        return controlTargets("include", "", "challenge", topOnly);
     }
     return [];
   }
@@ -1489,16 +3368,101 @@
       const request = JSON.parse(requestJson);
       let response;
       switch (request.op) {
-        case "jump_scan":
+        case "init":
+          if (request.watch_mutations) enableMutationWatch();
+          initChildFrames();
+          rememberFocusedEditable();
+          response = { kind: "ok" };
+          break;
+        case "has_editable_focus":
+          response = {
+            kind: "editable_focus",
+            editing: isEditable(deepActiveElement()) || anyChildFrameEditing(),
+          };
+          break;
+        case "frame_fields": {
+          const all = allFieldEntries();
+          response = {
+            kind: "frame_fields",
+            fields: all.map((entry, index) => ({ index, rect: entry.rect, active: entry.active })),
+          };
+          break;
+        }
+        case "frame_focus_field": {
+          const all = allFieldEntries();
+          const chosen = all[request.index || 0];
+          response = chosen ? focusFieldEntry(chosen) : { kind: "ok" };
+          break;
+        }
+        case "frame_focus_last": {
+          if (lastFieldFrame && lastFieldFrame.isConnected) {
+            const sub = evalInFrame(lastFieldFrame, { op: "frame_focus_last" });
+            if (sub && sub.kind === "activated") {
+              response = sub;
+              break;
+            }
+          }
+          const last = lastInput();
+          response = last && isEditable(last) && isRendered(last) ? focusField(last) : { kind: "ok" };
+          break;
+        }
+        case "scroll_if_able":
+          response = scrollIfAble(request);
+          break;
+        case "copy_selection":
+          response = copySelection();
+          break;
+        case "copy_selection_if_any":
+          response = copySelectionIfAny();
+          break;
+        case "cut_selection":
+          response = cutSelection();
+          break;
+        case "cut_selection_if_any":
+          response = cutSelectionIfAny();
+          break;
+        case "collect_controls":
+          response = { kind: "raw_controls", items: collectControlsRaw() };
+          break;
+        case "captcha_tokens":
+          response = { kind: "captcha_tokens", tokens: captchaTokens() };
+          break;
+        case "captcha_areas":
+          response = {
+            kind: "captcha_areas",
+            areas: captchaAreas(),
+            captcha_tokens: window.top === window ? captchaTokens() : 0,
+            viewport: [innerWidth, innerHeight],
+          };
+          break;
+        case "jump_scan": {
+          if (request.watch_mutations) enableMutationWatch();
+          const targets = jumpTargets(request);
+          const includeCaptchaMeta =
+            request.jump === "captcha" || request.jump === "challenge" || request.jump === "hints";
           response = {
             kind: "targets",
             jump: request.jump,
             pattern: request.pattern || "",
-            targets: jumpTargets(request),
+            targets,
+            captcha_tokens: includeCaptchaMeta ? captchaTokens() : 0,
+            captcha_areas:
+              (request.jump === "captcha" || request.jump === "challenge") && !targets.length ? captchaAreas() : [],
+            viewport: [innerWidth, innerHeight],
           };
           break;
+        }
         case "jump_pick":
           response = pick(request.id, !!request.new_tab, !!request.extend);
+          break;
+        case "captcha_fill":
+          response = captchaFill(request.text);
+          break;
+        case "dispatch_touch":
+          response = dispatchTouch(request.stage, request.x, request.y, !!request.reset_chain);
+          break;
+        case "refocus_top":
+          response = refocusTop();
           break;
         case "scroll":
           response = scroll(request);
@@ -1517,6 +3481,15 @@
           break;
         case "blur_field":
           response = blurField();
+          break;
+        case "edit_delete_to_line_start":
+          response = editDeleteToLineStart();
+          break;
+        case "edit_delete_to_line_end":
+          response = editDeleteToLineEnd();
+          break;
+        case "edit_delete_char_forward":
+          response = editDeleteCharForward();
           break;
         case "visual_enter":
           response = visualEnter();
@@ -1537,7 +3510,7 @@
           response = visualObject(request.keys || "iw", request.count);
           break;
         case "caret":
-          response = visualState(true);
+          response = visualCaret();
           break;
         case "yank_put":
           response = yankPut(request.text, request.index || 0, !!request.replace);
@@ -1548,6 +3521,9 @@
         case "captcha_action":
           response = captchaAction(request.action);
           break;
+        case "toggle_reader_mode":
+          response = toggleReaderMode();
+          break;
         default:
           response = { kind: "message", text: "Unknown automation request: " + request.op };
       }
@@ -1556,4 +3532,75 @@
       return JSON.stringify({ kind: "message", text: String(error) });
     }
   };
+
+  function toggleReaderMode() {
+    const existing = document.getElementById("__zendia-reader-overlay");
+    if (existing) {
+      const prev = existing.getAttribute("data-prev-overflow") || "";
+      existing.remove();
+      if (document.documentElement) {
+        document.documentElement.style.overflow = prev;
+      }
+      return { kind: "reader_mode", active: false };
+    }
+    const proto = String((window.location && window.location.protocol) || "");
+    if (proto === "about:" || proto === "data:" && !document.body) {
+      return { kind: "reader_mode", active: false, message: "Reader view is not available on this page" };
+    }
+    let root = document.querySelector("article, [role='main'], main");
+    if (!root && document.body) {
+      let best = null;
+      let bestLen = 0;
+      const candidates = document.body.querySelectorAll("section, div");
+      for (let i = 0; i < candidates.length; i++) {
+        const el = candidates[i];
+        const pCount = el.querySelectorAll("p").length;
+        if (pCount < 2) continue;
+        const len = (el.innerText || el.textContent || "").trim().length;
+        if (len > bestLen) {
+          bestLen = len;
+          best = el;
+        }
+      }
+      root = best;
+    }
+    const textLen = root ? (root.innerText || root.textContent || "").trim().length : 0;
+    if (!root || textLen < 140) {
+      return { kind: "reader_mode", active: false, message: "Reader view is not available on this page" };
+    }
+    const overlay = document.createElement("div");
+    overlay.id = "__zendia-reader-overlay";
+    const prevOverflow = (document.documentElement && document.documentElement.style.overflow) || "";
+    overlay.setAttribute("data-prev-overflow", prevOverflow);
+    overlay.style.cssText = [
+      "position:fixed",
+      "inset:0",
+      "z-index:2147483640",
+      "overflow-y:auto",
+      "background:#1a1b26",
+      "color:#c0caf5",
+      "padding:48px 24px 96px",
+      "font:18px/1.7 Georgia, 'Times New Roman', serif",
+      "box-sizing:border-box",
+    ].join(";");
+    const container = document.createElement("article");
+    container.style.cssText = "max-width:680px;margin:0 auto;";
+    const heading = document.createElement("h1");
+    heading.textContent = document.title || "Reader View";
+    heading.style.cssText = "font:700 30px/1.3 system-ui, sans-serif;margin:0 0 24px;color:#c0caf5;";
+    container.appendChild(heading);
+    const clone = root.cloneNode(true);
+    const junk = clone.querySelectorAll("script, style, nav, aside, footer, iframe, form, button, svg");
+    for (let i = 0; i < junk.length; i++) {
+      junk[i].remove();
+    }
+    container.appendChild(clone);
+    overlay.appendChild(container);
+    (document.body || document.documentElement).appendChild(overlay);
+    if (document.documentElement) {
+      document.documentElement.style.overflow = "hidden";
+    }
+    overlay.focus();
+    return { kind: "reader_mode", active: true };
+  }
 })();

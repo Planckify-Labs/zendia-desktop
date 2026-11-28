@@ -40,6 +40,7 @@ impl Component for MediaSection {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();
+        let library = crate::ui::library::try_use_library_state();
         let mut query = use_state(String::new);
         let filters_open = use_state(|| false);
         let mut active_folders = use_state(Vec::<String>::new);
@@ -67,53 +68,6 @@ impl Component for MediaSection {
             Vec::new()
         };
 
-        let nav_rows: Vec<LibraryNavRow> = if !enabled {
-            vec![LibraryNavRow::new(
-                "media:opt-in",
-                Some(Command::LibraryMediaSetEnabled { enabled: true }),
-            )]
-        } else {
-            visible_items
-                .iter()
-                .map(|item| {
-                    LibraryNavRow::new(
-                        format!("media:{}", item.id.0),
-                        Some(Command::LibraryMediaPreviewOpen { media_id: item.id }),
-                    )
-                })
-                .collect()
-        };
-
-        let nav_layout = if enabled {
-            LibraryNavLayout::Grid {
-                columns: MEDIA_GRID_COLUMNS,
-            }
-        } else {
-            LibraryNavLayout::List
-        };
-        let focused_key = use_library_nav(LibrarySection::Media, nav_layout, nav_rows);
-
-        if enabled && *last_scrolled_cursor.peek() != focused_key {
-            last_scrolled_cursor.set(focused_key.clone());
-            if let Some(target_key) = focused_key.as_deref()
-                && let Some(idx) = visible_items
-                    .iter()
-                    .position(|item| format!("media:{}", item.id.0) == target_key)
-            {
-                let row_idx = idx / MEDIA_GRID_COLUMNS;
-                let total_rows = visible_items.len().div_ceil(MEDIA_GRID_COLUMNS);
-                let item_top = 6.0 + row_idx as f32 * (TILE_SIZE + GRID_GAP);
-                let content_height = 6.0 + total_rows as f32 * (TILE_SIZE + GRID_GAP) + 16.0;
-                let vh = *viewport_height.peek();
-                scroll_item_into_view(&mut scroll_controller, item_top, TILE_SIZE, vh, content_height);
-            }
-        }
-
-        if !enabled {
-            let opt_in_focused = focused_key.as_deref() == Some("media:opt-in");
-            return render_opt_in_state(&core, &theme, opt_in_focused);
-        }
-
         let show_filter_button = folders.len() >= 2;
         let active_folder_count = folder_filter.len();
         let filter_groups = if show_filter_button {
@@ -132,10 +86,67 @@ impl Component for MediaSection {
             Vec::new()
         };
 
+        let is_filters_open = enabled && show_filter_button && *filters_open.read();
+        let nav_rows: Vec<LibraryNavRow> = if !enabled {
+            vec![LibraryNavRow::new(
+                "media:opt-in",
+                Some(Command::LibraryMediaSetEnabled { enabled: true }),
+            )]
+        } else if is_filters_open {
+            LibrarySearchBar::filter_nav_rows(&filter_groups)
+        } else {
+            visible_items
+                .iter()
+                .map(|item| {
+                    LibraryNavRow::new(
+                        format!("media:{}", item.id.0),
+                        Some(Command::LibraryMediaPreviewOpen { media_id: item.id }),
+                    )
+                })
+                .collect()
+        };
+
+        let nav_layout = if enabled && !is_filters_open {
+            LibraryNavLayout::Grid {
+                columns: MEDIA_GRID_COLUMNS,
+            }
+        } else {
+            LibraryNavLayout::List
+        };
+        let focused_key = use_library_nav(LibrarySection::Media, nav_layout, nav_rows);
+
+        if enabled && !is_filters_open && *last_scrolled_cursor.peek() != focused_key {
+            last_scrolled_cursor.set(focused_key.clone());
+            if let Some(target_key) = focused_key.as_deref()
+                && let Some(idx) = visible_items
+                    .iter()
+                    .position(|item| format!("media:{}", item.id.0) == target_key)
+            {
+                let row_idx = idx / MEDIA_GRID_COLUMNS;
+                let total_rows = visible_items.len().div_ceil(MEDIA_GRID_COLUMNS);
+                let item_top = 6.0 + row_idx as f32 * (TILE_SIZE + GRID_GAP);
+                let content_height = 6.0 + total_rows as f32 * (TILE_SIZE + GRID_GAP) + 16.0;
+                let vh = *viewport_height.peek();
+                scroll_item_into_view(&mut scroll_controller, item_top, TILE_SIZE, vh, content_height);
+            }
+        }
+
+        if !enabled {
+            if let Some(lib) = library
+                && *lib.open.peek()
+                && *lib.nav.keyboard_focused.peek()
+            {
+                lib.nav.focus_list();
+            }
+            let opt_in_focused = focused_key.as_deref() == Some("media:opt-in");
+            return render_opt_in_state(&core, &theme, opt_in_focused);
+        }
+
         let top_bar = LibrarySearchBar::new("Search Media…", query)
             .filter_title("Filter Media…")
             .filter_groups(filter_groups)
             .filters_open(filters_open)
+            .auto_focus(!*filters_open.read())
             .active_filter_count(active_folder_count)
             .on_toggle_filter(move |(_, folder_name): (String, String)| {
                 let mut list = active_folders.write();
@@ -205,6 +216,11 @@ impl Component for MediaSection {
                     let h = e.area.height();
                     if (*viewport_height.peek() - h).abs() > 1.0 {
                         viewport_height.set(h);
+                    }
+                    if let Some(lib) = library
+                        && h > 1.0
+                    {
+                        lib.nav.set_visible_rows((h / (TILE_SIZE + GRID_GAP)).floor() as usize);
                     }
                 })
                 .child(
@@ -304,7 +320,8 @@ fn render_opt_in_state(
             ),
     )
     .corner_radius(10.0)
-    .fill(false);
+    .fill(false)
+    .row_key("media:opt-in");
 
     let card = rect()
         .width(Size::fill())
@@ -468,7 +485,8 @@ impl Component for MediaTile {
         rect().width(Size::px(TILE_SIZE)).height(Size::px(TILE_SIZE)).child(
             LibraryCursorRing::new(self.focused, tile)
                 .corner_radius(16.0)
-                .fill(false),
+                .fill(false)
+                .row_key(format!("media:{}", media_id.0)),
         )
     }
 

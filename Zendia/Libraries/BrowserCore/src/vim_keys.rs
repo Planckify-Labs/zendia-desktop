@@ -111,22 +111,30 @@ pub enum FieldEdit {
     DeleteWordBackward,
     /// `<C-u>`.
     DeleteToLineStart,
+    /// `edit.delete_to_line_end` (`edit.deleteToLineEnd`).
+    DeleteToLineEnd,
     /// `<C-h>`.
     DeleteCharBackward,
+    /// `edit.delete_char_forward` (`edit.deleteCharForward`).
+    DeleteCharForward,
 }
 
 impl FieldEdit {
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 5] = [
         Self::DeleteWordBackward,
         Self::DeleteToLineStart,
+        Self::DeleteToLineEnd,
         Self::DeleteCharBackward,
+        Self::DeleteCharForward,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::DeleteWordBackward => "edit.delete_word_backward",
             Self::DeleteToLineStart => "edit.delete_to_line_start",
+            Self::DeleteToLineEnd => "edit.delete_to_line_end",
             Self::DeleteCharBackward => "edit.delete_char_backward",
+            Self::DeleteCharForward => "edit.delete_char_forward",
         }
     }
 
@@ -134,12 +142,21 @@ impl FieldEdit {
         match self {
             Self::DeleteWordBackward => "Delete Word Before the Cursor",
             Self::DeleteToLineStart => "Delete to the Start of the Line",
+            Self::DeleteToLineEnd => "Delete to the End of the Line",
             Self::DeleteCharBackward => "Delete the Character Before the Cursor",
+            Self::DeleteCharForward => "Delete the Character After the Cursor",
         }
     }
 
     fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|edit| edit.name() == name)
+        match name {
+            "edit.deleteWordBackward" => Some(Self::DeleteWordBackward),
+            "edit.deleteToLineStart" => Some(Self::DeleteToLineStart),
+            "edit.deleteToLineEnd" => Some(Self::DeleteToLineEnd),
+            "edit.deleteCharBackward" => Some(Self::DeleteCharBackward),
+            "edit.deleteCharForward" => Some(Self::DeleteCharForward),
+            _ => Self::ALL.into_iter().find(|edit| edit.name() == name),
+        }
     }
 }
 
@@ -160,6 +177,27 @@ pub enum VimCommand {
         tab_id: Option<TabId>,
         editing: bool,
     },
+    /// An auxiliary page surface (such as an extension popup or web chat panel) took or gave up keyboard focus.
+    KeyedPageChanged {
+        tab_id: Option<TabId>,
+    },
+    /// Registers or unregisters an auxiliary Hub view so page commands and vim modes can target it.
+    RegisterAuxiliaryPage {
+        tab_id: TabId,
+        registered: bool,
+    },
+    /// Reports the visible row capacity and `[first_visible, end_visible)` slice of the sidebar explorer (`EXP-06`, `EXP-15`).
+    ReportExplorerViewport {
+        visible_rows: usize,
+        first_visible: usize,
+        end_visible: usize,
+    },
+    /// Reports which side panel currently holds keyboard focus (`None` when the page does), keeping the panel row in sync (`WIN-06`).
+    PanelFocusChanged {
+        panel_id: Option<crate::contributions::SidePanelId>,
+    },
+    /// Reports that the floating address bar was dismissed without submitting, cleaning up any empty URL split pane (`WIN-20`).
+    AddressBarCancelled,
     /// The active tab changed under the key engine: its mode follows whether a field of the new tab has the focus.
     SyncPageMode,
     /// A key moved to another tab: a field the page kept focused gives up the focus there, so the keys that follow
@@ -183,6 +221,11 @@ impl VimCommand {
             Self::ModeInsert => "mode.insert",
             Self::ReportPending { .. } => "input.report_pending",
             Self::EditableFocusChanged { .. } => "page.editable_focus_changed",
+            Self::KeyedPageChanged { .. } => "page.keyed_changed",
+            Self::RegisterAuxiliaryPage { .. } => "page.register_auxiliary",
+            Self::ReportExplorerViewport { .. } => "explorer.report_viewport",
+            Self::PanelFocusChanged { .. } => "panel.focus_changed",
+            Self::AddressBarCancelled => "address_bar.cancelled",
             Self::SyncPageMode => "input.sync_page_mode",
             Self::LeaveField => "input.leave_field",
             Self::ScrollPage { motion, .. } => motion.name(),
@@ -253,8 +296,38 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
                 }
             },
         },
+        "page.keyed_changed" => VimCommand::KeyedPageChanged {
+            tab_id: parse_tab(name, args)?,
+        },
+        "page.register_auxiliary" => VimCommand::RegisterAuxiliaryPage {
+            tab_id: parse_tab(name, args)?.ok_or_else(|| CommandError::InvalidArgument {
+                command: name.to_string(),
+                message: "missing required `tab_id`".to_string(),
+            })?,
+            registered: match find_arg(args, "registered") {
+                Some("true") | None => true,
+                Some("false") => false,
+                Some(raw) => {
+                    return Err(CommandError::InvalidArgument {
+                        command: name.to_string(),
+                        message: format!("expected boolean `registered`, got `{raw}`"),
+                    });
+                }
+            },
+        },
         "input.sync_page_mode" => VimCommand::SyncPageMode,
         "input.leave_field" => VimCommand::LeaveField,
+        "explorer.report_viewport" => VimCommand::ReportExplorerViewport {
+            visible_rows: parse_u64(name, args, "visible_rows")?.unwrap_or(16) as usize,
+            first_visible: parse_u64(name, args, "first_visible")?.unwrap_or(0) as usize,
+            end_visible: parse_u64(name, args, "end_visible")?.unwrap_or(0) as usize,
+        },
+        "panel.focus_changed" => VimCommand::PanelFocusChanged {
+            panel_id: find_arg(args, "panel_id")
+                .filter(|raw| !raw.trim().is_empty())
+                .map(crate::contributions::SidePanelId::new),
+        },
+        "address_bar.cancelled" => VimCommand::AddressBarCancelled,
         _ => return Ok(None),
     };
     Ok(Some(Command::Vim(command)))
@@ -308,6 +381,21 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             ],
         },
         CommandDescriptor {
+            name: "page.keyed_changed".to_string(),
+            title: "Keyed Page Changed".to_string(),
+            description: "An auxiliary page view took or released keyboard focus".to_string(),
+            arguments: vec![tab_arg()],
+        },
+        CommandDescriptor {
+            name: "page.register_auxiliary".to_string(),
+            title: "Register Auxiliary Page".to_string(),
+            description: "Register or unregister an auxiliary Hub page view".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("tab_id", ArgumentType::TabId, true, "Auxiliary view ID"),
+                ArgumentSchema::new("registered", ArgumentType::Bool, false, "Whether the view is open"),
+            ],
+        },
+        CommandDescriptor {
             name: "input.leave_field".to_string(),
             title: "Leave the Field".to_string(),
             description: "The page's focused field gives up the focus, back to normal mode".to_string(),
@@ -318,6 +406,21 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             title: "Sync Page Mode".to_string(),
             description: "Match the vim mode to whether a field of the active tab has the focus".to_string(),
             arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "explorer.report_viewport".to_string(),
+            title: "Report Explorer Viewport".to_string(),
+            description: "Report visible sidebar explorer rows for half-page jumps and row hints".to_string(),
+            arguments: vec![
+                ArgumentSchema::new("visible_rows", ArgumentType::Integer, false, "Visible row capacity"),
+                ArgumentSchema::new("first_visible", ArgumentType::Integer, false, "First visible row index"),
+                ArgumentSchema::new(
+                    "end_visible",
+                    ArgumentType::Integer,
+                    false,
+                    "One-past-last visible row index",
+                ),
+            ],
         },
     ];
     for motion in ScrollMotion::ALL {
@@ -350,26 +453,8 @@ const REPEATED_BY_COUNT: &[&str] = &[
     "tab.previous",
     "tab.move_next",
     "tab.move_prev",
-    "navigation.back",
-    "navigation.forward",
-    "split.grow_height",
-    "split.shrink_height",
-    "split.grow_width",
-    "split.shrink_width",
-    "explorer.down",
-    "explorer.up",
     "explorer.move_down",
     "explorer.move_up",
-    "toolbar.left",
-    "toolbar.right",
-    "library.down",
-    "library.up",
-    "library.left",
-    "library.right",
-    "library.next_section",
-    "library.prev_section",
-    "library.move_space_left",
-    "library.move_space_right",
     "input.next",
     "input.prev",
 ];
@@ -438,12 +523,186 @@ mod tests {
                 invocation.command
             );
         }
+
+        // Standard profile (`standard.toml`) must also resolve solely to typed commands (`RT-01`).
+        for binding in &zendia_keymap::Profile::standard().bindings {
+            let invocation = &binding.invocation;
+            let parsed = Command::from_name_and_args(&invocation.command, &invocation.args_as_pairs())
+                .unwrap_or_else(|error| panic!("standard `{}` does not parse: {error}", invocation.command));
+            assert!(
+                !matches!(parsed, Command::Custom { .. }),
+                "standard `{}` has no typed command",
+                invocation.command
+            );
+        }
+
+        // Built-in pickers (`tabs`, `agents`) must only name typed commands (`VimParity.md:1266`).
+        let model = crate::stub::sample_model(true);
+        for picker_name in ["tabs", "agents"] {
+            let picker = crate::picker::build_builtin_picker(picker_name, &model).expect("builtin picker");
+            for item in &picker.items {
+                let parsed = Command::from_name_and_args(&item.command, &item.command_args).unwrap_or_else(|error| {
+                    panic!("picker `{}` command `{}` failed: {error}", picker.id.0, item.command)
+                });
+                assert!(
+                    !matches!(parsed, Command::Custom { .. }),
+                    "picker `{}` item `{}` uses untyped command `{}`",
+                    picker.id.0,
+                    item.id,
+                    item.command
+                );
+            }
+        }
+
+        // Every unmapped Appendix A action (`VimParity.md:1689-1704`) must translate to a typed command (`CFG-04`).
+        for fork_action in [
+            "input.first",
+            "jump.land",
+            "edit.deleteCharForward",
+            "edit.deleteToLineEnd",
+            "find.bookmarks",
+            "splits.grid",
+            "ui.appMenu",
+            "captcha.fill",
+            "yank.put",
+            "yank.clear",
+            "yank.urlMarkdown",
+            "webchat.newChat",
+            "webchat.reload",
+            "webchat.accounts",
+            "webchat.sync",
+            "ublock.popup",
+            "ublock.zapper",
+            "ublock.picker",
+            "ublock.logger",
+            "ublock.dashboard",
+            "ublock.relax",
+            "ublock.toggleCosmetic",
+            "ublock.toggleJavascript",
+            "agent.observe",
+            "agent.act",
+            "agent.extract",
+            "agent.fetch",
+            "agent.version",
+        ] {
+            let inv = zendia_keymap::translate_fork_action(fork_action);
+            let parsed = Command::from_name_and_args(&inv.command, &inv.args_as_pairs())
+                .unwrap_or_else(|error| panic!("fork action `{fork_action}` -> `{}` failed: {error}", inv.command));
+            assert!(
+                !matches!(parsed, Command::Custom { .. }),
+                "fork action `{fork_action}` -> `{}` resolved to Custom",
+                inv.command
+            );
+        }
+    }
+
+    #[test]
+    fn which_key_groups_and_wk01_descriptions_match_fork() {
+        let profile = crate::input_state::vim_profile();
+        let group_names: std::collections::BTreeSet<&str> = profile.groups.iter().map(|g| g.name.as_str()).collect();
+        for expected_group in [
+            "spaces",
+            "ai",
+            "buffer",
+            "captcha",
+            "file/find",
+            "library",
+            "quit/session",
+            "search",
+            "ui",
+            "windows",
+            "prev",
+            "next",
+            "goto",
+            "fold",
+            "around",
+            "inside",
+            "ask web chat",
+        ] {
+            assert!(
+                group_names.contains(expected_group),
+                "missing which-key group `{expected_group}`"
+            );
+        }
+
+        let check_desc = |mode: &str, keys: &str, expected: &str| {
+            let seq = zendia_keymap::KeySequence::parse(keys)
+                .unwrap()
+                .expand_leader_strokes(profile.leader_sequence.strokes());
+            let binding = profile
+                .bindings
+                .iter()
+                .rfind(|b| b.mode.as_deref() == Some(mode) && b.keys == seq)
+                .unwrap_or_else(|| panic!("missing `{keys}` in mode `{mode}`"));
+            assert_eq!(
+                binding.description.as_deref(),
+                Some(expected),
+                "wrong description for `{mode}` `{keys}`"
+            );
+        };
+
+        check_desc("i", "<A-p>", "Put Previous Yank");
+        check_desc("i", "<A-n>", "Put Next Yank");
+        check_desc("n", "<leader>bP", "Delete Non-Pinned Tabs");
+        check_desc("n", "<leader>fn", "New Tab");
+        check_desc("n", "<leader>ff", "Open URL Bar");
+        check_desc("n", "yy", "Copy URL");
+        check_desc("n", "<leader><Tab>i", "Change Space Icon");
+        check_desc("n", "<leader>ww", "Go to Next Window");
+        check_desc("n", "<leader>wp", "Go to Last Used Window");
+        check_desc("n", "<leader>wm", "Fill View with Window");
+        check_desc("n", "<leader>w=", "Make Windows Equal");
+        check_desc("n", "<leader>wR", "Rotate Windows Back");
+        check_desc("n", "<leader>wH", "Move Window to Far Left");
+        check_desc("n", "<leader>wJ", "Move Window to Bottom");
+        check_desc("n", "<leader>wK", "Move Window to Top");
+        check_desc("n", "<leader>wL", "Move Window to Far Right");
+        check_desc("n", "<leader>wg", "Move Window…");
+        check_desc("n", "<leader>wa", "Add Tab to Split…");
+        check_desc("v", "<leader>ae", "Explain the Selection");
+        check_desc("v", "<leader>as", "Summarize the Selection");
+        check_desc("v", "<leader>at", "Translate the Selection");
+        check_desc("v", "<leader>ad", "Define the Selection");
+        check_desc("v", "<leader>af", "Fact-Check the Selection");
+        check_desc("v", "<leader>aa", "Ask About the Selection…");
+        check_desc("e", "j", "Down");
+        check_desc("e", "k", "Up");
+        check_desc("e", "l", "Open, or Right on the Foot");
+        check_desc("e", "o", "Open, Keep Explorer");
+        check_desc("e", "h", "Close Folder");
+        check_desc("e", "zR", "Open All Folders");
+        check_desc("e", "zM", "Close All Folders");
+        check_desc("e", "s", "Jump");
+        check_desc("e", "/", "Find Tab");
+        check_desc("e", "d", "Delete");
+        check_desc("e", "<lt>", "Move out of Folder");
+        check_desc("e", "<C-v>", "Open in Vertical Split");
+        check_desc("e", "<C-s>", "Open in Horizontal Split");
+        check_desc("e", "R", "Reload");
+        check_desc("e", "U", "Unload");
+        check_desc("e", "m", "Menu");
+        check_desc("e", "+", "Create Menu");
+        check_desc("e", "<Tab>", "Select");
+        check_desc("e", "q", "Close Explorer");
+        check_desc("e", "<Esc>", "Clear Selection or Close");
+        check_desc("t", "h", "Left");
+        check_desc("t", "l", "Right");
+        check_desc("t", "0", "First Item");
+        check_desc("t", "$", "Last Item");
+        check_desc("t", "<CR>", "Press");
+        check_desc("t", "m", "Menu");
+        check_desc("t", "s", "Jump");
+        check_desc("t", "i", "Edit Address");
+        check_desc("t", "q", "Close Toolbar");
     }
 
     #[test]
     fn names_round_trip() {
         for descriptor in descriptors() {
-            if descriptor.name == "page.editable_focus_changed" {
+            if matches!(
+                descriptor.name.as_str(),
+                "page.editable_focus_changed" | "page.register_auxiliary"
+            ) {
                 continue;
             }
             let parsed = Command::from_name_and_args(&descriptor.name, &[]).unwrap();

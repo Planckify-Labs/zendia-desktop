@@ -319,6 +319,18 @@ impl DockHostState {
                 self.model_card_open.set_if_modified(false);
                 false
             }
+            ViewRequest::WebChatAccountsToggle => {
+                let wc_id = SidePanelId::new(WEBCHAT_PANEL_ID);
+                if !self.is_open(&wc_id) {
+                    self.open_panel(wc_id);
+                }
+                let next = !*self.webchat_accounts_open.peek();
+                self.webchat_accounts_open.set(next);
+                if next {
+                    self.webchat_add_site_open.set_if_modified(false);
+                }
+                false
+            }
             _ => false,
         }
     }

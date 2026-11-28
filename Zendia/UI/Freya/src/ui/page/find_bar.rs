@@ -139,6 +139,71 @@ impl Component for FindBar {
             }
         };
 
+        let toggle_pill = |text: &'static str, active: bool, action: TabAction| {
+            let invoke = invoke.clone();
+            let bg = if active {
+                theme.rgba(ThemeRole::Accent).with_alpha(0.22).to_color()
+            } else {
+                Color::TRANSPARENT
+            };
+            let border_col = if active {
+                theme.color(ThemeRole::Accent)
+            } else {
+                theme.rgba(ThemeRole::BorderSubtle).to_color()
+            };
+            let fg = if active {
+                theme.color(ThemeRole::Text)
+            } else {
+                theme.color(ThemeRole::TextMuted)
+            };
+            rect()
+                .a11y_role(AccessibilityRole::CheckBox)
+                .a11y_alt(text)
+                .padding(Gaps::new(3.0, 7.0, 3.0, 7.0))
+                .corner_radius(CornerRadius::new_all(6.0))
+                .background(bg)
+                .border(
+                    Border::new()
+                        .width(1.0)
+                        .alignment(BorderAlignment::Inner)
+                        .fill(border_col),
+                )
+                .cursor(CursorIcon::Pointer)
+                .on_press(move |e: Event<PressEventData>| {
+                    e.stop_propagation();
+                    invoke(action.clone());
+                })
+                .child(label().text(text).font_size(11.5).color(fg).max_lines(1))
+        };
+
+        let hl_pill = toggle_pill(
+            "Highlight All",
+            find.highlight_all,
+            TabAction::PageFindSetOptions {
+                highlight_all: Some(!find.highlight_all),
+                match_case: None,
+                whole_words: None,
+            },
+        );
+        let case_pill = toggle_pill(
+            "Match Case",
+            find.match_case,
+            TabAction::PageFindSetOptions {
+                highlight_all: None,
+                match_case: Some(!find.match_case),
+                whole_words: None,
+            },
+        );
+        let word_pill = toggle_pill(
+            "Whole Words",
+            find.whole_words,
+            TabAction::PageFindSetOptions {
+                highlight_all: None,
+                match_case: None,
+                whole_words: Some(!find.whole_words),
+            },
+        );
+
         rect()
             .position(Position::new_absolute().left(0.0).bottom(12.0))
             .width(Size::percent(100.0))
@@ -149,7 +214,7 @@ impl Component for FindBar {
                 rect()
                     .direction(Direction::Horizontal)
                     .cross_align(Alignment::center())
-                    .spacing(8.0)
+                    .spacing(6.0)
                     .padding(Gaps::new(6.0, 8.0, 6.0, 10.0))
                     .corner_radius(CornerRadius::new_all(10.0))
                     .background(theme.color(ThemeRole::SurfaceRaised))
@@ -166,7 +231,7 @@ impl Component for FindBar {
                             .auto_focus(true)
                             .select_all_seq(*state.opened.read())
                             .placeholder("Find in page")
-                            .width(Size::px(260.0))
+                            .width(Size::px(220.0))
                             .padding(Gaps::new(4.0, 6.0, 4.0, 6.0))
                             .corner_radius(CornerRadius::new_all(6.0))
                             .background(theme.color(ThemeRole::Surface))
@@ -177,6 +242,9 @@ impl Component for FindBar {
                             .on_submit(on_submit)
                             .on_pre_key_down(on_pre_key_down),
                     )
+                    .child(hl_pill)
+                    .child(case_pill)
+                    .child(word_pill)
                     .child(
                         label()
                             .text(status)

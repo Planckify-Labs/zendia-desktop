@@ -63,9 +63,11 @@ pub fn command_from_action(action: &UiAction) -> Command {
         },
         "navigation.back" => Command::NavigationBack {
             tab_id: parse_tab_id(args, "tab_id"),
+            count: find_arg(args, "count").and_then(|v| v.parse::<u32>().ok()),
         },
         "navigation.forward" => Command::NavigationForward {
             tab_id: parse_tab_id(args, "tab_id"),
+            count: find_arg(args, "count").and_then(|v| v.parse::<u32>().ok()),
         },
         "navigation.reload" => Command::NavigationReload {
             tab_id: parse_tab_id(args, "tab_id"),

@@ -745,4 +745,23 @@ impl Web_Clipboard_SystemClipboardItem {
             }
         })
     }
+
+    /// Clones all byte-backed MIME representations (`text/html`, `text/plain`, etc.) so rich copies survive round-trips.
+    pub fn clone_bytes_only(&self) -> Self {
+        Self {
+            system_clipboard_representations: self
+                .system_clipboard_representations
+                .iter()
+                .filter_map(|rep| match &rep.data {
+                    Web_Clipboard_SystemClipboardData::Bytes(bytes) => {
+                        Some(Web_Clipboard_SystemClipboardRepresentation {
+                            name: Utf8String::from(String::from_utf8_lossy(rep.name.as_bytes()).as_ref()),
+                            data: Web_Clipboard_SystemClipboardData::Bytes(ByteString(bytes.0.clone())),
+                        })
+                    }
+                    Web_Clipboard_SystemClipboardData::File(_) => None,
+                })
+                .collect(),
+        }
+    }
 }

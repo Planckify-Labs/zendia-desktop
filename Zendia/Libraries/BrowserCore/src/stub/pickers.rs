@@ -397,13 +397,13 @@ mod tests {
             request_id: Some(PickerRequestId::new("plugin.demo")),
         })
         .unwrap();
-        assert!(!core.model().layout.compact_mode);
+        assert!(core.model().layout.compact_mode);
         core.invoke(Command::PickerChoose {
             request_id: Some(PickerRequestId::new("plugin.demo")),
             item_id: "demo.one".to_string(),
         })
         .unwrap();
-        assert!(core.model().layout.compact_mode);
+        assert!(!core.model().layout.compact_mode);
     }
 
     #[test]

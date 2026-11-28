@@ -34,6 +34,16 @@ impl StubBackend {
         self.bus.publish(Event::StatuslineSettingsChanged { settings });
     }
 
+    /// Enables or disables showing the vim mode indicator (`zendia.statusline.enabled`).
+    pub fn set_statusline_enabled(&self, enabled: bool) {
+        let settings = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.model.statusline.enabled = enabled;
+            state.model.statusline.clone()
+        };
+        self.bus.publish(Event::StatuslineSettingsChanged { settings });
+    }
+
     /// Publishes a short transient announcement shown beside the vim mode indicator.
     pub fn announce_statusline(&self, message: String, timeout_ms: Option<u64>) {
         let announcement = {
@@ -87,6 +97,10 @@ impl StubBackend {
                 self.set_statusline_show(show);
                 Ok(())
             }
+            Command::StatuslineSetEnabled { enabled } => {
+                self.set_statusline_enabled(enabled);
+                Ok(())
+            }
             Command::StatuslineAnnounce { message, timeout_ms } => {
                 self.announce_statusline(message, timeout_ms);
                 Ok(())
@@ -123,6 +137,7 @@ impl StubBackend {
                 Ok(())
             }
             Command::WhichKeyHide => {
+                self.clear_pending_in_vim_state();
                 self.set_pending_count(None);
                 self.set_pending_keys(Vec::new());
                 self.set_which_key(None);

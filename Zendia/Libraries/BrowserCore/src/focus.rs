@@ -129,12 +129,25 @@ pub struct HintEntry {
     pub label: String,
 }
 
+/// What picking a hint label does once matched (`EXP-06`, `TB-02`, `NAV-04`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HintMatchAction {
+    /// Move the active surface's cursor to the matched target without activating or closing (`s` in explorer/toolbar).
+    #[default]
+    MoveCursor,
+    /// Activate the matched sidebar row's last-used tab and close any transient sidebar (`<leader>bj` `tab.pick`).
+    ActivateTabAndClose,
+    /// Focus the matched split pane (`wf` / pane hints).
+    ActivatePane,
+}
+
 /// Active jump-hint labels over a focus surface, narrowed as keys are typed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HintSession {
     pub surface: FocusSurface,
     pub entries: Vec<HintEntry>,
     pub typed: String,
+    pub action: HintMatchAction,
 }
 
 /// Result of feeding one key into a [`HintSession`].
@@ -158,7 +171,14 @@ impl HintSession {
             surface,
             entries,
             typed: String::new(),
+            action: HintMatchAction::MoveCursor,
         }
+    }
+
+    /// Attaches a custom [`HintMatchAction`] to run when a label matches.
+    pub fn with_action(mut self, action: HintMatchAction) -> Self {
+        self.action = action;
+        self
     }
 
     /// Creates a hint session with labels of at least `min_len` characters (useful for prefix-narrowing previews and
@@ -174,6 +194,7 @@ impl HintSession {
             surface,
             entries,
             typed: String::new(),
+            action: HintMatchAction::MoveCursor,
         }
     }
 
@@ -227,10 +248,12 @@ pub struct LandingTarget {
     pub label: String,
 }
 
-/// Active carry state in window mode: a pane picked up and hovering over a landing target.
+/// Active carry state in window mode: a pane (or tab being added) picked up and hovering over a landing target.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowCarryState {
     pub carried_tab: TabId,
+    /// True when carrying an unsplit tab into the split (`wa` / `"Add to Split"`), false when moving an existing pane.
+    pub adding: bool,
     pub targets: Vec<LandingTarget>,
     pub selected: usize,
 }
@@ -246,10 +269,26 @@ impl WindowCarryState {
 pub struct FocusState {
     pub surface: Option<FocusSurface>,
     pub cursor: Option<FocusTarget>,
+    /// Remembered row index in `explorer_targets` so closing the cursor's tab keeps the row position (`EXP-05`).
+    pub cursor_index: usize,
+    /// Remembered button index on the sidebar footer (`EXP-04`).
+    pub footer_index: usize,
+    /// Rows toggled individually with `<Tab>`, unioned with `visual_anchor` to form `selection` (`EXP-14`).
+    pub picked: Vec<FocusTarget>,
     pub selection: Vec<FocusTarget>,
     pub visual_anchor: Option<FocusTarget>,
     pub hints: Option<HintSession>,
     pub window_carry: Option<WindowCarryState>,
+    /// True when Window mode was opened solely to carry a pane/tab and closes once the drop or cancel finishes (`WIN-07`).
+    pub close_after_carry: bool,
+    /// True when toolbar focus was entered directly from explorer so compact mode keeps the sidebar out (`VimParity.md:658`).
+    pub toolbar_from_sidebar: bool,
+    /// True when explorer or window mode was opened transiently for hints (`<leader>bj` or `wf`) and closes once done (`NAV-04`, `WIN-05`).
+    pub transient_for_hints: bool,
+    /// Visible row capacity reported by `SidebarFrame` for dynamic `<C-d>` / `<C-u>` half-page jumps (`EXP-15`).
+    pub explorer_visible_rows: Option<usize>,
+    /// Visible `[start, end)` slice within `explorer_targets` reported by `SidebarFrame` for `s` / `<leader>bj` (`EXP-06`).
+    pub explorer_visible_range: Option<(usize, usize)>,
 }
 
 impl FocusState {
@@ -261,8 +300,50 @@ impl FocusState {
         self.selection.iter().any(|item| item == target)
     }
 
+    pub fn on_footer(&self) -> bool {
+        matches!(self.cursor, Some(FocusTarget::SidebarFooter(_)))
+    }
+
+    /// Recomputes `selection` as the ordered union of `picked` and any active `visual_anchor` range (`EXP-14`).
+    pub fn sync_selection(&mut self, rows: &[FocusTarget]) {
+        self.picked.retain(|item| rows.contains(item));
+        if let Some(ref anchor) = self.visual_anchor
+            && !rows.contains(anchor)
+        {
+            self.visual_anchor = None;
+        }
+        let range = match (&self.visual_anchor, &self.cursor) {
+            (Some(anchor), Some(cursor)) if !matches!(cursor, FocusTarget::SidebarFooter(_)) => {
+                visual_range(rows, anchor, cursor)
+            }
+            _ => Vec::new(),
+        };
+        let mut union = Vec::new();
+        for row in rows {
+            if self.picked.contains(row) || range.contains(row) {
+                union.push(row.clone());
+            }
+        }
+        self.selection = union;
+    }
+
+    /// Clears both `<Tab>` picks and `V` visual range, returning `true` if anything was selected (`EXP-12`, `EXP-17`).
+    pub fn clear_selection(&mut self) -> bool {
+        let had = self.visual_anchor.is_some() || !self.picked.is_empty() || !self.selection.is_empty();
+        self.visual_anchor = None;
+        self.picked.clear();
+        self.selection.clear();
+        had
+    }
+
     pub fn clear(&mut self) {
-        *self = Self::default();
+        let explorer_visible_rows = self.explorer_visible_rows;
+        let explorer_visible_range = self.explorer_visible_range;
+        *self = Self {
+            explorer_visible_rows,
+            explorer_visible_range,
+            ..Self::default()
+        };
     }
 }
 
@@ -298,9 +379,26 @@ pub fn hint_labels_min_len(count: usize, min_len: usize) -> Vec<String> {
     labels
 }
 
-/// Ordered targets the sidebar explorer walks, matching the exact drawn order in `SidebarFrame`:
-/// essentials, pinned tabs, folders with their visible child tabs, then normal tabs with each split group collapsed
-/// into a single row where its first tab sits.
+fn folder_has_collapsed_ancestor(model: &BrowserModel, folder_id: FolderId) -> bool {
+    let mut cur = folder_id;
+    for _ in 0..5 {
+        let Some(&parent_id) = model.folder_parents.get(&cur) else {
+            return false;
+        };
+        if parent_id == cur {
+            return false;
+        }
+        if model.folder(parent_id).is_some_and(|parent| parent.collapsed) {
+            return true;
+        }
+        cur = parent_id;
+    }
+    false
+}
+
+/// Ordered row targets the sidebar explorer walks (`ZendiaExplorer.explorerRows`), matching the exact drawn order in
+/// `SidebarFrame`: essentials, visible pinned tabs and folders (with visible child tabs), then normal tabs with each
+/// split group collapsed into a single row where its first tab sits. Sidebar footer buttons are separate (`EXP-04`).
 pub fn explorer_targets(model: &BrowserModel) -> Vec<FocusTarget> {
     let mut out = Vec::new();
     for tab in model.essential_tabs() {
@@ -308,13 +406,19 @@ pub fn explorer_targets(model: &BrowserModel) -> Vec<FocusTarget> {
     }
 
     if let Some(space_id) = model.active_space {
-        for tab in model.pinned_tabs_in_space(space_id) {
-            out.push(FocusTarget::PinnedTab(tab.id));
-        }
-        for folder in model.folders_in_space(space_id) {
-            out.push(FocusTarget::Folder(folder.id));
-            for tab in model.visible_folder_tabs(folder.id) {
-                out.push(FocusTarget::Tab(tab.id));
+        let pinned_collapsed = model.collapsed_pinned_spaces.contains(&space_id);
+        if !pinned_collapsed {
+            for tab in model.pinned_tabs_in_space(space_id) {
+                out.push(FocusTarget::PinnedTab(tab.id));
+            }
+            for folder in model.folders_in_space(space_id) {
+                if folder_has_collapsed_ancestor(model, folder.id) {
+                    continue;
+                }
+                out.push(FocusTarget::Folder(folder.id));
+                for tab in model.visible_folder_tabs(folder.id) {
+                    out.push(FocusTarget::Tab(tab.id));
+                }
             }
         }
         let mut seen_groups: Vec<SplitGroupId> = Vec::new();
@@ -341,7 +445,11 @@ pub fn explorer_targets(model: &BrowserModel) -> Vec<FocusTarget> {
         }
     }
 
-    // Sidebar footer buttons (Library, Agents, Chat, WebChat, Spaces, +), matching `#zen-sidebar-foot-buttons` (`VIM-EX-04`, `VIM-HT-03`).
+    out
+}
+
+/// Ordered sidebar footer buttons (`#zen-sidebar-foot-buttons`) in visual left-to-right order (`EXP-04`).
+pub fn explorer_footer_targets(model: &BrowserModel) -> Vec<FocusTarget> {
     let mut foot_items: Vec<&ToolbarItem> = model
         .contributions
         .toolbar_items
@@ -349,15 +457,20 @@ pub fn explorer_targets(model: &BrowserModel) -> Vec<FocusTarget> {
         .filter(|item| item.visible && model.layout.toolbar_area_of(item) == Some(ToolbarArea::SidebarBottom))
         .collect();
     foot_items.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
-    for item in foot_items {
-        out.push(FocusTarget::SidebarFooter(item.id.clone()));
+    if model.layout.sidebar_side == SidebarSide::Right && foot_items.len() > 1 {
+        // Right sidebar reverses `#zen-sidebar-foot-buttons`: `[+] [Chat] [Agents] ... [Library]`.
+        let first = foot_items.remove(0);
+        foot_items.reverse();
+        foot_items.push(first);
     }
-    out
+    foot_items
+        .into_iter()
+        .map(|item| FocusTarget::SidebarFooter(item.id.clone()))
+        .collect()
 }
 
-/// Resolves the explorer target that represents `tab_id` (falling back to the tab's split group when it sits in one,
-/// or its parent folder when hidden inside a collapsed folder).
-pub fn explorer_target_for_tab(model: &BrowserModel, tab_id: TabId) -> Option<FocusTarget> {
+/// Resolves the exact explorer row representing `tab_id` if visible (`None` if hidden or not in this space).
+pub fn explorer_row_for_tab(model: &BrowserModel, tab_id: TabId) -> Option<FocusTarget> {
     let targets = explorer_targets(model);
     if let Some(group) = model.split_group_for_tab(tab_id) {
         let group_target = FocusTarget::SplitGroup(group.id);
@@ -380,7 +493,12 @@ pub fn explorer_target_for_tab(model: &BrowserModel, tab_id: TabId) -> Option<Fo
             return Some(folder_target);
         }
     }
-    targets.into_iter().next()
+    None
+}
+
+/// Resolves the explorer target that represents `tab_id` (falling back to the first row when `tab_id` is absent).
+pub fn explorer_target_for_tab(model: &BrowserModel, tab_id: TabId) -> Option<FocusTarget> {
+    explorer_row_for_tab(model, tab_id).or_else(|| explorer_targets(model).into_iter().next())
 }
 
 /// Ordered targets toolbar focus walks, matching the reading order (top-to-bottom, left-to-right) of the active
@@ -412,6 +530,12 @@ pub fn toolbar_targets(model: &BrowserModel) -> Vec<FocusTarget> {
         if layout.sidebar_side == SidebarSide::Right {
             ordered.extend(in_sidebar);
         }
+    } else if layout.has_compact_top_bar()
+        && model.focus.surface == Some(FocusSurface::Toolbar)
+        && !model.focus.toolbar_from_sidebar
+    {
+        // Opened from the page in single-toolbar compact mode: only the compact top bar is shown (`ZendiaToolbar.sys.mjs:130`).
+        ordered.extend(collect_sorted(ToolbarArea::TopBarEnd));
     } else {
         ordered.extend(collect_sorted(ToolbarArea::SidebarTopStart));
         ordered.extend(collect_sorted(ToolbarArea::SidebarTopEnd));
@@ -440,10 +564,13 @@ pub fn toolbar_targets(model: &BrowserModel) -> Vec<FocusTarget> {
     result
 }
 
-/// Ordered pane targets window mode walks: the active split group's panes in pane order, or the lone active tab.
+/// Ordered pane targets window mode walks: the active split group's panes in reading order, or the lone active tab (`WIN-23`).
 pub fn window_targets(model: &BrowserModel) -> Vec<FocusTarget> {
     if let Some(group) = model.active_split_group() {
-        group.tab_ids.iter().copied().map(FocusTarget::Pane).collect()
+        split::panes_in_reading_order(group)
+            .into_iter()
+            .map(FocusTarget::Pane)
+            .collect()
     } else if let Some(tab_id) = model.active_tab {
         vec![FocusTarget::Pane(tab_id)]
     } else {
@@ -555,18 +682,38 @@ pub fn visual_range(targets: &[FocusTarget], anchor: &FocusTarget, cursor: &Focu
     targets[start..=end].to_vec()
 }
 
-/// Computes all window-mode landing targets for carrying `carried_tab` across the active split group:
-/// every side (`left`, `right`, `top`, `bottom`) and center (`Swap`) of every other pane, plus the four outer edges
-/// of the split view.
+/// Computes all window-mode landing targets for carrying `carried_tab` across the active split group (`adding = false`).
 pub fn compute_landing_targets(model: &BrowserModel, carried_tab: TabId) -> Vec<LandingTarget> {
-    let Some(group) = model.active_split_group() else {
+    compute_landing_targets_with_mode(model, carried_tab, false)
+}
+
+/// Computes all window-mode landing targets for carrying an existing pane (`adding = false`) or bringing a new tab
+/// into the split (`adding = true`, `wa` / `"Add to Split"`, `ZendiaWindowMode.sys.mjs:280-333`).
+pub fn compute_landing_targets_with_mode(model: &BrowserModel, carried_tab: TabId, adding: bool) -> Vec<LandingTarget> {
+    let group = model.active_split_group();
+    let panes: Vec<(TabId, PaneRect)> = if let Some(group) = group {
+        let by_id = split::group_pane_rects(group);
+        split::panes_in_reading_order(group)
+            .into_iter()
+            .filter_map(|id| by_id.iter().copied().find(|(tid, _)| *tid == id))
+            .collect()
+    } else if adding && let Some(active) = model.active_tab {
+        vec![(
+            active,
+            PaneRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+        )]
+    } else {
         return Vec::new();
     };
-    let rects = split::pane_rects(group.direction, group.tab_ids.len(), &group.ratios);
-    let mut targets = Vec::new();
 
-    for (&tab_id, &rect) in group.tab_ids.iter().zip(rects.iter()) {
-        if tab_id == carried_tab {
+    let mut targets = Vec::new();
+    for (tab_id, rect) in panes {
+        if !adding && tab_id == carried_tab {
             continue;
         }
         let sides = [
@@ -578,6 +725,7 @@ pub fn compute_landing_targets(model: &BrowserModel, carried_tab: TabId) -> Vec<
                     width: rect.width * 0.5,
                     height: rect.height,
                 },
+                if adding { "Split left" } else { "Move here" },
             ),
             (
                 DropZone::Right,
@@ -587,6 +735,7 @@ pub fn compute_landing_targets(model: &BrowserModel, carried_tab: TabId) -> Vec<
                     width: rect.width * 0.5,
                     height: rect.height,
                 },
+                if adding { "Split right" } else { "Move here" },
             ),
             (
                 DropZone::Top,
@@ -596,6 +745,7 @@ pub fn compute_landing_targets(model: &BrowserModel, carried_tab: TabId) -> Vec<
                     width: rect.width,
                     height: rect.height * 0.5,
                 },
+                if adding { "Split above" } else { "Move here" },
             ),
             (
                 DropZone::Bottom,
@@ -605,69 +755,83 @@ pub fn compute_landing_targets(model: &BrowserModel, carried_tab: TabId) -> Vec<
                     width: rect.width,
                     height: rect.height * 0.5,
                 },
+                if adding { "Split below" } else { "Move here" },
             ),
         ];
-        for (zone, half_rect) in sides {
+        for (zone, half_rect, label) in sides {
             targets.push(LandingTarget {
                 kind: LandingKind::PaneSide {
                     target_tab: tab_id,
                     zone,
                 },
                 rect: half_rect,
-                label: "Move here".to_string(),
+                label: label.to_string(),
             });
         }
-        targets.push(LandingTarget {
-            kind: LandingKind::PaneSwap { target_tab: tab_id },
-            rect,
-            label: "Swap".to_string(),
-        });
+        if !adding {
+            targets.push(LandingTarget {
+                kind: LandingKind::PaneSwap { target_tab: tab_id },
+                rect,
+                label: "Swap".to_string(),
+            });
+        }
     }
 
-    let edge_share = (1.0 / (group.tab_ids.len().max(2) as f32)).clamp(0.24, 0.35);
-    let edges = [
+    let tree = group.and_then(split::effective_group_tree);
+    let edge_defs = [
         (
             DropZone::Left,
-            PaneRect {
-                x: 0.0,
-                y: 0.0,
-                width: edge_share,
-                height: 1.0,
+            if adding {
+                "Split at left edge"
+            } else {
+                "Move to left edge"
             },
-            "Move to left edge",
         ),
         (
             DropZone::Right,
-            PaneRect {
-                x: 1.0 - edge_share,
-                y: 0.0,
-                width: edge_share,
-                height: 1.0,
+            if adding {
+                "Split at right edge"
+            } else {
+                "Move to right edge"
             },
-            "Move to right edge",
         ),
-        (
-            DropZone::Top,
-            PaneRect {
-                x: 0.0,
-                y: 0.0,
-                width: 1.0,
-                height: edge_share,
-            },
-            "Move to top",
-        ),
+        (DropZone::Top, if adding { "Split at top" } else { "Move to top" }),
         (
             DropZone::Bottom,
-            PaneRect {
-                x: 0.0,
-                y: 1.0 - edge_share,
-                width: 1.0,
-                height: edge_share,
-            },
-            "Move to bottom",
+            if adding { "Split at bottom" } else { "Move to bottom" },
         ),
     ];
-    for (zone, rect, label) in edges {
+    for (zone, label) in edge_defs {
+        let share = tree
+            .as_ref()
+            .map(|t| split::edge_share(t, (!adding).then_some(carried_tab), zone))
+            .unwrap_or(0.5);
+        let rect = match zone {
+            DropZone::Left => PaneRect {
+                x: 0.0,
+                y: 0.0,
+                width: share,
+                height: 1.0,
+            },
+            DropZone::Right => PaneRect {
+                x: 1.0 - share,
+                y: 0.0,
+                width: share,
+                height: 1.0,
+            },
+            DropZone::Top => PaneRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: share,
+            },
+            DropZone::Bottom => PaneRect {
+                x: 0.0,
+                y: 1.0 - share,
+                width: 1.0,
+                height: share,
+            },
+        };
         targets.push(LandingTarget {
             kind: LandingKind::SplitEdge { zone },
             rect,
@@ -682,19 +846,13 @@ fn rect_center(rect: PaneRect) -> (f32, f32) {
     (rect.x + rect.width * 0.5, rect.y + rect.height * 0.5)
 }
 
-/// Finds the nearest landing target in `direction` using Zendia's directional score (`along + 2 * across`).
-///
-/// Prefers inner pane targets (`PaneSide` / `PaneSwap`) in `direction`, and steps onto the outer `SplitEdge` matching
-/// `direction` when no closer inner target lies further in that direction (`VIM-WM-01`).
+/// Finds the nearest inner landing target in `direction` using Zendia's directional score (`along + 2 * across`,
+/// `ZendiaWindowMode.sys.mjs:361-390`). Outer edges are targeted explicitly via `H`, `J`, `K`, `L`
+/// ([`target_edge_index`]).
 pub fn step_landing_target(targets: &[LandingTarget], current: usize, direction: PaneDirection) -> usize {
     let Some(origin) = targets.get(current) else {
         return 0;
     };
-    let edge_zone = direction.drop_zone();
-    // Already resting on the outermost edge in `direction`: stay put instead of bouncing back inward.
-    if matches!(origin.kind, LandingKind::SplitEdge { zone } if zone == edge_zone) {
-        return current;
-    }
     let (ox, oy) = rect_center(origin.rect);
     let (dx, dy) = direction.delta();
     let mut best = None;
@@ -717,48 +875,20 @@ pub fn step_landing_target(targets: &[LandingTarget], current: usize, direction:
         }
     }
 
-    if let Some(idx) = best {
-        return idx;
-    }
-
-    // No inner target further in `direction`: step onto the outer split edge for that direction.
-    if let Some(edge_idx) = targets
-        .iter()
-        .position(|target| matches!(target.kind, LandingKind::SplitEdge { zone } if zone == edge_zone))
-    {
-        return edge_idx;
-    }
-
-    current
+    best.unwrap_or(current)
 }
 
-/// Finds the neighboring pane of `active_tab` in `direction`, if one exists in `group`.
+/// Finds the landing target index for outer `zone` (`H`, `J`, `K`, `L` while carrying).
+pub fn target_edge_index(targets: &[LandingTarget], zone: DropZone) -> Option<usize> {
+    targets
+        .iter()
+        .position(|target| matches!(target.kind, LandingKind::SplitEdge { zone: z } if z == zone))
+}
+
+/// Finds the neighboring pane of `active_tab` in `direction`, if one exists in `group` (`WIN-08`).
 pub fn neighbor_pane(group: &SplitGroup, active_tab: TabId, direction: PaneDirection) -> Option<TabId> {
-    let rects = split::pane_rects(group.direction, group.tab_ids.len(), &group.ratios);
-    let current_idx = group.tab_ids.iter().position(|&id| id == active_tab)?;
-    let (ox, oy) = rect_center(rects[current_idx]);
     let (dx, dy) = direction.delta();
-    let mut best = None;
-    let mut best_score = f32::INFINITY;
-
-    for (i, (&tab_id, &rect)) in group.tab_ids.iter().zip(rects.iter()).enumerate() {
-        if i == current_idx {
-            continue;
-        }
-        let (tx, ty) = rect_center(rect);
-        let along = if dx != 0.0 { (tx - ox) * dx } else { (ty - oy) * dy };
-        let across = if dx != 0.0 { (ty - oy).abs() } else { (tx - ox).abs() };
-        if along <= 0.005 {
-            continue;
-        }
-        let score = along + 2.0 * across;
-        if score < best_score {
-            best_score = score;
-            best = Some(tab_id);
-        }
-    }
-
-    best
+    split::pane_beside(group, active_tab, dx, dy, &[])
 }
 
 /// Computes the updated pane order and split direction when moving `active_tab` in `direction` inside `group`.
@@ -898,6 +1028,8 @@ mod tests {
             direction: SplitDirection::Horizontal,
             tab_ids: vec![TabId(10), TabId(11)],
             ratios: vec![0.5, 0.5],
+            tree: None,
+            zoomed_tab: None,
         });
 
         let targets = explorer_targets(&model);
@@ -1011,6 +1143,8 @@ mod tests {
             direction: SplitDirection::Grid,
             tab_ids: vec![TabId(12), TabId(11), TabId(10)],
             ratios: vec![0.5, 0.5],
+            tree: None,
+            zoomed_tab: None,
         };
         model.split_groups = vec![group.clone()];
         model.active_tab = Some(TabId(12));
@@ -1021,7 +1155,7 @@ mod tests {
         assert_eq!(neighbor_pane(&group, TabId(12), PaneDirection::Right), Some(TabId(10)));
         assert_eq!(neighbor_pane(&group, TabId(12), PaneDirection::Down), Some(TabId(11)));
 
-        // Stepping repeatedly to the right reaches and stays on the outer `Right` split edge (`VIM-WM-01`).
+        // `hjkl` steps among inner pane targets while `H/J/K/L` (`target_edge_index`) jumps onto outer edges (`WIN-03`).
         let mut cur = targets
             .iter()
             .position(|t| matches!(t.kind, LandingKind::PaneSwap { .. }))
@@ -1029,16 +1163,25 @@ mod tests {
         for _ in 0..7 {
             cur = step_landing_target(&targets, cur, PaneDirection::Right);
         }
-        assert!(
-            matches!(targets[cur].kind, LandingKind::SplitEdge { zone: DropZone::Right }),
-            "expected Right SplitEdge, got {:?}",
-            targets[cur].kind
-        );
-        // Pressing Right again stays on Right SplitEdge instead of bouncing back inward.
-        assert_eq!(step_landing_target(&targets, cur, PaneDirection::Right), cur);
-        // Stepping back left leaves the outer edge onto an inner target.
-        let back = step_landing_target(&targets, cur, PaneDirection::Left);
+        assert!(!matches!(targets[cur].kind, LandingKind::SplitEdge { .. }));
+        let right_edge = target_edge_index(&targets, DropZone::Right).expect("right edge");
+        assert!(matches!(
+            targets[right_edge].kind,
+            LandingKind::SplitEdge { zone: DropZone::Right }
+        ));
+        let back = step_landing_target(&targets, right_edge, PaneDirection::Left);
         assert!(!matches!(targets[back].kind, LandingKind::SplitEdge { .. }));
+
+        // Adding mode omits Swap and uses Split labels (`WIN-02`).
+        let add_targets = compute_landing_targets_with_mode(&model, TabId(9), true);
+        assert_eq!(add_targets.len(), 3 * 4 + 4);
+        assert!(
+            add_targets
+                .iter()
+                .all(|t| !matches!(t.kind, LandingKind::PaneSwap { .. }))
+        );
+        assert!(add_targets.iter().any(|t| t.label == "Split right"));
+        assert!(add_targets.iter().any(|t| t.label == "Split at left edge"));
 
         let (moved, dir) = move_pane_layout(&group, TabId(12), PaneDirection::Right).expect("move right");
         assert_eq!(moved, vec![TabId(10), TabId(11), TabId(12)]);

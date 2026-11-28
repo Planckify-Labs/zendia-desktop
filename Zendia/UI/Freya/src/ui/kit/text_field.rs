@@ -51,6 +51,15 @@ impl TextFocusTracker {
     pub fn is_any_focused(&self) -> bool {
         self.focused_field.peek().is_some_and(|id| id.is_focused())
     }
+
+    /// Unfocuses the currently tracked [`TextField`], if any (`PG-01`).
+    pub fn blur_all(&self) {
+        if let Some(id) = *self.focused_field.peek() {
+            id.request_unfocus();
+            let mut state = self.focused_field;
+            state.set(None);
+        }
+    }
 }
 
 /// Installs [`TextFocusTracker`] in Freya context for the current window.
@@ -65,8 +74,8 @@ pub fn try_use_text_focus() -> Option<TextFocusTracker> {
 }
 
 /// Returns `true` if `e` is a text-editing or typing key that must stay inside a focused text input and never fall
-/// through to browser global shortcuts (such as `Ctrl+W` closing the tab).
-pub fn is_text_editing_key(e: &KeyboardEventData) -> bool {
+/// through to browser global shortcuts (such as `Ctrl+W` closing the tab when vim mode is off, `RT-05`).
+pub fn is_text_editing_key(e: &KeyboardEventData, vim_enabled: bool) -> bool {
     let ctrl_only =
         e.modifiers.contains(Modifiers::CONTROL) && !e.modifiers.intersects(Modifiers::ALT | Modifiers::META);
     let plain_or_shift = !e
@@ -89,7 +98,10 @@ pub fn is_text_editing_key(e: &KeyboardEventData) -> bool {
             ) => return true,
             Key::Character(ch) => {
                 let lower = ch.to_ascii_lowercase();
-                if matches!(lower.as_str(), "w" | "u" | "h" | "a" | "c" | "x" | "v" | "z" | "y") {
+                if matches!(lower.as_str(), "a" | "c" | "x" | "v" | "z" | "y") {
+                    return true;
+                }
+                if vim_enabled && matches!(lower.as_str(), "w" | "u" | "h") {
                     return true;
                 }
             }
@@ -97,16 +109,11 @@ pub fn is_text_editing_key(e: &KeyboardEventData) -> bool {
         }
         if matches!(
             e.code,
-            Code::KeyW
-                | Code::KeyU
-                | Code::KeyH
-                | Code::KeyA
-                | Code::KeyC
-                | Code::KeyX
-                | Code::KeyV
-                | Code::KeyZ
-                | Code::KeyY
+            Code::KeyA | Code::KeyC | Code::KeyX | Code::KeyV | Code::KeyZ | Code::KeyY
         ) {
+            return true;
+        }
+        if vim_enabled && matches!(e.code, Code::KeyW | Code::KeyU | Code::KeyH) {
             return true;
         }
     }
@@ -525,6 +532,7 @@ impl Component for TextField {
     fn render(&self) -> impl IntoElement {
         let theme = use_theme();
         let focus_tracker = try_use_text_focus();
+        let core_opt = crate::ui::core_view::try_use_core();
         let a11y_id = use_hook(|| self.a11y_id.unwrap_or_else(AccessibilityId::new_unique));
         let focus = use_focus(a11y_id);
         let holder = use_state(ParagraphHolder::default);
@@ -704,11 +712,14 @@ impl Component for TextField {
                 }
             }
 
-            // 4. Fork's Ctrl+W / Ctrl+U / Ctrl+H editing chords (never leak to browser shortcuts).
-            if let Some(changed) = {
-                let mut editor = editable.editor_mut().write();
-                apply_ctrl_delete_chord(&mut editor, &key, code, modifiers)
-            } {
+            // 4. Fork's Ctrl+W / Ctrl+U / Ctrl+H editing chords (applied only when vim mode is enabled, `RT-05`).
+            let vim_enabled = core_opt.as_ref().is_some_and(|c| c.model().peek().vim_mode_enabled);
+            if vim_enabled
+                && let Some(changed) = {
+                    let mut editor = editable.editor_mut().write();
+                    apply_ctrl_delete_chord(&mut editor, &key, code, modifiers)
+                }
+            {
                 if changed {
                     let next = editable.editor().peek().committed_text();
                     value.set(next.clone());

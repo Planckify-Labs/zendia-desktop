@@ -13,7 +13,9 @@
 use crate::ui::chrome::layout::BackdropEndpoints;
 use crate::ui::core_view::use_core;
 use crate::ui::theme::{CHROME_OVERLAY_LEVEL, ResolvedScheme, ResolvedTheme, Rgba, ThemeRole, motion, use_theme};
-use crate::ui::vim::mascot::{MASCOT_FULL_SIZE, MASCOT_REST_SCALE, VimMascot, mascot_mode_color};
+use crate::ui::vim::mascot::{
+    MASCOT_FULL_SIZE, MASCOT_REST_SCALE, SPRING_WHOLE, VimMascot, mascot_mode_color, spring_response,
+};
 use freya::animation::*;
 use freya::prelude::*;
 use std::time::Duration;
@@ -190,38 +192,51 @@ pub fn try_use_vim_statusline_state() -> Option<VimStatuslineState> {
     try_consume_context::<VimStatuslineState>()
 }
 
-/// Computes the per-mode window frame backdrop gradient when vim mode is enabled.
-///
-/// Mirrors Zen's single-dot space gradient tinted with the mode's bright Tokyonight hue (pink NORMAL, green INSERT,
-/// purple VISUAL, blue EXPLORER, yellow TOOLBAR, teal LIBRARY, orange WINDOW) so the sidebar and window frame tint
-/// clearly identify the active vim mode in both dark and light themes.
+/// Computes the per-mode window frame backdrop gradient when vim mode is enabled, inheriting `opacity` from the active
+/// space (`ZendiaStatusline.sys.mjs`, `SL-04`).
+pub fn vim_mode_backdrop_endpoints_with_opacity(
+    mode: InputMode,
+    scheme: ResolvedScheme,
+    opacity: f32,
+) -> BackdropEndpoints {
+    use zendia_browser_core::space_appearance::{
+        DotColorMode, GradientDot, PAD_COORD_SIZE, SpaceAppearance, compute_gradient,
+    };
+    let mode_rgb = mascot_mode_color(mode);
+    let app = SpaceAppearance {
+        dots: vec![GradientDot {
+            id: 0,
+            x: PAD_COORD_SIZE * 0.5,
+            y: PAD_COORD_SIZE * 0.5,
+            rgb: (mode_rgb.r, mode_rgb.g, mode_rgb.b),
+            is_primary: true,
+            mode: DotColorMode::ExplicitLightness,
+            lightness: if scheme == ResolvedScheme::Dark { 72.0 } else { 88.0 },
+        }],
+        opacity: opacity.clamp(0.25, 0.80),
+        ..SpaceAppearance::default()
+    };
+    let resolved = compute_gradient(&app, scheme == ResolvedScheme::Dark);
+    let first = resolved.stops.first().copied().unwrap_or((19, 19, 19));
+    let last = resolved.stops.last().copied().unwrap_or(first);
+    BackdropEndpoints {
+        start: Rgba::rgb(first.0, first.1, first.2),
+        end: Rgba::rgb(last.0, last.1, last.2),
+        angle_deg: resolved.angle_deg,
+    }
+}
+
+/// Computes the per-mode window frame backdrop gradient when vim mode is enabled (`SL-04`).
 pub fn vim_mode_backdrop_endpoints(
     mode: InputMode,
     scheme: ResolvedScheme,
     _theme: &ResolvedTheme,
 ) -> BackdropEndpoints {
-    let mode_rgb = mascot_mode_color(mode);
-    match scheme {
-        ResolvedScheme::Dark => {
-            let base_start = Rgba::rgb(22, 23, 31);
-            let base_end = Rgba::rgb(17, 18, 25);
-            BackdropEndpoints {
-                start: base_start.mix(mode_rgb, 0.27),
-                end: base_end.mix(mode_rgb, 0.21),
-                angle_deg: 165.0,
-            }
-        }
-        ResolvedScheme::Light => {
-            let base_start = Rgba::rgb(248, 248, 252);
-            let base_end = Rgba::rgb(242, 243, 248);
-            let lifted = mode_rgb.mix(Rgba::rgb(255, 255, 255), 0.56);
-            BackdropEndpoints {
-                start: base_start.mix(lifted, 0.68),
-                end: base_end.mix(lifted, 0.56),
-                angle_deg: 165.0,
-            }
-        }
-    }
+    vim_mode_backdrop_endpoints_with_opacity(
+        mode,
+        scheme,
+        zendia_browser_core::space_appearance::DEFAULT_GRADIENT_OPACITY,
+    )
 }
 
 /// Resting/active visual presence of the statusline.
@@ -236,11 +251,37 @@ pub enum StatuslinePresence {
 /// Resolves the effective statusline & window-tint mode: Explorer with active multi-row selection renders as purple
 /// `Visual` (`v`), matching `ZendiaStatusline.sys.mjs:743` (`VIM-SL-06`).
 pub fn effective_statusline_mode(mode: InputMode, explorer_selected_empty: bool) -> InputMode {
+    effective_statusline_mode_with_library(mode, explorer_selected_empty, false)
+}
+
+/// Resolves the effective statusline & window-tint mode including Library search/field insert state (`LIB-07`).
+pub fn effective_statusline_mode_with_library(
+    mode: InputMode,
+    explorer_selected_empty: bool,
+    library_inserting: bool,
+) -> InputMode {
     if mode == InputMode::Explorer && !explorer_selected_empty {
         InputMode::Visual
+    } else if mode == InputMode::Library && library_inserting {
+        InputMode::Insert
     } else {
         mode
     }
+}
+
+/// Reads whether a field inside the open Library currently owns keyboard focus (`LIB-07`).
+pub fn current_library_inserting() -> bool {
+    let spaces_renaming = crate::ui::library::sections::spaces::try_use_spaces_view_state()
+        .is_some_and(|s| s.renaming_space.read().is_some());
+    crate::ui::library::try_use_library_state().is_some_and(|lib| {
+        if !*lib.open.read() || !*lib.nav.keyboard_focused.read() {
+            return false;
+        }
+        let flag = *lib.nav.inserting.read();
+        let live = spaces_renaming || lib.nav.is_search_focused() || lib.nav.is_form_input_focused();
+        lib.nav.sync_inserting(spaces_renaming);
+        flag || live
+    })
 }
 
 /// Resolves the statusline's presence from settings, activity, scroll ducking, pointer proximity, stage width, and
@@ -487,6 +528,7 @@ impl Component for VimStatusline {
         let mut statusline_box = use_state(|| (0.0f32, 0.0f32, 0.0f32, 0.0f32));
         let mut home_box = use_state(|| (0.0f32, 0.0f32, 0.0f32, 0.0f32));
 
+        let library_inserting = current_library_inserting();
         let (
             vim_enabled,
             mode,
@@ -499,7 +541,11 @@ impl Component for VimStatusline {
             active_tab,
         ) = {
             let model = core.model().read();
-            let eff_mode = effective_statusline_mode(model.input_mode, model.focus.selection.is_empty());
+            let eff_mode = effective_statusline_mode_with_library(
+                model.input_mode,
+                model.focus.selection.is_empty(),
+                library_inserting,
+            );
             let group_title = model.which_key.as_ref().map(|wk| wk.title.clone());
             (
                 model.vim_mode_enabled,
@@ -516,7 +562,6 @@ impl Component for VimStatusline {
 
         let typed = format_typed_keys_with_group(pending_count, &pending_keys, wk_group_title.as_deref());
         let has_typing = !typed.is_empty();
-        let has_announcement = announcement.is_some();
         let wake_bump = vim_state.map(|s| *s.wake_bump.read()).unwrap_or(0);
 
         // Wake to full size for STATUSLINE_ACTIVE_MS on mode change, pending key completion, tab change, or vim toggle.
@@ -567,13 +612,14 @@ impl Component for VimStatusline {
         let panel_clearance = vim_state.map(|s| *s.side_panel_clearance.read()).unwrap_or(0.0);
         let overlay_obstacle = vim_state.and_then(|s| *s.overlay_obstacle.read());
         let (stage_w, stage_h) = vim_state.map(|s| *s.stage_size.read()).unwrap_or((0.0, 0.0));
-        let fullscreen = vim_state.is_some_and(|s| *s.fullscreen.read());
+        let onboarding_open = crate::ui::onboarding::try_use_onboarding_state().is_some_and(|s| s.is_open());
+        let fullscreen = vim_state.is_some_and(|s| *s.fullscreen.read()) || onboarding_open;
 
-        let presence = if self.force_shrunk && vim_enabled && statusline_settings.enabled {
+        let presence = if self.force_shrunk && vim_enabled && statusline_settings.enabled && !fullscreen {
             StatuslinePresence::Resting
-        } else if self.static_preview && vim_enabled && statusline_settings.enabled && !scrolling {
+        } else if self.static_preview && vim_enabled && statusline_settings.enabled && !scrolling && !fullscreen {
             match statusline_settings.show {
-                StatuslineShow::Never if !has_typing && !has_announcement => StatuslinePresence::Gone,
+                StatuslineShow::Never if !has_typing => StatuslinePresence::Gone,
                 _ => StatuslinePresence::Active,
             }
         } else {
@@ -582,7 +628,7 @@ impl Component for VimStatusline {
                 statusline_settings.enabled,
                 statusline_settings.show,
                 scrolling,
-                has_typing || has_announcement,
+                has_typing,
                 *recently_active.read(),
                 *pointer_near.read(),
                 stage_w,
@@ -637,18 +683,20 @@ impl Component for VimStatusline {
             AnimNum::new(from, to)
                 .duration(motion::MASCOT_SHRINK)
                 .ease(Ease::Out)
-                .function(motion::spring_fn())
+                .function(Function::Linear)
         });
         let shrink_t = if self.static_preview {
             if is_resting { 1.0 } else { 0.0 }
         } else {
-            shrink_anim.get().value().clamp(0.0, 1.05)
+            shrink_anim.get().value().clamp(0.0, 1.0)
         };
-        // Hold whole scale for the first 160ms (~0.31 of 520ms) while individual cells stagger (`VIM-SL-02`).
+        // Hold whole scale for the first 160ms (~0.31 of 520ms) while individual cells stagger (`VIM-SL-02`, `SL-04`).
         let held_scale_t = if is_resting {
-            ((shrink_t - 0.31) / 0.69).clamp(0.0, 1.0)
+            let local = ((shrink_t - 0.31) / 0.69).clamp(0.0, 1.0);
+            spring_response(local, SPRING_WHOLE, 0.36)
         } else {
-            (shrink_t / 0.69).clamp(0.0, 1.0)
+            let local = ((1.0 - shrink_t) / 0.69).clamp(0.0, 1.0);
+            1.0 - spring_response(local, SPRING_WHOLE, 0.36)
         };
         let animated_scale = (1.0 + (MASCOT_REST_SCALE - 1.0) * held_scale_t).clamp(0.25, 1.15);
 
@@ -716,15 +764,15 @@ impl Component for VimStatusline {
                 conf.on_creation(OnCreation::Finish);
                 conf.on_change(OnChange::Rerun);
                 AnimNum::new(0.0, 1.0)
-                    .duration(motion::STATUSLINE_MOVE)
+                    .duration(Duration::from_millis(520))
                     .ease(Ease::Out)
-                    .function(motion::spring_fn())
+                    .function(Function::Linear)
             },
         );
         let (dodge_x, dodge_y) = if self.static_preview {
             (target_dodge_x, target_dodge_y)
         } else {
-            let dt = dodge_anim.get().value();
+            let dt = spring_response(dodge_anim.get().value(), SPRING_WHOLE, 0.52);
             (
                 (dfx + (target_dodge_x - dfx) * dt).max(0.0),
                 (dfy + (target_dodge_y - dfy) * dt).max(0.0),
@@ -765,7 +813,6 @@ impl Component for VimStatusline {
                 .bottom(STATUSLINE_CORNER_GAP + dodge_y)
         };
 
-        let mode_color = mascot_mode_color(mode).to_color();
         let pill_bg = theme.color(ThemeRole::StatuslineBackground);
         let pill_fg = theme.color(ThemeRole::StatuslineText);
         let pill_border = theme.palette.ink.to_color();
@@ -794,42 +841,7 @@ impl Component for VimStatusline {
                 )
         });
 
-        let announcement_pill = announcement.map(|ann| {
-            rect()
-                .direction(Direction::Horizontal)
-                .cross_align(Alignment::center())
-                .spacing(6.0)
-                .padding(Gaps::new(4.0, 10.0, 4.0, 9.0))
-                .margin(Gaps::new(0.0, 0.0, 2.0, 0.0))
-                .corner_radius(CornerRadius::new_all(10.0))
-                .background(pill_bg)
-                .border(
-                    Border::new()
-                        .width(1.5)
-                        .alignment(BorderAlignment::Inner)
-                        .fill(mode_color),
-                )
-                .shadow(Shadow::new().y(2.0).blur(10.0).color(Color::from_argb(90, 0, 0, 0)))
-                .opacity(pop_t)
-                .child(
-                    rect()
-                        .width(Size::px(7.0))
-                        .height(Size::px(7.0))
-                        .corner_radius(CornerRadius::new_all(7.0))
-                        .background(mode_color),
-                )
-                .child(
-                    label()
-                        .text(ann.message)
-                        .font_size(12.0)
-                        .font_weight(FontWeight::MEDIUM)
-                        .max_lines(1)
-                        .text_overflow(TextOverflow::Ellipsis)
-                        .color(pill_fg),
-                )
-        });
-
-        // Visually-hidden accessible live-region announcer for mode switches (`VIM-SL-09`).
+        // Visually-hidden accessible live-region announcer for mode switches (`VIM-SL-09`, `SL-05`: no visible announcement pill).
         let sr_announcer = rect()
             .width(Size::px(1.0))
             .height(Size::px(1.0))
@@ -847,13 +859,12 @@ impl Component for VimStatusline {
                 .disable_blink(self.static_preview),
         );
 
-        let pills_group = (keys_pill.is_some() || announcement_pill.is_some()).then(|| {
+        let pills_group = keys_pill.map(|pill| {
             rect()
                 .direction(Direction::Horizontal)
                 .cross_align(Alignment::End)
                 .spacing(6.0)
-                .maybe_child(announcement_pill)
-                .maybe_child(keys_pill)
+                .child(pill)
         });
 
         let static_preview = self.static_preview;

@@ -30,6 +30,8 @@ pub struct ListNavConfig {
     pub typeahead: bool,
     /// Whether stepping past the ends wraps around.
     pub wrap: bool,
+    /// Whether vim navigation keys (`j`/`<C-n>`/`<C-j>`, `k`/`<C-p>`/`<C-k>`, `h`/`l` submenus, `q` close) are active (`MN-01`).
+    pub vim_keys: bool,
 }
 
 impl Default for ListNavConfig {
@@ -40,6 +42,7 @@ impl Default for ListNavConfig {
             submenus: false,
             typeahead: true,
             wrap: true,
+            vim_keys: false,
         }
     }
 }
@@ -53,6 +56,7 @@ impl ListNavConfig {
             submenus: true,
             typeahead: true,
             wrap: true,
+            vim_keys: false,
         }
     }
 
@@ -64,6 +68,7 @@ impl ListNavConfig {
             submenus: false,
             typeahead: true,
             wrap: false,
+            vim_keys: false,
         }
     }
 
@@ -76,7 +81,14 @@ impl ListNavConfig {
             submenus: false,
             typeahead: false,
             wrap: true,
+            vim_keys: false,
         }
+    }
+
+    /// Enables or disables vim menu/popup keys (`j`, `k`, `h`, `l`, `q`, `<C-n>`, `<C-p>`, `<C-j>`, `<C-k>`, `MN-01`).
+    pub fn with_vim_keys(mut self, vim_keys: bool) -> Self {
+        self.vim_keys = vim_keys;
+        self
     }
 }
 
@@ -98,6 +110,22 @@ pub enum ListNavAction {
 
 /// Decodes a [`KeyboardEventData`] into a [`ListNavAction`] under `config`.
 pub fn classify_list_key(e: &KeyboardEventData, config: ListNavConfig) -> Option<ListNavAction> {
+    if config.vim_keys && e.modifiers == Modifiers::CONTROL {
+        let lower = match &e.key {
+            Key::Character(ch) => Some(ch.to_ascii_lowercase()),
+            _ => None,
+        };
+        if matches!(e.code, Code::KeyN | Code::KeyJ) || matches!(lower.as_deref(), Some("n" | "j")) {
+            return Some(ListNavAction::MoveNext);
+        }
+        if matches!(e.code, Code::KeyP | Code::KeyK) || matches!(lower.as_deref(), Some("p" | "k")) {
+            return Some(ListNavAction::MovePrev);
+        }
+        if matches!(e.code, Code::KeyC | Code::BracketLeft) || matches!(lower.as_deref(), Some("c" | "[")) {
+            return Some(ListNavAction::Dismiss);
+        }
+    }
+
     let has_shortcut_mod = e
         .modifiers
         .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META);
@@ -117,6 +145,11 @@ pub fn classify_list_key(e: &KeyboardEventData, config: ListNavConfig) -> Option
         Key::Named(NamedKey::ArrowLeft) if config.submenus => Some(ListNavAction::CloseSubmenu),
         Key::Named(NamedKey::Enter) => Some(ListNavAction::Activate),
         Key::Character(ch) if ch == " " && config.space_activates => Some(ListNavAction::Activate),
+        Key::Character(ch) if config.vim_keys && ch == "j" => Some(ListNavAction::MoveNext),
+        Key::Character(ch) if config.vim_keys && ch == "k" => Some(ListNavAction::MovePrev),
+        Key::Character(ch) if config.vim_keys && config.submenus && ch == "l" => Some(ListNavAction::OpenSubmenu),
+        Key::Character(ch) if config.vim_keys && config.submenus && ch == "h" => Some(ListNavAction::CloseSubmenu),
+        Key::Character(ch) if config.vim_keys && ch == "q" => Some(ListNavAction::Dismiss),
         Key::Character(ch) if config.typeahead => {
             let mut chars = ch.chars();
             let c = chars.next()?;

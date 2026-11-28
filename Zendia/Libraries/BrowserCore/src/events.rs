@@ -84,6 +84,9 @@ pub enum Event {
     TabUnloadedChanged {
         unloaded_tabs: std::collections::BTreeSet<TabId>,
     },
+    PinnedCollapsedChanged {
+        collapsed_pinned_spaces: std::collections::BTreeSet<SpaceId>,
+    },
     FolderCreated {
         folder: Folder,
     },
@@ -266,6 +269,20 @@ pub enum Event {
     ZoomChanged {
         zoom_level: f32,
     },
+    TabZoomChanged {
+        tab_id: TabId,
+        zoom_level: f32,
+    },
+    VimPageStateChanged {
+        keyed_page: Option<TabId>,
+        page_editing: bool,
+        explicit_insert: bool,
+        mode_transition_pending: bool,
+    },
+    PageMoved {
+        tab_id: TabId,
+        scrolled: bool,
+    },
     AboutUpdateStatusChanged {
         status: crate::menus::AboutUpdateStatus,
     },
@@ -298,6 +315,18 @@ pub enum Event {
     PageFlashed {
         flash: crate::model::PageFlash,
     },
+    /// Opens a split pane's top chip for `1.2 s` after a keyboard split mutation outside Window mode (`WIN-11`).
+    PaneChipFlashed {
+        tab_id: TabId,
+        seq: u64,
+    },
+    /// Top-document jump targets scanned for an extension popup's automatic keyboard hints (`EXT-01`).
+    PopupTargetsUpdated {
+        tab_id: TabId,
+        targets: Vec<zendia_automation::PageTarget>,
+    },
+    /// The yank ring changed and should be saved to `<profile>/zendia-yank.json` after a 2 s debounce (`YNK-01`).
+    YankRingChanged,
     /// Signals subscribers to reload a fresh snapshot from `BrowserCore::model`.
     ModelReplaced,
     /// A command asked one window's view to do something that only changes view state, such as opening a panel or
@@ -325,6 +354,8 @@ pub enum ViewRequest {
     PanelOpen { panel_id: SidePanelId, focus: bool },
     /// Close a side panel.
     PanelClose { panel_id: SidePanelId },
+    /// Move keyboard focus to `panel_id` (`Some`) or back to the active page (`None`) along the panel row (`WIN-06`).
+    PanelFocusChanged { panel_id: Option<SidePanelId> },
     /// Toggle the model card on the agent panel's model chip.
     AgentModelCard,
     /// Open the instructions page inside the agent panel.
@@ -339,6 +370,7 @@ pub enum ViewRequest {
     AddressBarOpen {
         new_tab: bool,
         initial_query: Option<String>,
+        filter: crate::address_bar::AddressBarFilter,
     },
     /// Open the command palette.
     PaletteOpen { initial_query: Option<String> },
@@ -366,10 +398,11 @@ pub enum ViewRequest {
     LibraryClose,
     /// Open the extensions menu, or close it if it is open.
     ExtensionsMenuToggle,
-    /// Open a WebExtension's HTML popup view anchored near its toolbar/site button.
+    /// Open a WebExtension's HTML popup view anchored near its toolbar/site button (`from_keyboard` enables `EXT-01` popup labels).
     ExtensionPopupOpen {
         extension_id: ExtensionId,
         popup_url: String,
+        from_keyboard: bool,
     },
     /// Close any open WebExtension HTML popup view.
     ExtensionPopupClose,
@@ -407,6 +440,20 @@ pub enum ViewRequest {
     SettingsClose,
     /// Open the context menu for `tab_id` (`tab.menu`).
     TabMenu { tab_id: TabId },
+    /// Open the context menu for `folder_id` (`explorer.menu`).
+    FolderMenu { folder_id: FolderId },
+    /// Open the `+` create-new menu anchored to the sidebar footer (`explorer.create`).
+    CreateNewMenu,
+    /// Open the context or history menu for a toolbar item (`toolbar.menu`).
+    ToolbarItemMenu {
+        item_id: crate::contributions::ContributionId,
+    },
+    /// Prompt before closing/deleting a non-empty space (`<leader><Tab>d`, `NAV-13`).
+    SpaceDeleteConfirm {
+        space_id: SpaceId,
+        space_name: String,
+        tab_count: usize,
+    },
     /// Read the clipboard and open its URL or search in the current tab (`p`) or a new tab (`P`).
     UrlPaste { new_tab: bool },
     /// Open find in page (`/`).
@@ -420,7 +467,10 @@ pub enum ViewRequest {
     /// Keyboard navigation or action inside the open library panel.
     LibraryVimAction {
         action: crate::chrome_actions::LibraryVimAction,
+        count: u32,
     },
+    /// Toggle the accounts dropdown menu inside the Web Chat panel (`webchat.accounts`).
+    WebChatAccountsToggle,
 }
 
 /// Returned when the core's event bus has been dropped.

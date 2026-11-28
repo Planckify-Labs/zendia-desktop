@@ -45,6 +45,8 @@ pub struct PickerItem {
     pub key_badge: Option<String>,
     /// Optional custom raw SVG bytes `(cache_key, bytes)` rendered in place of an `ICON_TABLE` lookup.
     pub custom_icon_svg: Option<(String, Bytes)>,
+    /// Optional decoded/encoded WebExtension icon payload (`EXT-05`).
+    pub extension_icon: Option<zendia_browser_core::modules::ExtensionIcon>,
     /// Optional brand accent color used for selected grid tile glow.
     pub accent_color: Option<Color>,
     /// When true in grid layout, the icon fills 100% of its rounded icon plate.
@@ -73,6 +75,7 @@ impl PickerItem {
             detail: None,
             key_badge: None,
             custom_icon_svg: None,
+            extension_icon: None,
             accent_color: None,
             icon_fill: false,
             dimmed: false,
@@ -133,6 +136,11 @@ impl PickerItem {
 
     pub fn custom_icon_svg(mut self, cache_key: impl Into<String>, svg: Bytes) -> Self {
         self.custom_icon_svg = Some((cache_key.into(), svg));
+        self
+    }
+
+    pub fn extension_icon(mut self, icon: zendia_browser_core::modules::ExtensionIcon) -> Self {
+        self.extension_icon = Some(icon);
         self
     }
 
@@ -275,15 +283,22 @@ impl Component for PickerList {
         };
         let mut prev_cursor_y = use_state(|| target_cursor_y.unwrap_or(0.0));
         let mut from_cursor_y = use_state(|| target_cursor_y.unwrap_or(0.0));
+        let mut last_hl_row = use_state(|| self.highlighted);
+        let live_cursor_y = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(target_cursor_y.unwrap_or(0.0))));
         let mut cursor_glide_seq = use_state(|| 0u64);
-        if let Some(ty) = target_cursor_y
+        if *last_hl_row.peek() != self.highlighted {
+            last_hl_row.set(self.highlighted);
+            if let Some(ty) = target_cursor_y {
+                from_cursor_y.set(live_cursor_y.get());
+                prev_cursor_y.set(ty);
+                let next_seq = cursor_glide_seq.peek().wrapping_add(1);
+                cursor_glide_seq.set(next_seq);
+            }
+        } else if let Some(ty) = target_cursor_y
             && (*prev_cursor_y.peek() - ty).abs() > 0.5
         {
-            let prev = *prev_cursor_y.peek();
-            from_cursor_y.set(prev);
+            from_cursor_y.set(ty);
             prev_cursor_y.set(ty);
-            let next_seq = cursor_glide_seq.peek().wrapping_add(1);
-            cursor_glide_seq.set(next_seq);
         }
         let glide_seq = *cursor_glide_seq.read();
         let glide_from = *from_cursor_y.read();
@@ -300,6 +315,7 @@ impl Component for PickerList {
             },
         );
         let animated_cursor_y = glide_from + (glide_to - glide_from) * cursor_glide.get().value();
+        live_cursor_y.set(animated_cursor_y);
 
         let current = (self.highlighted, self.items.len());
         if *shown.peek() != Some(current) {
@@ -937,7 +953,18 @@ impl Component for VimPickerRow {
             ResolvedScheme::Light => Rgba::from_rgb_alpha(21, 20, 26, detail_alpha).to_color(),
         };
 
-        let icon_el: Option<Element> = if let Some((cache_key, bytes)) = &self.item.custom_icon_svg {
+        let icon_el: Option<Element> = if let Some(ext_icon) = &self.item.extension_icon {
+            Some(
+                crate::ui::extensions::ExtensionIconView::new(
+                    self.item.id.clone(),
+                    self.item.icon.clone().unwrap_or_else(|| "extension".to_string()),
+                    Some(ext_icon.clone()),
+                    16.0,
+                    ThemeRole::Text,
+                )
+                .into_element(),
+            )
+        } else if let Some((cache_key, bytes)) = &self.item.custom_icon_svg {
             Some(
                 SvgViewer::new((cache_key.clone(), bytes.clone()))
                     .width(Size::px(16.0))
@@ -1172,14 +1199,22 @@ impl Component for PickerGrid {
         });
         let mut prev_pos = use_state(|| target_pos.unwrap_or((0.0, 0.0)));
         let mut from_pos = use_state(|| target_pos.unwrap_or((0.0, 0.0)));
+        let mut last_hl_tile = use_state(|| self.highlighted);
+        let live_pos = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(target_pos.unwrap_or((0.0, 0.0)))));
         let mut glide_seq = use_state(|| 0u64);
-        if let Some((tx, ty)) = target_pos {
-            let (px, py) = *prev_pos.peek();
-            if (px - tx).abs() > 0.5 || (py - ty).abs() > 0.5 {
-                from_pos.set((px, py));
+        if *last_hl_tile.peek() != self.highlighted {
+            last_hl_tile.set(self.highlighted);
+            if let Some((tx, ty)) = target_pos {
+                from_pos.set(live_pos.get());
                 prev_pos.set((tx, ty));
                 let next = glide_seq.peek().wrapping_add(1);
                 glide_seq.set(next);
+            }
+        } else if let Some((tx, ty)) = target_pos {
+            let (px, py) = *prev_pos.peek();
+            if (px - tx).abs() > 0.5 || (py - ty).abs() > 0.5 {
+                from_pos.set((tx, ty));
+                prev_pos.set((tx, ty));
             }
         }
         let g_seq = *glide_seq.read();
@@ -1199,6 +1234,7 @@ impl Component for PickerGrid {
         let gt = cursor_glide.get().value();
         let cur_x = fx + (tx - fx) * gt;
         let cur_y = fy + (ty - fy) * gt;
+        live_pos.set((cur_x, cur_y));
 
         let current = (self.highlighted, self.items.len());
         if *shown.peek() != Some(current) {
@@ -1482,7 +1518,16 @@ impl Component for PickerGridTile {
             ));
 
         let icon_dim = if self.item.icon_fill { 60.0 } else { 38.0 };
-        let icon_el: Element = if let Some((cache_key, bytes)) = &self.item.custom_icon_svg {
+        let icon_el: Element = if let Some(ext_icon) = &self.item.extension_icon {
+            crate::ui::extensions::ExtensionIconView::new(
+                self.item.id.clone(),
+                self.item.icon.clone().unwrap_or_else(|| "extension".to_string()),
+                Some(ext_icon.clone()),
+                icon_dim,
+                ThemeRole::Ink,
+            )
+            .into_element()
+        } else if let Some((cache_key, bytes)) = &self.item.custom_icon_svg {
             SvgViewer::new((cache_key.clone(), bytes.clone()))
                 .width(Size::px(icon_dim))
                 .height(Size::px(icon_dim))

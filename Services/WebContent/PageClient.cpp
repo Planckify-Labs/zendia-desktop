@@ -25,9 +25,12 @@
 #include <LibIPC/TransportHandle.h>
 #include <LibJS/Console.h>
 #include <LibJS/Runtime/ConsoleObject.h>
+#include <LibJS/Runtime/NativeFunction.h>
+#include <LibJS/Runtime/PrimitiveString.h>
 #include <LibMedia/Sinks/AudioOutputFactory.h>
 #include <LibMediaClient/RemotePlaybackManager.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
+#include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/Internals/ExtensionBridge.h>
 #include <LibWeb/CSS/StyleScope.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
@@ -41,12 +44,16 @@
 #include <LibWeb/DOM/MutationType.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/NodeList.h>
+#include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/Editing/WritingSuggestionController.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
 #include <LibWeb/Geolocation/GeolocationCoordinates.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/HTMLInputElement.h>
+#include <LibWeb/HTML/HTMLSelectElement.h>
+#include <LibWeb/HTML/HTMLTextAreaElement.h>
 #include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
@@ -216,8 +223,10 @@ void PageClient::visit_edges(JS::Cell::Visitor& visitor)
         visitor.visit(controller.value);
     for (auto& reader : m_download_readers)
         visitor.visit(reader.value);
-    for (auto& world : m_embedder_worlds)
-        visitor.visit(world.value);
+    for (auto& world_list : m_embedder_worlds) {
+        for (auto& world : world_list.value)
+            visitor.visit(world);
+    }
     m_pending_dom_mutations.for_each([&](auto& pending_mutation) {
         visitor.visit(pending_mutation.target);
     });
@@ -970,17 +979,64 @@ void PageClient::did_finish_rendering_update()
     request_rendering_opportunity_if_needed();
 }
 
+static bool is_zendia_editable_node(Web::DOM::Node const* node)
+{
+    if (!node)
+        return false;
+    if (node->is_editable_or_editing_host())
+        return true;
+    if (auto const* text_area = as_if<Web::HTML::HTMLTextAreaElement>(*node))
+        return text_area->is_mutable();
+    if (auto const* select = as_if<Web::HTML::HTMLSelectElement>(*node))
+        return select->enabled();
+    if (auto const* input = as_if<Web::HTML::HTMLInputElement>(*node)) {
+        if (!input->is_mutable())
+            return false;
+        switch (input->type_state()) {
+        case Web::HTML::HTMLInputElement::TypeAttributeState::Button:
+        case Web::HTML::HTMLInputElement::TypeAttributeState::Checkbox:
+        case Web::HTML::HTMLInputElement::TypeAttributeState::Color:
+        case Web::HTML::HTMLInputElement::TypeAttributeState::FileUpload:
+        case Web::HTML::HTMLInputElement::TypeAttributeState::Hidden:
+        case Web::HTML::HTMLInputElement::TypeAttributeState::ImageButton:
+        case Web::HTML::HTMLInputElement::TypeAttributeState::RadioButton:
+        case Web::HTML::HTMLInputElement::TypeAttributeState::Range:
+        case Web::HTML::HTMLInputElement::TypeAttributeState::ResetButton:
+        case Web::HTML::HTMLInputElement::TypeAttributeState::SubmitButton:
+            return false;
+        default:
+            return true;
+        }
+    }
+    return false;
+}
+
 // The UI hears about the focused field with the input method state, which input events send. A page that moves the
 // focus by itself (autofocus, focus() from a script) sends none, so the focus is checked once each rendering update has
-// run: every focus move asks for one, and the autofocus candidates are focused during it.
+// run: every focus move asks for one, and the autofocus candidates are focused during it. Editable focus is also
+// reported on the generic embedder channel for controls that have no text selection (email, number, date, select).
 void PageClient::report_focused_area_change()
 {
     Optional<i64> focused_area_id;
+    bool editable_focus = false;
     if (auto navigable = page().hosted_focused_navigable()) {
         if (auto document = navigable->active_document()) {
-            if (auto focused_area = document->focused_area())
+            if (auto focused_area = document->focused_area()) {
                 focused_area_id = static_cast<i64>(focused_area->unique_id().value());
+                editable_focus = is_zendia_editable_node(focused_area.ptr());
+            } else if (document->is_editable_or_editing_host()) {
+                editable_focus = true;
+            }
         }
+    }
+    if (editable_focus != m_reported_editable_focus) {
+        m_reported_editable_focus = editable_focus;
+        client().async_did_reply_embedder_message(
+            m_id,
+            0,
+            true,
+            editable_focus ? "{\"kind\":\"editable_focus\",\"editing\":true}"_string
+                           : "{\"kind\":\"editable_focus\",\"editing\":false}"_string);
     }
     if (focused_area_id == m_reported_focused_area_id)
         return;
@@ -2947,6 +3003,118 @@ void PageClient::run_javascript(StringView js_source)
         dbgln("Exception :(");
 }
 
+GC::Ref<Web::Internals::ExtensionWorld> PageClient::ensure_embedder_world(Web::HTML::Window& window, String const& world_name)
+{
+    auto& worlds = m_embedder_worlds.ensure(world_name);
+    worlds.remove_all_matching([](auto const& existing) { return !existing || existing->is_detached(); });
+    for (auto& existing : worlds) {
+        if (&existing->window() == &window)
+            return *existing;
+    }
+
+    auto world = Web::Internals::ExtensionWorld::create(window, world_name);
+    worlds.append(world);
+
+    auto& realm = world->realm();
+    auto post_fn = JS::NativeFunction::create(
+        realm,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(*this),
+            [](PageClient& self, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                if (self.m_is_closed || vm.argument_count() == 0 || !vm.argument(0).is_string())
+                    return JS::js_undefined();
+                auto json = vm.argument(0).as_string().utf16_string().to_well_formed_utf8();
+                self.client().async_did_reply_embedder_message(self.m_id, 0, true, move(json));
+                return JS::js_undefined();
+            }),
+        1,
+        "__zendiaPost"_utf16_fly_string,
+        &realm);
+    realm.global_object().define_direct_property("__zendiaPost"_utf16_fly_string, post_fn, JS::Attribute::Configurable | JS::Attribute::Writable);
+
+    auto shadow_fn = JS::NativeFunction::create(
+        realm,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(world),
+            [](GC::Ref<Web::Internals::ExtensionWorld>& world, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                if (vm.argument_count() == 0 || !vm.argument(0).is_object())
+                    return JS::js_null();
+                auto* element = Web::Bindings::impl_from<Web::DOM::Element>(&vm.argument(0).as_object());
+                if (!element || !element->shadow_root() || element->shadow_root()->is_user_agent_internal())
+                    return JS::js_null();
+                return JS::Value { Web::Bindings::wrap(world->wrapper_world(), world->realm(), GC::Ptr<Web::Bindings::Wrappable> { element->shadow_root() }).ptr() };
+            }),
+        1,
+        "__zendiaShadowRoot"_utf16_fly_string,
+        &realm);
+    realm.global_object().define_direct_property("__zendiaShadowRoot"_utf16_fly_string, shadow_fn, JS::Attribute::Configurable | JS::Attribute::Writable);
+
+    auto eval_frame_fn = JS::NativeFunction::create(
+        realm,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(*this, world_name),
+            [](PageClient& self, String const& world_name, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+                if (self.m_is_closed || vm.argument_count() < 2 || !vm.argument(0).is_object() || !vm.argument(1).is_string())
+                    return JS::js_null();
+                auto* container = Web::Bindings::impl_from<Web::HTML::NavigableContainer>(&vm.argument(0).as_object());
+                if (!container)
+                    return JS::js_null();
+                auto* child_doc = const_cast<Web::DOM::Document*>(container->content_document_without_origin_check());
+                if (!child_doc || !child_doc->window() || !child_doc->browsing_context())
+                    return JS::js_null();
+                auto child_world = self.ensure_embedder_world(*child_doc->window(), world_name);
+                auto& child_settings = child_world->settings();
+                auto filename = ByteString::formatted("zendia://{}/frame", world_name);
+                auto source = vm.argument(1).as_string().utf16_string();
+                auto script = Web::HTML::ClassicScript::create(filename, move(source), child_settings, child_doc->url());
+                auto completion = script->run(Web::HTML::ClassicScript::RethrowErrors::Yes);
+                if (completion.is_error() || !completion.value().is_string())
+                    return JS::js_null();
+                return JS::PrimitiveString::create(vm, completion.value().as_string().utf16_string());
+            }),
+        2,
+        "__zendiaEvalFrame"_utf16_fly_string,
+        &realm);
+    realm.global_object().define_direct_property("__zendiaEvalFrame"_utf16_fly_string, eval_frame_fn, JS::Attribute::Configurable | JS::Attribute::Writable);
+
+    auto copy_fn = JS::NativeFunction::create(
+        realm,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(world),
+            [](GC::Ref<Web::Internals::ExtensionWorld>& world, JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
+                auto navigable = world->window().associated_document().navigable();
+                if (!navigable)
+                    return JS::Value(false);
+                return JS::Value(navigable->event_handler().perform_copy_action(Web::EventHandler::ClipboardActionTrigger::User));
+            }),
+        0,
+        "__zendiaCopy"_utf16_fly_string,
+        &realm);
+    realm.global_object().define_direct_property("__zendiaCopy"_utf16_fly_string, copy_fn, JS::Attribute::Configurable | JS::Attribute::Writable);
+
+    auto cut_fn = JS::NativeFunction::create(
+        realm,
+        GC::create_function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>(
+            realm.heap(),
+            GC::captures(world),
+            [](GC::Ref<Web::Internals::ExtensionWorld>& world, JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
+                auto navigable = world->window().associated_document().navigable();
+                if (!navigable)
+                    return JS::Value(false);
+                return JS::Value(navigable->event_handler().perform_cut_action(Web::EventHandler::ClipboardActionTrigger::User));
+            }),
+        0,
+        "__zendiaCut"_utf16_fly_string,
+        &realm);
+    realm.global_object().define_direct_property("__zendiaCut"_utf16_fly_string, cut_fn, JS::Attribute::Configurable | JS::Attribute::Writable);
+
+    return world;
+}
+
 void PageClient::deliver_embedder_message(u64 request_id, String world_name, String script_source)
 {
     auto active_document = page().local_traversable()->active_document();
@@ -2955,17 +3123,7 @@ void PageClient::deliver_embedder_message(u64 request_id, String world_name, Str
         return;
     }
 
-    auto window = active_document->window();
-    GC::Ptr<Web::Internals::ExtensionWorld> world;
-    if (auto existing = m_embedder_worlds.get(world_name); existing.has_value()) {
-        if (*existing && !(*existing)->is_detached() && &(*existing)->window() == window.ptr())
-            world = *existing;
-    }
-    if (!world) {
-        world = Web::Internals::ExtensionWorld::create(*window, world_name);
-        m_embedder_worlds.set(world_name, world);
-    }
-
+    auto world = ensure_embedder_world(*active_document->window(), world_name);
     auto& settings = world->settings();
     auto filename = ByteString::formatted("zendia://{}", world_name);
     auto script = Web::HTML::ClassicScript::create(filename, Utf16String::from_utf8(script_source), settings, active_document->url());

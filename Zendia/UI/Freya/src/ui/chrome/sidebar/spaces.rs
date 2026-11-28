@@ -57,9 +57,7 @@ impl Component for SpaceHeader {
             .unwrap_or_else(|| "Space".to_string());
         let icon = self.space.as_ref().map(|s| s.icon.clone()).unwrap_or_default();
         let is_renaming = space_id.is_some() && sidebar_state.is_some_and(|s| *s.renaming_space.read() == space_id);
-        let pinned_collapsed = space_id
-            .zip(sidebar_state)
-            .is_some_and(|(id, st)| st.is_pinned_collapsed(id));
+        let pinned_collapsed = space_id.is_some_and(|id| core.model().read().collapsed_pinned_spaces.contains(&id));
 
         // SPC-04: Hover fades in the `...` actions button over 100ms (`zen-workspaces.css:280-322`).
         let show_actions = hovered() && !is_renaming && !self.collapsed && space_id.is_some();
@@ -149,8 +147,9 @@ impl Component for SpaceHeader {
 
         // SPC-04: Leading icon / collapsible pinned-tabs chevron on hover when pinned tabs exist.
         let show_chevron = self.has_pinned_tabs && (hovered() || pinned_collapsed);
-        let leading_el: Option<Element> = if show_chevron && let (Some(id), Some(state)) = (space_id, sidebar_state) {
+        let leading_el: Option<Element> = if show_chevron && let Some(id) = space_id {
             let deg = chevron_rot.get().value();
+            let toggle_core = core.clone();
             Some(
                 KitTooltip::new(if pinned_collapsed {
                     "Show pinned tabs"
@@ -169,7 +168,10 @@ impl Component for SpaceHeader {
                         .on_pointer_down(|e: Event<PointerEventData>| e.stop_propagation())
                         .on_press(move |e: Event<PressEventData>| {
                             e.stop_propagation();
-                            state.toggle_pinned_collapsed(id);
+                            toggle_core.invoke_or_log(Command::SidebarSetPinnedCollapsed {
+                                space_id: id,
+                                collapsed: None,
+                            });
                         })
                         .child(
                             rect()

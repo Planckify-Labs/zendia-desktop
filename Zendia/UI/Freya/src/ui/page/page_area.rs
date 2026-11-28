@@ -27,8 +27,9 @@ use freya::animation::*;
 use freya::prelude::*;
 use std::time::{Duration, Instant};
 use zendia_browser_core::commands::Command;
-use zendia_browser_core::model::{SpaceId, SplitDirection, SplitGroup, SplitGroupId, TabId};
-use zendia_browser_core::split::{self, DropZone, HandleAxis, PaneRect};
+use zendia_browser_core::model::{SpaceId, SplitGroup, SplitGroupId, TabId};
+use zendia_browser_core::split::{self, DropZone, HandleAxis, PaneRect, SplitNode};
+use zendia_browser_core::split_actions::SplitAction;
 
 /// Space between split panes, as in Zen.
 pub const SPLIT_GAP: f32 = 6.0;
@@ -129,8 +130,7 @@ impl Component for PageArea {
         let sidebar_state = try_use_sidebar_state();
         let page_ctx = try_consume_context::<PageSurfaceContext>();
         let mut area = use_state(|| (0.0f32, 0.0f32, 0.0f32, 0.0f32));
-        let resize_preview = use_state(|| None::<(SplitGroupId, Vec<f32>)>);
-        let mut zoomed_pane = use_state(|| None::<TabId>);
+        let resize_preview = use_state(|| None::<(SplitGroupId, SplitNode)>);
         let rearrange_drag = use_state(|| None::<TabId>);
         let mut last_key = use_state(|| None::<(bool, u64)>);
         let mut last_active = use_state(|| None::<TabId>);
@@ -140,22 +140,30 @@ impl Component for PageArea {
         // Pending live-tab switch waiting for the newly selected Hub view to paint within `motion::TAB_PENDING`.
         let mut pending_slide = use_state(|| None::<(u64, f32, Instant)>);
 
-        let (panes, group, active_tab, active_tab_url, active_tab_view_id, active_space, order, motion_enabled, glance) = {
+        let (
+            panes,
+            active_tree,
+            group,
+            active_tab,
+            active_tab_url,
+            active_tab_view_id,
+            active_space,
+            order,
+            motion_enabled,
+            glance,
+        ) = {
             let model = core.model().read();
             let group = model.active_split_group().cloned();
-            let panes: Vec<Pane> = match &group {
-                Some(group) => {
-                    let ratios = match &*resize_preview.read() {
-                        Some((id, ratios)) if *id == group.id => ratios.clone(),
-                        _ => group.ratios.clone(),
-                    };
-                    split::pane_rects(group.direction, group.tab_ids.len(), &ratios)
-                        .into_iter()
-                        .zip(group.tab_ids.iter().copied())
-                        .map(|(rect, tab_id)| Pane { tab_id, rect })
-                        .collect()
-                }
-                None => model
+            let active_tree: Option<SplitNode> = group.as_ref().and_then(|grp| match &*resize_preview.read() {
+                Some((id, preview_tree)) if *id == grp.id => Some(preview_tree.clone()),
+                _ => split::effective_group_tree(grp),
+            });
+            let panes: Vec<Pane> = match (&group, &active_tree) {
+                (Some(_), Some(tree)) => split::tree_pane_rects(tree)
+                    .into_iter()
+                    .map(|(tab_id, rect)| Pane { tab_id, rect })
+                    .collect(),
+                _ => model
                     .active_tab
                     .map(|tab_id| Pane {
                         tab_id,
@@ -175,6 +183,7 @@ impl Component for PageArea {
                 .unwrap_or_default();
             (
                 panes,
+                active_tree,
                 group,
                 model.active_tab,
                 active_url,
@@ -186,14 +195,9 @@ impl Component for PageArea {
             )
         };
 
-        // Clear pane zoom if the zoomed tab left the active split group.
-        let current_zoom = *zoomed_pane.peek();
-        if let Some(zoomed_id) = current_zoom
-            && !group.as_ref().is_some_and(|g| g.tab_ids.contains(&zoomed_id))
-        {
-            zoomed_pane.set(None);
-        }
-        let active_zoom = *zoomed_pane.read();
+        let active_zoom = group
+            .as_ref()
+            .and_then(|g| g.zoomed_tab.filter(|z| g.tab_ids.contains(z)));
         let is_resizing = resize_preview.read().is_some();
 
         let is_empty_url = |url: &str| url.is_empty() || url == "about:blank" || url == "about:newtab";
@@ -394,18 +398,10 @@ impl Component for PageArea {
             if let Some(target) = swap_panes.iter().find(|pane| {
                 let (x, y, pw, ph) = pane_pixels(pane.rect, (w, h), true);
                 pane.tab_id != source_id && px >= x && px <= x + pw && py >= y && py <= y + ph
-            }) {
-                let mut reordered = grp.tab_ids.clone();
-                if let (Some(a), Some(b)) = (
-                    reordered.iter().position(|id| *id == source_id),
-                    reordered.iter().position(|id| *id == target.tab_id),
-                ) {
-                    reordered.swap(a, b);
-                    swap_core.invoke_or_log(Command::SplitTabs {
-                        tab_ids: reordered,
-                        direction: grp.direction,
-                    });
-                }
+            }) && let Some(mut tree) = split::effective_group_tree(grp)
+                && split::swap_leaves(&mut tree, source_id, target.tab_id)
+            {
+                swap_core.invoke_or_log(Command::Splits(SplitAction::UpdateTree { group_id: grp.id, tree }));
             }
         };
 
@@ -438,29 +434,19 @@ impl Component for PageArea {
                 in_split,
                 is_resizing,
                 zoomed: is_zoomed,
-                zoomed_pane,
                 rearrange_drag,
                 mode: self.mode,
             });
         }
 
-        if let Some(group) = &group
+        if let (Some(group), Some(tree)) = (&group, &active_tree)
             && width > 0.0
             && active_zoom.is_none()
         {
-            let ratios = match &*resize_preview.read() {
-                Some((id, ratios)) if *id == group.id => ratios.clone(),
-                _ => group.ratios.clone(),
-            };
-            for (position, handle) in split::split_handles(group.direction, group.tab_ids.len(), &ratios)
-                .into_iter()
-                .enumerate()
-            {
+            for (position, handle) in split::tree_split_handles(tree).into_iter().enumerate() {
                 content = content.child(SplitHandleView {
                     group_id: group.id,
-                    direction: group.direction,
-                    count: group.tab_ids.len(),
-                    ratios: ratios.clone(),
+                    tree: tree.clone(),
                     handle,
                     area: (origin_x, origin_y, width, height),
                     preview: resize_preview,
@@ -628,7 +614,6 @@ struct SplitPaneView {
     in_split: bool,
     is_resizing: bool,
     zoomed: bool,
-    zoomed_pane: State<Option<TabId>>,
     rearrange_drag: State<Option<TabId>>,
     mode: PaneMode,
 }
@@ -780,7 +765,6 @@ impl Component for SplitPaneView {
                 active: self.active,
                 pane_hovered: *pane_hovered.read(),
                 zoomed: self.zoomed,
-                zoomed_pane: self.zoomed_pane,
                 rearrange_drag: self.rearrange_drag,
                 can_unsplit: self.group.is_some(),
             }
@@ -796,7 +780,7 @@ impl Component for SplitPaneView {
 }
 
 /// Hover-revealed 3-dot nub (`120 ms`, accent dots on active pane) and `150 ms`-delayed expandable pane action chip
-/// (rearrange drag handle, favicon, title, Fill View/Zoom, Move to Own Tab, Close) (`SV-01`, `SV-09`).
+/// (rearrange drag handle, favicon, title, Fill View/Zoom, Move to Own Tab, Close) (`SV-01`, `SV-09`, `WIN-11`).
 #[derive(Clone, PartialEq)]
 struct SplitPaneTopHandle {
     tab_id: TabId,
@@ -806,7 +790,6 @@ struct SplitPaneTopHandle {
     active: bool,
     pane_hovered: bool,
     zoomed: bool,
-    zoomed_pane: State<Option<TabId>>,
     rearrange_drag: State<Option<TabId>>,
     can_unsplit: bool,
 }
@@ -818,9 +801,33 @@ impl Component for SplitPaneTopHandle {
         let menu_state = try_use_menu_state();
         let mut handle_hovered = use_state(|| false);
         let mut chip_expanded = use_state(|| false);
+        let mut chip_flashed = use_state(|| false);
+        let mut last_flash_seq = use_state(|| core.model().peek().chip_flash.map(|(_, s)| s).unwrap_or(0));
         let mut hover_gen = use_state(|| 0u64);
 
-        let show_nub = (self.pane_hovered || self.zoomed || self.active) && !*chip_expanded.read();
+        // `1.2 s` pane-chip flash after keyboard split mutations outside Window mode (`WIN-11`).
+        let model_flash = core.model().read().chip_flash;
+        if let Some((flashed_tab, seq)) = model_flash
+            && seq != *last_flash_seq.peek()
+        {
+            last_flash_seq.set(seq);
+            if flashed_tab == self.tab_id {
+                chip_flashed.set_if_modified(true);
+                let mut flash_state = chip_flashed;
+                let observed_seq = last_flash_seq;
+                spawn(async move {
+                    timer(Duration::from_millis(1200)).await;
+                    if *observed_seq.peek() == seq {
+                        flash_state.set_if_modified(false);
+                    }
+                });
+            } else {
+                chip_flashed.set_if_modified(false);
+            }
+        }
+
+        let expanded = *chip_expanded.read() || *chip_flashed.read();
+        let show_nub = (self.pane_hovered || self.zoomed || self.active) && !expanded;
         let nub_anim = use_animation_with_dependencies(&show_nub, move |conf, shown| {
             conf.on_creation(OnCreation::Finish);
             conf.on_change(OnChange::Rerun);
@@ -830,7 +837,6 @@ impl Component for SplitPaneTopHandle {
                 .ease(Ease::Out)
                 .function(motion::ease_out_fn())
         });
-        let expanded = *chip_expanded.read();
         let chip_anim = use_animation_with_dependencies(&expanded, move |conf, open| {
             conf.on_creation(OnCreation::Finish);
             conf.on_change(OnChange::Rerun);
@@ -915,8 +921,8 @@ impl Component for SplitPaneTopHandle {
         });
 
         let chip = (chip_t > 0.01 || expanded).then(|| {
-            let mut zoom_state = self.zoomed_pane;
             let mut drag_state = self.rearrange_drag;
+            let zoom_core = core.clone();
             let detach_core = core.clone();
             let close_core = core.clone();
             let zoomed = self.zoomed;
@@ -977,14 +983,14 @@ impl Component for SplitPaneTopHandle {
                 )
                 .child(SplitChipButton {
                     icon: if zoomed { "fullscreen-exit" } else { "fullscreen" },
-                    label: if zoomed { "Restore split view" } else { "Fill view" },
+                    label: if zoomed {
+                        "Show all panes"
+                    } else {
+                        "Fill the view with this pane"
+                    },
                     danger: false,
                     on_press: EventHandler::new(move |_| {
-                        if zoomed {
-                            zoom_state.set(None);
-                        } else {
-                            zoom_state.set(Some(tab_id));
-                        }
+                        zoom_core.invoke_or_log(Command::Splits(SplitAction::Zoom { tab_id: Some(tab_id) }));
                     }),
                 })
                 .maybe_child(self.can_unsplit.then(|| SplitChipButton {
@@ -1079,20 +1085,18 @@ impl Component for SplitChipButton {
     }
 }
 
-/// A draggable boundary between panes. Dragging previews the new sizes; releasing invokes `split.resize`.
-/// Double-clicking equalizes panes to default shares (`SV-02`). Grabber fades in over `100 ms` on hover (`SV-06`).
+/// A draggable boundary between panes. Dragging previews the new sizes; releasing commits `SplitAction::UpdateTree`.
+/// Double-clicking equalizes panes under that container (`SV-02`). Grabber fades in over `100 ms` on hover (`SV-06`).
 #[derive(Clone, PartialEq)]
 struct SplitHandleView {
     group_id: SplitGroupId,
-    direction: SplitDirection,
-    count: usize,
-    ratios: Vec<f32>,
+    tree: SplitNode,
     handle: split::SplitHandle,
     /// The page area in window coordinates: x, y, width, height.
     area: (f32, f32, f32, f32),
-    preview: State<Option<(SplitGroupId, Vec<f32>)>>,
+    preview: State<Option<(SplitGroupId, SplitNode)>>,
     highlight: bool,
-    /// Position among the group's handles; two grid handles can share a ratio index.
+    /// Position among the group's handles.
     slot: usize,
 }
 
@@ -1121,10 +1125,10 @@ impl Component for SplitHandleView {
             ),
         };
 
-        let (direction, count, ratios, group_id) = (self.direction, self.count, self.ratios.clone(), self.group_id);
+        let (tree, group_id) = (self.tree.clone(), self.group_id);
         let mut preview = self.preview;
         let on_global_pointer_move = {
-            let ratios = ratios.clone();
+            let tree = tree.clone();
             move |e: Event<PointerEventData>| {
                 if !*dragging.peek() {
                     return;
@@ -1133,7 +1137,7 @@ impl Component for SplitHandleView {
                     HandleAxis::Column => (e.global_location().x as f32 - ox) / width.max(1.0),
                     HandleAxis::Row => (e.global_location().y as f32 - oy) / height.max(1.0),
                 };
-                let next = split::resize_ratios(direction, count, &ratios, handle.index, fraction);
+                let next = split::resize_tree_handle(&tree, handle.index, fraction);
                 preview.set(Some((group_id, next)));
             }
         };
@@ -1144,8 +1148,11 @@ impl Component for SplitHandleView {
             }
             dragging.set(false);
             let finished = preview.write().take();
-            if let Some((group_id, ratios)) = finished {
-                up_core.invoke_or_log(Command::SplitResize { group_id, ratios });
+            if let Some((group_id, next_tree)) = finished {
+                up_core.invoke_or_log(Command::Splits(SplitAction::UpdateTree {
+                    group_id,
+                    tree: next_tree,
+                }));
             }
         };
 
@@ -1166,6 +1173,7 @@ impl Component for SplitHandleView {
         };
 
         let dbl_core = core.clone();
+        let dbl_tree = tree;
         rect()
             .layer(Layer::Relative(10))
             .position(Position::new_absolute().left(left).top(top))
@@ -1190,10 +1198,11 @@ impl Component for SplitHandleView {
                     last_down.set(None);
                     dragging.set(false);
                     preview.set(None);
-                    dbl_core.invoke_or_log(Command::SplitResize {
+                    let equalized = split::equalize_tree_at_handle(&dbl_tree, handle.index);
+                    dbl_core.invoke_or_log(Command::Splits(SplitAction::UpdateTree {
                         group_id,
-                        ratios: split::default_ratios(direction, count),
-                    });
+                        tree: equalized,
+                    }));
                 } else {
                     last_down.set(Some(now));
                     dragging.set(true);
@@ -1335,6 +1344,7 @@ impl Component for PlaceholderPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zendia_browser_core::model::SplitDirection;
 
     #[test]
     fn panes_leave_a_gap_between_them() {

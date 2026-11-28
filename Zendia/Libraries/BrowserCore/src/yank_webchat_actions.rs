@@ -6,7 +6,10 @@
 
 //! Yank ring (`yank.*`) and WebChat vim actions (`webchat.*`).
 
-use crate::commands::{Command, CommandDescriptor, CommandError};
+use crate::commands::{ArgumentSchema, ArgumentType, Command, CommandDescriptor, CommandError};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Longer texts are not kept in the yank ring, matching `ZendiaYankRing.sys.mjs`.
 pub const MAX_YANK_LENGTH: usize = 100_000;
@@ -14,12 +17,78 @@ pub const MAX_YANK_LENGTH: usize = 100_000;
 /// Default maximum number of entries kept in the yank ring.
 pub const DEFAULT_YANK_RING_LENGTH: usize = 100;
 
+/// Debounce delay before flushing `zendia-yank.json` (`ZendiaYank.sys.mjs:47`, `YNK-01`).
+pub const YANK_SAVE_DELAY_MS: u64 = 2000;
+
+/// Current Unix epoch timestamp in milliseconds.
+pub fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Formats relative entry age matching `ZendiaYank.sys.mjs:ago` (`now`, `5m`, `3h`, `2d`, `YNK-05`).
+pub fn format_yank_age(now_ms: u64, entry_time_ms: u64) -> String {
+    if entry_time_ms == 0 || now_ms <= entry_time_ms {
+        return "now".to_string();
+    }
+    let diff_ms = now_ms - entry_time_ms;
+    let minutes = (diff_ms + 30_000) / 60_000;
+    if minutes < 1 {
+        "now".to_string()
+    } else if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 1440 {
+        let hours = (minutes + 30) / 60;
+        format!("{hours}h")
+    } else {
+        let days = (minutes + 720) / 1440;
+        format!("{days}d")
+    }
+}
+
+/// Returns the default yank-ring persistence path (`$XDG_CONFIG_HOME/zendia/zendia-yank.json`, `YNK-01`).
+pub fn yank_ring_profile_path() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("zendia").join("zendia-yank.json"));
+    }
+    std::env::var("HOME").ok().filter(|h| !h.is_empty()).map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join("zendia")
+            .join("zendia-yank.json")
+    })
+}
+
+/// Loads a persisted [`YankRing`] from `path`, returning `None` when absent or unreadable (`YNK-01`).
+pub fn load_yank_ring_from(path: &Path) -> Option<YankRing> {
+    YankRing::load_from_path(path)
+}
+
+/// Atomically writes `ring` as formatted JSON to `path` (`YNK-01`).
+pub fn save_yank_ring_to(path: &Path, ring: &YankRing) -> std::io::Result<()> {
+    ring.save_to_path(path)
+}
+
 /// One entry in the yank ring.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct YankEntry {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default = "now_unix_ms", alias = "time")]
+    pub time_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedYankFile {
+    #[serde(default)]
+    entries: Vec<YankEntry>,
 }
 
 /// Deduplicated, newest-first ring of yanked texts (mirrors `ZendiaYankRing`).
@@ -43,6 +112,44 @@ impl YankRing {
         }
     }
 
+    pub fn from_entries(max_len: usize, entries: Vec<YankEntry>) -> Self {
+        let mut ring = Self::new(max_len);
+        for entry in entries.into_iter().rev() {
+            ring.add_at(entry.text, entry.url, entry.title, entry.time_ms);
+        }
+        ring
+    }
+
+    pub fn load_from_path(path: &Path) -> Option<Self> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        Self::from_json_str(&raw).ok()
+    }
+
+    pub fn from_json_str(raw: &str) -> Result<Self, serde_json::Error> {
+        if let Ok(file) = serde_json::from_str::<PersistedYankFile>(raw) {
+            return Ok(Self::from_entries(DEFAULT_YANK_RING_LENGTH, file.entries));
+        }
+        let entries: Vec<YankEntry> = serde_json::from_str(raw)?;
+        Ok(Self::from_entries(DEFAULT_YANK_RING_LENGTH, entries))
+    }
+
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        let payload = PersistedYankFile {
+            entries: self.entries.clone(),
+        };
+        serde_json::to_string_pretty(&payload)
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = self
+            .to_json_string()
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        std::fs::write(path, json)
+    }
+
     pub fn entries(&self) -> &[YankEntry] {
         &self.entries
     }
@@ -55,17 +162,30 @@ impl YankRing {
         self.entries.len()
     }
 
-    /// Adds `text` to the front of the ring. If already present, moves it to the front.
-    /// Returns `true` if the ring changed.
+    /// Adds `text` to the front of the ring stamped with the current time.
+    /// If already at index 0 with the same text, leaves the ring unchanged.
     pub fn add(&mut self, text: String, url: Option<String>, title: Option<String>) -> bool {
-        if text.trim().is_empty() || text.len() > MAX_YANK_LENGTH {
+        self.add_at(text, url, title, now_unix_ms())
+    }
+
+    /// Adds `text` at explicit timestamp `time_ms` (in Unix ms).
+    pub fn add_at(&mut self, text: String, url: Option<String>, title: Option<String>, time_ms: u64) -> bool {
+        if text.trim().is_empty() || text.chars().count() > MAX_YANK_LENGTH {
             return false;
         }
         if self.entries.first().is_some_and(|e| e.text == text) {
             return false;
         }
         self.entries.retain(|e| e.text != text);
-        self.entries.insert(0, YankEntry { text, url, title });
+        self.entries.insert(
+            0,
+            YankEntry {
+                text,
+                url,
+                title,
+                time_ms,
+            },
+        );
         self.entries.truncate(self.max_len);
         true
     }
@@ -75,8 +195,13 @@ impl YankRing {
         self.entries.get(index)
     }
 
-    pub fn clear(&mut self) {
-        self.entries.clear();
+    pub fn clear(&mut self) -> bool {
+        if self.entries.is_empty() {
+            false
+        } else {
+            self.entries.clear();
+            true
+        }
     }
 }
 
@@ -92,7 +217,14 @@ pub enum YankWebChatAction {
     YankClear,
     YankPutPrev,
     YankPutNext,
+    /// Copies the active page's title and URL as a Markdown link `[title](url)` (`yank.urlMarkdown`, Appendix A).
+    YankUrlMarkdown,
+    WebChatOpen {
+        site_id: Option<String>,
+    },
     WebChatSelect,
+    WebChatAccounts,
+    WebChatSync,
     WebChatNewChatAll,
     WebChatAskPrompt,
     WebChatSummarizePage,
@@ -116,7 +248,11 @@ impl YankWebChatAction {
             Self::YankClear => "yank.clear",
             Self::YankPutPrev => "yank.put_prev",
             Self::YankPutNext => "yank.put_next",
+            Self::YankUrlMarkdown => "yank.url_markdown",
+            Self::WebChatOpen { .. } => "webchat.open",
             Self::WebChatSelect => "webchat.select",
+            Self::WebChatAccounts => "webchat.accounts",
+            Self::WebChatSync => "webchat.sync",
             Self::WebChatNewChatAll => "webchat.new_chat_all",
             Self::WebChatAskPrompt => "webchat.ask",
             Self::WebChatSummarizePage => "webchat.summarize_page",
@@ -166,21 +302,28 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
             },
         },
         "yank.clear" => YankWebChatAction::YankClear,
-        "yank.put_prev" => YankWebChatAction::YankPutPrev,
-        "yank.put_next" => YankWebChatAction::YankPutNext,
+        "yank.put_prev" | "yank.putPrev" => YankWebChatAction::YankPutPrev,
+        "yank.put_next" | "yank.putNext" => YankWebChatAction::YankPutNext,
+        "yank.url_markdown" | "yank.urlMarkdown" => YankWebChatAction::YankUrlMarkdown,
+        "webchat.open" => YankWebChatAction::WebChatOpen {
+            site_id: arg("site_id").filter(|s| !s.trim().is_empty()).map(str::to_string),
+        },
         "webchat.select" => YankWebChatAction::WebChatSelect,
-        "webchat.new_chat_all" => YankWebChatAction::WebChatNewChatAll,
-        "webchat.summarize_page" => YankWebChatAction::WebChatSummarizePage,
-        "webchat.ask_image" => YankWebChatAction::WebChatAskImage,
-        "webchat.ask_region" => YankWebChatAction::WebChatAskRegion,
-        "webchat.ask_tabs" => YankWebChatAction::WebChatAskTabs,
-        "webchat.put_reply" => YankWebChatAction::WebChatPutReply,
+        "webchat.accounts" => YankWebChatAction::WebChatAccounts,
+        "webchat.sync" => YankWebChatAction::WebChatSync,
+        "webchat.new_chat_all" | "webchat.newChatAll" => YankWebChatAction::WebChatNewChatAll,
+        "webchat.ask" => YankWebChatAction::WebChatAskPrompt,
+        "webchat.summarize_page" | "webchat.summarizePage" => YankWebChatAction::WebChatSummarizePage,
+        "webchat.ask_image" | "webchat.askImage" => YankWebChatAction::WebChatAskImage,
+        "webchat.ask_region" | "webchat.askRegion" => YankWebChatAction::WebChatAskRegion,
+        "webchat.ask_tabs" | "webchat.askTabs" => YankWebChatAction::WebChatAskTabs,
+        "webchat.put_reply" | "webchat.putReply" => YankWebChatAction::WebChatPutReply,
         "webchat.explain" => YankWebChatAction::WebChatExplain,
         "webchat.summarize" => YankWebChatAction::WebChatSummarize,
         "webchat.translate" => YankWebChatAction::WebChatTranslate,
         "webchat.define" => YankWebChatAction::WebChatDefine,
-        "webchat.fact_check" => YankWebChatAction::WebChatFactCheck,
-        "webchat.ask_about" => YankWebChatAction::WebChatAskAbout,
+        "webchat.fact_check" | "webchat.factCheck" => YankWebChatAction::WebChatFactCheck,
+        "webchat.ask_about" | "webchat.askAbout" => YankWebChatAction::WebChatAskAbout,
         _ => return Ok(None),
     };
     Ok(Some(Command::YankWebChat(action)))
@@ -202,12 +345,28 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             "Put Next Yank",
             "Put the yank after the last one put in the field",
         ),
+        (
+            "yank.url_markdown",
+            "Copy Markdown Link",
+            "Copy the current page's title and address as a Markdown link",
+        ),
         ("webchat.select", "Select Web Chat Site", "Pick a Web Chat site"),
+        (
+            "webchat.accounts",
+            "Web Chat Accounts",
+            "Open the accounts menu in the Web Chat panel",
+        ),
+        (
+            "webchat.sync",
+            "Sync Web Chat Logins",
+            "Refresh login state on the active Web Chat site",
+        ),
         (
             "webchat.new_chat_all",
             "New Chat on Every Web Chat Site",
             "Start a fresh chat on every configured Web Chat site",
         ),
+        ("webchat.ask", "Ask Web Chat", "Ask Web Chat about the current page"),
         (
             "webchat.summarize_page",
             "Summarize the Page in Web Chat",
@@ -235,36 +394,36 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
         ),
         (
             "webchat.explain",
-            "Explain Selection",
+            "Explain the Selection",
             "Ask Web Chat to explain the selection",
         ),
         (
             "webchat.summarize",
-            "Summarize Selection",
+            "Summarize the Selection",
             "Ask Web Chat to summarize the selection",
         ),
         (
             "webchat.translate",
-            "Translate Selection",
+            "Translate the Selection",
             "Ask Web Chat to translate the selection",
         ),
         (
             "webchat.define",
-            "Define Selection",
+            "Define the Selection",
             "Ask Web Chat to define the selection",
         ),
         (
             "webchat.fact_check",
-            "Fact Check Selection",
+            "Fact-Check the Selection",
             "Ask Web Chat to fact-check the selection",
         ),
         (
             "webchat.ask_about",
-            "Ask About Selection",
+            "Ask About the Selection…",
             "Ask Web Chat a question about the selection",
         ),
     ];
-    items
+    let mut out: Vec<CommandDescriptor> = items
         .iter()
         .map(|&(name, title, description)| CommandDescriptor {
             name: name.to_string(),
@@ -272,7 +431,19 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             description: description.to_string(),
             arguments: Vec::new(),
         })
-        .collect()
+        .collect();
+    out.push(CommandDescriptor {
+        name: "webchat.open".to_string(),
+        title: "Open Web Chat Site".to_string(),
+        description: "Select a Web Chat site and open the Web Chat side panel".to_string(),
+        arguments: vec![ArgumentSchema::new(
+            "site_id",
+            ArgumentType::String,
+            false,
+            "Optional Web Chat site ID to select before opening",
+        )],
+    });
+    out
 }
 
 #[cfg(test)]

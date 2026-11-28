@@ -257,9 +257,14 @@ pub struct BrowserSettings {
     pub glance_enabled: bool,
     pub glance_trigger: GlanceTrigger,
 
-    // Agents
+    // Vim Mode (`CFG-05`)
+    pub vim_leader: String,
+    pub vim_timeoutlen: u64,
+
+    // Agents (`AGK-03`)
     pub agent_steal_focus: bool,
     pub agent_loop_enabled: bool,
+    pub dictation_hold_key: String,
 
     // Plugins
     pub plugins_auto_update: bool,
@@ -292,8 +297,12 @@ impl Default for BrowserSettings {
             glance_enabled: true,
             glance_trigger: GlanceTrigger::Ctrl,
 
+            vim_leader: "<Space>".to_string(),
+            vim_timeoutlen: 300,
+
             agent_steal_focus: false,
             agent_loop_enabled: true,
+            dictation_hold_key: "<A-Space>".to_string(),
 
             plugins_auto_update: true,
         }
@@ -662,6 +671,15 @@ pub fn settings_catalog() -> Vec<SettingEntry> {
         .keywords(&["vim", "neovim", "keyboard", "modal", "keymaps", "shortcuts"])
         .command("vim.set_enabled"),
         SettingEntry::new(
+            "vim.statusline_enabled",
+            SettingsGroupId::Vim,
+            "Statusline",
+            "Show mode indicator",
+            "Display Zendia's mode mascot and pending keys in the bottom corner when Vim mode is on.",
+            SettingControl::Toggle,
+        )
+        .keywords(&["statusline", "mascot", "indicator", "show", "hide"]),
+        SettingEntry::new(
             "vim.statusline_show",
             SettingsGroupId::Vim,
             "Statusline",
@@ -866,6 +884,7 @@ pub fn setting_bool_value(model: &BrowserModel, key: &str) -> Option<bool> {
         "spaces.continue_where_left_off" => Some(s.continue_where_left_off),
         "glance.enabled" => Some(s.glance_enabled),
         "vim.enabled" => Some(model.vim_mode_enabled),
+        "vim.statusline_enabled" => Some(model.statusline.enabled),
         "agent.steal_focus" => Some(s.agent_steal_focus),
         "agent.loop_enabled" => Some(s.agent_loop_enabled),
         "plugins.enabled" => Some(model.plugins_enabled),
@@ -1015,6 +1034,9 @@ pub fn command_for_setting_change(key: &str, value: &str) -> Option<Command> {
         "vim.enabled" => Some(Command::VimSetEnabled {
             enabled: parse_bool(value)?,
         }),
+        "vim.statusline_enabled" => Some(Command::StatuslineSetEnabled {
+            enabled: parse_bool(value)?,
+        }),
         "vim.statusline_show" => Some(Command::StatuslineSetShow {
             show: StatuslineShow::parse(value)?,
         }),
@@ -1082,8 +1104,39 @@ pub fn apply_browser_setting(settings: &mut BrowserSettings, key: &str, value: &
             settings.glance_trigger =
                 GlanceTrigger::parse(value).ok_or_else(|| format!("unknown Glance trigger `{value}`"))?;
         }
+        "vim.leader" | "zendia.leader" => {
+            let trimmed = if value == " " { "<Space>" } else { value.trim() };
+            if trimmed.is_empty() {
+                settings.vim_leader = "<Space>".to_string();
+            } else {
+                if trimmed.to_ascii_lowercase().contains("<leader>") {
+                    return Err("leader cannot contain <leader>".to_string());
+                }
+                zendia_keymap::KeySequence::parse(trimmed)
+                    .map_err(|e| format!("invalid leader key `{trimmed}`: {e}"))?;
+                settings.vim_leader = trimmed.to_string();
+            }
+        }
+        "vim.timeoutlen" | "zendia.timeoutlen" => {
+            let ms: u64 = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("expected non-negative milliseconds for `{key}`, got `{value}`"))?;
+            settings.vim_timeoutlen = ms.clamp(10, 10_000);
+        }
         "agent.steal_focus" => settings.agent_steal_focus = bool_val(value)?,
         "agent.loop_enabled" => settings.agent_loop_enabled = bool_val(value)?,
+        "agent.dictation_hold_key" | "zendia.dictation.hold-key" => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                settings.dictation_hold_key = "<A-Space>".to_string();
+            } else {
+                trimmed
+                    .parse::<zendia_keymap::KeyStroke>()
+                    .map_err(|e| format!("invalid dictation key `{trimmed}`: {e}"))?;
+                settings.dictation_hold_key = trimmed.to_string();
+            }
+        }
         "plugins.auto_update" => settings.plugins_auto_update = bool_val(value)?,
         _ => return Err(format!("unknown setting key `{key}`")),
     }
@@ -1122,15 +1175,155 @@ pub fn reset_browser_settings_group(settings: &mut BrowserSettings, group: Setti
             settings.glance_enabled = defaults.glance_enabled;
             settings.glance_trigger = defaults.glance_trigger;
         }
+        SettingsGroupId::Vim => {
+            settings.vim_leader = defaults.vim_leader;
+            settings.vim_timeoutlen = defaults.vim_timeoutlen;
+        }
         SettingsGroupId::Agents => {
             settings.agent_steal_focus = defaults.agent_steal_focus;
             settings.agent_loop_enabled = defaults.agent_loop_enabled;
+            settings.dictation_hold_key = defaults.dictation_hold_key;
         }
         SettingsGroupId::Plugins => {
             settings.plugins_auto_update = defaults.plugins_auto_update;
         }
-        SettingsGroupId::Vim | SettingsGroupId::WebChat | SettingsGroupId::Extensions => {}
+        SettingsGroupId::WebChat | SettingsGroupId::Extensions => {}
     }
+}
+
+/// Persisted snapshot of vim & browser settings stored in `<profile>/vim.conf` (`CFG-01`, `CFG-02`, `CFG-05`, `AGK-03`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VimConfigRecord {
+    pub vim_enabled: Option<bool>,
+    pub statusline_enabled: bool,
+    pub statusline_show: StatuslineShow,
+    pub vim_leader: String,
+    pub vim_timeoutlen: u64,
+    pub dictation_hold_key: String,
+    pub shield_enabled: Option<bool>,
+}
+
+impl Default for VimConfigRecord {
+    fn default() -> Self {
+        let s = BrowserSettings::default();
+        Self {
+            vim_enabled: None,
+            statusline_enabled: true,
+            statusline_show: StatuslineShow::Shrink,
+            vim_leader: s.vim_leader,
+            vim_timeoutlen: s.vim_timeoutlen,
+            dictation_hold_key: s.dictation_hold_key,
+            shield_enabled: None,
+        }
+    }
+}
+
+/// Returns the profile directory (`$XDG_CONFIG_HOME/zendia` or `$HOME/.config/zendia`).
+pub fn zendia_profile_dir() -> Option<std::path::PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(std::path::PathBuf::from(xdg).join("zendia"));
+    }
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(|home| std::path::PathBuf::from(home).join(".config").join("zendia"))
+}
+
+/// Returns the path to `<profile>/vim.conf`.
+pub fn vim_config_profile_path() -> Option<std::path::PathBuf> {
+    zendia_profile_dir().map(|dir| dir.join("vim.conf"))
+}
+
+/// Returns candidate paths for the user's `zendia.json` (`<profile>/zendia/zendia.json` first, matching the fork,
+/// then `<profile>/zendia.json`, `CFG-04`).
+pub fn user_keymap_profile_paths() -> Vec<std::path::PathBuf> {
+    let Some(dir) = zendia_profile_dir() else {
+        return Vec::new();
+    };
+    vec![dir.join("zendia").join("zendia.json"), dir.join("zendia.json")]
+}
+
+/// Reads the first existing user `zendia.json` file from [`user_keymap_profile_paths`].
+pub fn load_user_keymap_json() -> Option<(std::path::PathBuf, String)> {
+    for path in user_keymap_profile_paths() {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            return Some((path, contents));
+        }
+    }
+    None
+}
+
+/// Loads [`VimConfigRecord`] from `path`.
+pub fn load_vim_config_from(path: &std::path::Path) -> Option<VimConfigRecord> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut rec = VimConfigRecord::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let val = v.trim();
+        match key {
+            "vim_enabled" => rec.vim_enabled = parse_bool(val),
+            "statusline_enabled" => {
+                if let Some(b) = parse_bool(val) {
+                    rec.statusline_enabled = b;
+                }
+            }
+            "statusline_show" => {
+                if let Some(show) = StatuslineShow::parse(val) {
+                    rec.statusline_show = show;
+                }
+            }
+            "vim_leader" => {
+                if !val.is_empty() && !val.to_ascii_lowercase().contains("<leader>") {
+                    let normalized = if val == " " { "<Space>" } else { val };
+                    if zendia_keymap::KeySequence::parse(normalized).is_ok() {
+                        rec.vim_leader = normalized.to_string();
+                    }
+                }
+            }
+            "vim_timeoutlen" => {
+                if let Ok(ms) = val.parse::<u64>() {
+                    rec.vim_timeoutlen = ms.clamp(10, 10_000);
+                }
+            }
+            "dictation_hold_key" => {
+                if val.parse::<zendia_keymap::KeyStroke>().is_ok() {
+                    rec.dictation_hold_key = val.to_string();
+                }
+            }
+            "shield_enabled" => rec.shield_enabled = parse_bool(val),
+            _ => {}
+        }
+    }
+    Some(rec)
+}
+
+/// Saves [`VimConfigRecord`] to `path`.
+pub fn save_vim_config_to(path: &std::path::Path, rec: &VimConfigRecord) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = String::new();
+    if let Some(enabled) = rec.vim_enabled {
+        out.push_str(&format!("vim_enabled={enabled}\n"));
+    }
+    out.push_str(&format!("statusline_enabled={}\n", rec.statusline_enabled));
+    out.push_str(&format!("statusline_show={}\n", rec.statusline_show.as_str()));
+    out.push_str(&format!("vim_leader={}\n", rec.vim_leader));
+    out.push_str(&format!("vim_timeoutlen={}\n", rec.vim_timeoutlen));
+    out.push_str(&format!("dictation_hold_key={}\n", rec.dictation_hold_key));
+    if let Some(shield) = rec.shield_enabled {
+        out.push_str(&format!("shield_enabled={shield}\n"));
+    }
+    std::fs::write(path, out)
 }
 
 #[cfg(test)]

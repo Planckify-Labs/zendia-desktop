@@ -456,6 +456,7 @@ impl Component for ToolbarItemView {
         };
 
         let footer_target = FocusTarget::SidebarFooter(self.item.id.clone());
+        let toolbar_target = FocusTarget::ToolbarItem(self.item.id.clone());
         let (focus_border, explorer_footer_focused, footer_hint_badge) = {
             let base = if focus() == Focus::Keyboard {
                 Border::new()
@@ -476,7 +477,8 @@ impl Component for ToolbarItemView {
             } else {
                 tb_border
             };
-            let hint = hint_badge_for_corner(&model, &footer_target, &theme);
+            let hint = hint_badge_for_corner(&model, &toolbar_target, &theme)
+                .or_else(|| hint_badge_for_corner(&model, &footer_target, &theme));
             (final_border, is_ex_foot, hint)
         };
 
@@ -511,6 +513,7 @@ impl Component for ToolbarItemView {
             } else {
                 Gaps::new(0.0, 11.0, 0.0, 8.0)
             };
+            let pill_item_id = self.item.id.as_str().to_string();
             let pill = rect()
                 .a11y_id(a11y_id)
                 .a11y_focusable(effective_enabled)
@@ -518,6 +521,11 @@ impl Component for ToolbarItemView {
                 .a11y_alt(a11y_label.clone())
                 .height(Size::px(pill_h))
                 .padding(pill_pad)
+                .on_sized(move |e: Event<SizedEventData>| {
+                    if let Some(state) = menu_state {
+                        state.set_toolbar_item_anchor(&pill_item_id, AnchorRect::from_area(e.area));
+                    }
+                })
                 .direction(Direction::Horizontal)
                 .cross_align(Alignment::center())
                 .main_align(Alignment::center())
@@ -794,47 +802,32 @@ impl Component for ToolbarItemView {
             .maybe_child(icon_status_dot)
             .maybe_child(footer_hint_badge);
 
-        let wrapped = if is_app_menu {
-            button
-                .on_sized(move |e: Event<SizedEventData>| {
-                    if let Some(state) = menu_state {
+        let item_anchor_id = self.item.id.as_str().to_string();
+        let wrapped = button
+            .on_sized(move |e: Event<SizedEventData>| {
+                let rect = AnchorRect::from_area(e.area);
+                if let Some(state) = menu_state {
+                    state.set_toolbar_item_anchor(&item_anchor_id, rect);
+                    if is_app_menu {
                         let mut anchor = state.app_menu_anchor;
-                        anchor.set_if_modified(AnchorRect::from_area(e.area));
-                    }
-                })
-                .into_element()
-        } else if is_extensions_menu {
-            button
-                .on_sized(move |e: Event<SizedEventData>| {
-                    if let Some(state) = menu_state {
+                        anchor.set_if_modified(rect);
+                    } else if is_extensions_menu {
                         let mut anchor = state.extensions_menu_anchor;
-                        anchor.set_if_modified(AnchorRect::from_area(e.area));
-                    }
-                })
-                .into_element()
-        } else if is_create_new {
-            button
-                .on_sized(move |e: Event<SizedEventData>| {
-                    if let Some(state) = menu_state {
+                        anchor.set_if_modified(rect);
+                    } else if is_create_new {
                         let mut anchor = state.create_new_anchor;
-                        anchor.set_if_modified(AnchorRect::from_area(e.area));
+                        anchor.set_if_modified(rect);
                     }
-                })
-                .into_element()
-        } else if self.item.id.as_str() == LIBRARY_ITEM_ID
-            && let Some(arc) = download_arc
-        {
-            // Downloads fly into the library button, so it records where it sits.
-            button
-                .on_sized(move |e: Event<SizedEventData>| {
+                }
+                if item_anchor_id == LIBRARY_ITEM_ID
+                    && let Some(arc) = download_arc
+                {
                     let mut anchor = arc.anchor;
                     let center = (e.area.center().x, e.area.center().y);
                     anchor.set_if_modified(Some(center));
-                })
-                .into_element()
-        } else {
-            button.into_element()
-        };
+                }
+            })
+            .into_element();
 
         KitTooltip::new(a11y_label)
             .maybe_shortcut(tooltip_shortcut)
@@ -868,14 +861,22 @@ impl Component for LocationBar {
         let focus = use_focus(self.location_a11y_id);
         let is_focused = focus() != Focus::Not;
 
-        let (active_url, site_info, toolbar_cursor_on_urlbar) = {
+        let menu_state = try_use_menu_state();
+        let (active_url, site_info, toolbar_cursor_on_urlbar, urlbar_hint_badge) = {
             let model = core.model().read();
             let url = model
                 .active_tab()
                 .map(|tab| tab.url.clone())
                 .unwrap_or_else(|| self.location.read().clone());
             let info = model.active_site_info();
-            (url, info, is_toolbar_cursor(&model, "builtin.url_bar"))
+            let hint = hint_badge_for_corner(
+                &model,
+                &FocusTarget::ToolbarItem(zendia_browser_core::contributions::ContributionId::new(
+                    "builtin.url_bar",
+                )),
+                &theme,
+            );
+            (url, info, is_toolbar_cursor(&model, "builtin.url_bar"), hint)
         };
 
         let floating_open = addr_state.is_some_and(|s| *s.open.read());
@@ -951,6 +952,7 @@ impl Component for LocationBar {
             open_bar_core.invoke_or_log(Command::AddressBarOpen {
                 new_tab: false,
                 initial_query: initial,
+                filter: zendia_browser_core::address_bar::AddressBarFilter::All,
             });
         };
         let open_bar_click = open_bar.clone();
@@ -1074,6 +1076,11 @@ impl Component for LocationBar {
                     .fill(border_color),
             )
             .cursor(CursorIcon::Text)
+            .on_sized(move |e: Event<SizedEventData>| {
+                if let Some(state) = menu_state {
+                    state.set_toolbar_item_anchor("builtin.url_bar", AnchorRect::from_area(e.area));
+                }
+            })
             .on_pointer_enter(move |_| hovered.set_if_modified(true))
             .on_pointer_leave(move |_| hovered.set_if_modified(false))
             .on_press(move |_| {
@@ -1098,7 +1105,8 @@ impl Component for LocationBar {
                 .fade_px(22.0),
             )
             .maybe_child(right_copy_button)
-            .maybe_child(site_button);
+            .maybe_child(site_button)
+            .maybe_child(urlbar_hint_badge);
 
         if self.compact_sidebar {
             container
@@ -1215,16 +1223,23 @@ impl Component for WindowControlButton {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();
+        let menu_state = try_use_menu_state();
         let feedback = use_interactive_feedback(true);
         let on_press = self.on_press.clone();
-        let bg = feedback.background(Color::TRANSPARENT, self.hover_bg, self.hover_bg);
-        let focus_border = {
+        let item_id = self.item_id;
+        let base_bg = feedback.background(Color::TRANSPARENT, self.hover_bg, self.hover_bg);
+        let (bg, focus_border, hint_badge) = {
             let model = core.model().read();
-            apply_toolbar_cursor_border(
-                Border::new().width(0.0).fill(Color::TRANSPARENT),
-                &model,
-                self.item_id,
-                &theme,
+            let target = FocusTarget::ToolbarItem(zendia_browser_core::contributions::ContributionId::new(item_id));
+            (
+                apply_toolbar_cursor_bg(base_bg, &model, item_id, &theme),
+                apply_toolbar_cursor_border(
+                    Border::new().width(0.0).fill(Color::TRANSPARENT),
+                    &model,
+                    item_id,
+                    &theme,
+                ),
+                hint_badge_for_corner(&model, &target, &theme),
             )
         };
 
@@ -1241,6 +1256,11 @@ impl Component for WindowControlButton {
                 .scale(feedback.scale())
                 .center()
                 .cursor(CursorIcon::Pointer)
+                .on_sized(move |e: Event<SizedEventData>| {
+                    if let Some(state) = menu_state {
+                        state.set_toolbar_item_anchor(item_id, AnchorRect::from_area(e.area));
+                    }
+                })
                 .on_pointer_enter(feedback.on_pointer_enter())
                 .on_pointer_leave(feedback.on_pointer_leave())
                 .on_pointer_down(feedback.on_pointer_down())
@@ -1256,7 +1276,8 @@ impl Component for WindowControlButton {
                             self.icon_color
                         })
                         .show_loader(false),
-                ),
+                )
+                .maybe_child(hint_badge),
         )
     }
 }

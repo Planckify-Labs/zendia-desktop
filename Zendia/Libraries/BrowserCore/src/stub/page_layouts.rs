@@ -34,6 +34,7 @@ impl StubBackend {
                 self.request_view(ViewRequest::AddressBarOpen {
                     new_tab: false,
                     initial_query: None,
+                    filter: crate::address_bar::AddressBarFilter::All,
                 });
                 Ok(())
             }
@@ -59,15 +60,23 @@ impl StubBackend {
                 self.split_with(&name, target_tab_id, tab_id, zone)?;
                 self.activate(tab_id, tab_source.as_ref())
             }
-            Command::SplitRemoveTab { tab_id } => {
-                let events = {
-                    let mut state = self.lock();
-                    detach_from_groups(&mut state, &[tab_id], None)
-                };
-                self.publish_all(events);
-                Ok(())
-            }
+            Command::SplitRemoveTab { tab_id } => self.close_split_pane(tab_id, tab_source.as_ref()),
             Command::SplitUnsplit { group_id } => {
+                // `wo` (`splits.only`) on an empty URL pane drops the empty pane and returns to the split tab (`WIN-20`).
+                let empty_pane_tab = {
+                    let state = self.lock();
+                    if group_id.is_none() {
+                        state
+                            .model
+                            .active_tab
+                            .filter(|&active| state.vim.empty_split_pane.is_some_and(|e| e.empty_tab == active))
+                    } else {
+                        None
+                    }
+                };
+                if let Some(active) = empty_pane_tab {
+                    return self.close_split_pane(active, tab_source.as_ref());
+                }
                 let event = {
                     let mut state = self.lock();
                     let group_id = group_id
@@ -81,9 +90,13 @@ impl StubBackend {
             Command::SplitSetLayout { group_id, direction } => self.update_group(&name, group_id, |group| {
                 group.direction = direction;
                 group.ratios = split::default_ratios(direction, group.tab_ids.len());
+                group.tree = split::build_tree(direction, &group.tab_ids, &group.ratios);
+                group.zoomed_tab = None;
             }),
             Command::SplitResize { group_id, ratios } => self.update_group(&name, Some(group_id), |group| {
                 group.ratios = split::normalized_ratios(group.direction, group.tab_ids.len(), &ratios);
+                group.tree = split::build_tree(group.direction, &group.tab_ids, &group.ratios);
+                group.zoomed_tab = None;
             }),
             Command::GlanceOpen {
                 url,
@@ -104,8 +117,10 @@ impl StubBackend {
                     parent_tab_id: parent,
                     origin,
                 };
+                let prev_effective = self.effective_keyed_tab();
                 self.lock().model.glance = Some(glance.clone());
                 self.bus.publish(Event::GlanceChanged { glance: Some(glance) });
+                self.on_effective_page_changed(prev_effective);
                 Ok(())
             }
             Command::GlanceClose => self.close_glance(tab_source.as_ref()),
@@ -153,6 +168,7 @@ impl StubBackend {
             Command::LayoutSetCompactHide { hide } => {
                 let layout = {
                     let mut state = self.lock();
+                    state.user_customized_compact = true;
                     state.model.layout.compact_hide = hide;
                     state.model.layout.normalize_compact_state();
                     state.model.layout.clone()
@@ -290,10 +306,10 @@ impl StubBackend {
             .ok_or_else(|| CommandError::Failed(format!("{command}: the engine opened no tab")))
     }
 
-    /// Puts `tab_id` beside `target` on the side `zone` names, joining `target`'s group when it has one.
-    fn split_with(&self, command: &str, target: TabId, tab_id: TabId, zone: DropZone) -> CommandResult {
+    /// Puts `tab_id` beside `target` on the side `zone` names, dividing `target`'s leaf when it is already in a group.
+    pub(super) fn split_with(&self, command: &str, target: TabId, tab_id: TabId, zone: DropZone) -> CommandResult {
         let target_group = self.lock().model.split_group_for_tab(target).cloned();
-        let Some(mut group) = target_group else {
+        let Some(group) = target_group else {
             let tab_ids = if zone.places_first() {
                 vec![tab_id, target]
             } else {
@@ -302,27 +318,44 @@ impl StubBackend {
             return self.split_tabs(command, tab_ids, zone.direction(), None);
         };
 
-        let mut tab_ids = group.tab_ids.clone();
-        tab_ids.retain(|id| *id != tab_id);
-        if tab_ids.len() >= MAX_SPLIT_PANES {
+        if !group.tab_ids.contains(&tab_id) && group.tab_ids.len() >= MAX_SPLIT_PANES {
             self.show_toast(toasts::messages::SPLIT_VIEW_LIMIT.to_string(), None, None);
             return Err(CommandError::InvalidArgument {
                 command: command.to_string(),
                 message: format!("a split view holds at most {MAX_SPLIT_PANES} tabs"),
             });
         }
-        let at = tab_ids.iter().position(|id| *id == target).unwrap_or(tab_ids.len());
-        tab_ids.insert(if zone.places_first() { at } else { at + 1 }, tab_id);
-        group.direction = if tab_ids.len() >= 3 {
-            SplitDirection::Grid
-        } else {
-            zone.direction()
+
+        let events = {
+            let mut state = self.lock();
+            if state.model.tab(tab_id).is_none() {
+                return Err(not_found(command, &format!("tab {}", tab_id.0)));
+            }
+            let mut events = detach_from_groups(&mut state, &[tab_id], Some(group.id));
+            if let Some(existing) = state.model.split_groups.iter_mut().find(|g| g.id == group.id) {
+                let mut tree = split::effective_group_tree(existing).unwrap_or_else(|| {
+                    split::build_tree(existing.direction, &existing.tab_ids, &existing.ratios).unwrap()
+                });
+                if tree.leaves().contains(&tab_id) {
+                    split::remove_leaf(&mut tree, tab_id);
+                }
+                split::split_into_leaf(&mut tree, target, tab_id, zone, 0.5);
+                split::sync_group_from_tree(existing, tree);
+                existing.zoomed_tab = None;
+                let updated = existing.clone();
+                if let Some(tab) = state.model.tabs.iter_mut().find(|t| t.id == tab_id) {
+                    tab.split_group_id = Some(group.id);
+                }
+                events.push(Event::SplitGroupUpdated { group: updated });
+            }
+            events
         };
-        self.split_tabs(command, tab_ids, group.direction, Some(group.id))
+        self.publish_all(events);
+        Ok(())
     }
 
     /// Makes `tab_ids` one group (reusing `reuse` as its id when given) and takes them out of every other group.
-    fn split_tabs(
+    pub(super) fn split_tabs(
         &self,
         command: &str,
         tab_ids: Vec<TabId>,
@@ -366,12 +399,16 @@ impl StubBackend {
                 .and_then(|tab| tab.space_id)
                 .or(state.model.active_space)
                 .unwrap_or(SpaceId(1));
+            let ratios = split::default_ratios(direction, unique.len());
+            let tree = split::build_tree(direction, &unique, &ratios);
             let group = SplitGroup {
                 id,
                 space_id,
                 direction,
-                ratios: split::default_ratios(direction, unique.len()),
+                ratios,
                 tab_ids: unique.clone(),
+                tree,
+                zoomed_tab: None,
             };
             for tab in &mut state.model.tabs {
                 if unique.contains(&tab.id) {
@@ -414,6 +451,7 @@ impl StubBackend {
     }
 
     fn take_glance(&self, command: &str) -> Result<Glance, CommandError> {
+        let prev_effective = self.effective_keyed_tab();
         let glance = self
             .lock()
             .model
@@ -421,6 +459,7 @@ impl StubBackend {
             .take()
             .ok_or_else(|| not_found(command, "Glance"))?;
         self.bus.publish(Event::GlanceChanged { glance: None });
+        self.on_effective_page_changed(prev_effective);
         Ok(glance)
     }
 
@@ -468,19 +507,33 @@ impl StubBackend {
     }
 }
 
-/// Takes `tab_ids` out of every group except `keep`. Groups left with one tab are removed.
-fn detach_from_groups(state: &mut StubState, tab_ids: &[TabId], keep: Option<SplitGroupId>) -> Vec<Event> {
+/// Takes `tab_ids` out of every group except `keep`, preserving remaining panes' relative shares (`WIN-17`).
+/// Groups left with fewer than two tabs are dissolved.
+pub(super) fn detach_from_groups(state: &mut StubState, tab_ids: &[TabId], keep: Option<SplitGroupId>) -> Vec<Event> {
     let mut events = Vec::new();
     let mut emptied = Vec::new();
     for group in &mut state.model.split_groups {
         if Some(group.id) == keep || !group.tab_ids.iter().any(|id| tab_ids.contains(id)) {
             continue;
         }
+        let mut tree = split::effective_group_tree(group);
         group.tab_ids.retain(|id| !tab_ids.contains(id));
         if group.tab_ids.len() < 2 {
             emptied.push(group.id);
         } else {
-            group.ratios = split::default_ratios(group.direction, group.tab_ids.len());
+            if let Some(ref mut t) = tree {
+                for &rm_id in tab_ids {
+                    split::remove_leaf(t, rm_id);
+                }
+            }
+            if let Some(t) = tree {
+                split::sync_group_from_tree(group, t);
+            } else {
+                group.ratios = split::default_ratios(group.direction, group.tab_ids.len());
+            }
+            if group.zoomed_tab.is_some_and(|z| tab_ids.contains(&z)) {
+                group.zoomed_tab = None;
+            }
             events.push(Event::SplitGroupUpdated { group: group.clone() });
         }
     }
@@ -597,7 +650,7 @@ mod tests {
         let model = core.model();
         let group = model.split_group_for_tab(ids[2]).unwrap();
         assert_eq!(group.tab_ids, vec![ids[2], ids[0], ids[1]]);
-        assert_eq!(group.direction, SplitDirection::Grid);
+        assert_eq!(group.direction, SplitDirection::Horizontal);
         assert_eq!(model.active_tab, Some(ids[2]));
     }
 

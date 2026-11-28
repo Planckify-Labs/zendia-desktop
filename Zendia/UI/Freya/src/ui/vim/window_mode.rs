@@ -18,6 +18,7 @@ use zendia_browser_core::commands::Command;
 use zendia_browser_core::focus::{FocusSurface, FocusTarget, WindowCarryState};
 use zendia_browser_core::model::{BrowserModel, InputMode, TabId};
 use zendia_browser_core::split::{self, PaneRect};
+use zendia_browser_core::split_actions::SplitAction;
 
 const PANE_RADIUS: f32 = 8.0;
 const CHIP_HEIGHT: f32 = 30.0;
@@ -61,12 +62,17 @@ impl Component for WindowModeOverlay {
 
         let group = model.active_split_group().cloned();
         let in_split = group.is_some();
+        let zoomed_tab = group
+            .as_ref()
+            .and_then(|g| g.zoomed_tab.filter(|z| g.tab_ids.contains(z)));
         let panes: Vec<(TabId, PaneRect)> = match &group {
-            Some(group) => split::pane_rects(group.direction, group.tab_ids.len(), &group.ratios)
-                .into_iter()
-                .zip(group.tab_ids.iter().copied())
-                .map(|(rect, tab_id)| (tab_id, rect))
-                .collect(),
+            Some(group) => {
+                let by_id = split::group_pane_rects(group);
+                split::panes_in_reading_order(group)
+                    .into_iter()
+                    .filter_map(|id| by_id.iter().copied().find(|(tid, _)| *tid == id))
+                    .collect()
+            }
             None => model
                 .active_tab
                 .map(|tab_id| {
@@ -84,11 +90,19 @@ impl Component for WindowModeOverlay {
                 .collect(),
         };
 
+        // Clicking outside chips and menus leaves Window mode (`ZendiaWindowMode.sys.mjs:104-116`, `VimParity.md:761`).
+        let backdrop_core = core.clone();
+        let menu_state = crate::ui::chrome::menus::try_use_menu_state();
         let mut overlay = rect()
             .layer(Layer::Relative(10))
             .position(Position::new_absolute().left(0.0).top(0.0))
             .width(Size::px(width))
-            .height(Size::px(height));
+            .height(Size::px(height))
+            .on_mouse_down(move |_| {
+                if !menu_state.is_some_and(|m| m.has_open_overlay()) {
+                    backdrop_core.invoke_or_log(Command::WindowModeClose);
+                }
+            });
 
         // Carry preview and landing labels (when carrying a pane in window mode).
         if let Some(carry) = &model.focus.window_carry {
@@ -104,7 +118,15 @@ impl Component for WindowModeOverlay {
             .filter(|hints| hints.surface == FocusSurface::Window);
 
         for (index, (tab_id, pane_rect)) in panes.iter().enumerate() {
-            let (px, py, pw, _) = pane_pixels(*pane_rect, (width, height), in_split);
+            let is_zoomed = zoomed_tab == Some(*tab_id);
+            if zoomed_tab.is_some() && !is_zoomed {
+                continue;
+            }
+            let (px, py, pw, _) = if is_zoomed {
+                (0.0, 0.0, width, height)
+            } else {
+                pane_pixels(*pane_rect, (width, height), in_split)
+            };
             if pw < 48.0 {
                 continue;
             }
@@ -129,6 +151,7 @@ impl Component for WindowModeOverlay {
                 favicon,
                 active: is_active,
                 in_split,
+                zoomed: is_zoomed,
                 hint_parts,
                 pane_left: px,
                 pane_top: py,
@@ -137,7 +160,9 @@ impl Component for WindowModeOverlay {
                     focus_core.invoke_or_log(Command::WindowModeFocusPane { pane: pane_number });
                 }),
                 on_zoom: EventHandler::new(move |_| {
-                    zoom_core.invoke_or_log(Command::WindowModeFocusPane { pane: pane_number });
+                    zoom_core.invoke_or_log(Command::Splits(SplitAction::Zoom {
+                        tab_id: Some(target_tab),
+                    }));
                 }),
                 on_detach: EventHandler::new(move |_| {
                     detach_core.invoke_or_log(Command::SplitRemoveTab { tab_id: target_tab });
@@ -163,6 +188,7 @@ struct PaneChip {
     favicon: Option<String>,
     active: bool,
     in_split: bool,
+    zoomed: bool,
     hint_parts: Option<(String, String)>,
     pane_left: f32,
     pane_top: f32,
@@ -264,8 +290,16 @@ impl Component for PaneChip {
 
         let zoom_btn = self.in_split.then(|| {
             action_btn(
-                "arrows-expand",
-                "Focus pane",
+                if self.zoomed {
+                    "fullscreen-exit"
+                } else {
+                    "arrows-expand"
+                },
+                if self.zoomed {
+                    "Show all panes"
+                } else {
+                    "Fill the view with this pane"
+                },
                 *zoom_hovered.read(),
                 zoom_hovered,
                 on_zoom,

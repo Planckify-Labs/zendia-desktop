@@ -13,7 +13,7 @@ pub mod icon_catalog;
 pub mod state;
 pub mod swipe;
 
-pub use create_form::SpaceCreationForm;
+pub use create_form::{SpaceCreationForm, SpaceDeleteConfirmOverlay, SpaceIconPickerOverlay};
 pub use gradient_generator::{GradientGeneratorCard, GradientGeneratorOverlay, SpaceTextureOverlay};
 pub use state::{
     SpaceEditingState, SpaceSwipeMode, SpaceSwipeViewState, try_use_space_editing_state,

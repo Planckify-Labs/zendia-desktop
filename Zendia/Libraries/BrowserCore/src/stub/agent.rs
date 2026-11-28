@@ -46,6 +46,10 @@ impl StubBackend {
             Command::AgentStop { conversation_id } => self.handle_agent_stop(conversation_id),
             Command::AgentNew { tab_id } => self.handle_agent_new(tab_id),
             Command::AgentSelect { agent_id } => self.handle_agent_select(agent_id),
+            Command::AgentSelectAndOpen { agent_id } => {
+                self.handle_agent_select(Some(agent_id))?;
+                self.handle_panel_open(SidePanelId::new(AGENT_PANEL_ID), true)
+            }
             Command::AgentCycle { direction } => self.handle_agent_cycle(direction),
             Command::AgentModel { agent_id, model_id } => self.handle_agent_model(agent_id, model_id),
             Command::AgentSetEffort { agent_id, effort } => self.handle_agent_set_effort(agent_id, effort),
@@ -80,6 +84,11 @@ impl StubBackend {
             Command::AgentLog { tab_id } => self.handle_agent_log(tab_id),
             Command::AgentList => self.handle_panel_toggle(SidePanelId::new(AGENTS_PANEL_ID)),
             Command::AgentDismiss { conversation_id } => self.handle_agent_dismiss(conversation_id),
+            Command::AgentObserve { .. }
+            | Command::AgentAct { .. }
+            | Command::AgentExtract { .. }
+            | Command::AgentFetch { .. }
+            | Command::AgentVersion => Ok(()),
             Command::DebugSampleAgent => self.handle_debug_sample_agent(),
             Command::DebugToggleAgentService => self.handle_debug_toggle_agent_service(),
             other => Err(CommandError::UnknownCommand(other.name().to_string())),
@@ -107,6 +116,7 @@ impl StubBackend {
 
     fn handle_panel_open(&self, panel_id: SidePanelId, focus: bool) -> CommandResult {
         self.ensure_known_panel(&panel_id, "panel.open")?;
+        self.enforce_panel_open_rules(&panel_id);
         if panel_id.as_str() == AGENT_PANEL_ID {
             let updated_conv = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

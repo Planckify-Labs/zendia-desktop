@@ -458,6 +458,11 @@ impl Component for EssentialTile {
             .overflow(Overflow::Clip)
             .border(tile_border_style)
             .opacity(tile_opacity)
+            .on_sized(move |e: Event<SizedEventData>| {
+                if let Some(state) = sidebar_state {
+                    state.set_tab_anchor(tab_id, crate::ui::chrome::menus::AnchorRect::from_area(e.area));
+                }
+            })
             .center()
             .cursor(CursorIcon::Pointer)
             .on_pointer_enter(move |_| {

@@ -12,6 +12,7 @@
 use crate::ui::chrome::menus::AnchorRect;
 use freya::prelude::*;
 use std::time::{Duration, Instant};
+use zendia_browser_core::address_bar::AddressBarFilter;
 
 /// How long an unsubmitted new-tab floating address bar draft is remembered when reopened.
 const NEW_TAB_WAIT_TO_CLEAR: Duration = Duration::from_secs(10);
@@ -36,6 +37,7 @@ impl Default for AddressBarMode {
 pub struct AddressBarViewState {
     pub open: State<bool>,
     pub mode: State<AddressBarMode>,
+    pub filter: State<AddressBarFilter>,
     /// Preserves whether the current floating session was opened for a new tab across Actions mode toggles.
     pub new_tab_session: State<bool>,
     pub query: State<String>,
@@ -49,11 +51,12 @@ pub struct AddressBarViewState {
 }
 
 impl AddressBarViewState {
-    /// Opens the floating address bar in normal mode, or toggles it closed if already open for a new tab
-    /// (matching Zen's `Ctrl+T` toggle behavior).
-    pub fn open_floating(&self, new_tab: bool, initial_query: Option<String>) {
+    /// Opens the floating address bar in normal mode, or toggles it closed if already open for a new tab with the same
+    /// filter (matching Zen's `Ctrl+T` toggle behavior).
+    pub fn open_floating(&self, new_tab: bool, initial_query: Option<String>, filter: AddressBarFilter) {
         let mut open = self.open;
         let mut mode = self.mode;
+        let mut filter_state = self.filter;
         let mut new_tab_session = self.new_tab_session;
         let mut query = self.query;
         let mut highlighted = self.highlighted;
@@ -65,6 +68,7 @@ impl AddressBarViewState {
             && new_tab
             && (*new_tab_session.peek() || matches!(*mode.peek(), AddressBarMode::Normal { new_tab: true }))
             && matches!(*mode.peek(), AddressBarMode::Normal { .. })
+            && *filter_state.peek() == filter
             && initial_query.is_none()
         {
             self.close();
@@ -74,7 +78,7 @@ impl AddressBarViewState {
         self.close_site_panel();
         let text = match initial_query {
             Some(q) => q,
-            None if new_tab => {
+            None if new_tab && filter == AddressBarFilter::All => {
                 let remembered = last_new_tab_query
                     .peek()
                     .clone()
@@ -87,9 +91,14 @@ impl AddressBarViewState {
             }
             None => String::new(),
         };
-        let initial_highlight = if text.trim().is_empty() { None } else { Some(0) };
+        let initial_highlight = if text.trim().is_empty() && filter == AddressBarFilter::All {
+            None
+        } else {
+            Some(0)
+        };
         new_tab_session.set(new_tab);
         mode.set(AddressBarMode::Normal { new_tab });
+        filter_state.set(filter);
         query.set(text);
         highlighted.set(initial_highlight);
         let next_seq = seq.peek().wrapping_add(1);
@@ -116,6 +125,8 @@ impl AddressBarViewState {
         self.close_site_panel();
         let text = initial_query.unwrap_or_default();
         new_tab_session.set(false);
+        let mut filter_state = self.filter;
+        filter_state.set(AddressBarFilter::All);
         mode.set(AddressBarMode::Actions);
         query.set(text);
         highlighted.set(Some(0));
@@ -156,6 +167,8 @@ impl AddressBarViewState {
             }
         }
         open.set_if_modified(false);
+        let mut filter_state = self.filter;
+        filter_state.set_if_modified(AddressBarFilter::All);
         highlighted.set(None);
         self.input_a11y_id.request_unfocus();
     }
@@ -165,6 +178,8 @@ impl AddressBarViewState {
         let mut last_new_tab_query = self.last_new_tab_query;
         last_new_tab_query.set(None);
         let mut open = self.open;
+        let mut filter_state = self.filter;
+        filter_state.set_if_modified(AddressBarFilter::All);
         let mut highlighted = self.highlighted;
         open.set_if_modified(false);
         highlighted.set(None);
@@ -212,6 +227,7 @@ impl AddressBarViewState {
 pub fn use_provide_address_bar_state() -> AddressBarViewState {
     let open = use_state(|| false);
     let mode = use_state(AddressBarMode::default);
+    let filter = use_state(AddressBarFilter::default);
     let new_tab_session = use_state(|| false);
     let query = use_state(String::new);
     let highlighted = use_state(|| None::<usize>);
@@ -229,6 +245,7 @@ pub fn use_provide_address_bar_state() -> AddressBarViewState {
     use_provide_context(|| AddressBarViewState {
         open,
         mode,
+        filter,
         new_tab_session,
         query,
         highlighted,

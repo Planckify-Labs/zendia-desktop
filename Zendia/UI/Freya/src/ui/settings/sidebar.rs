@@ -41,11 +41,13 @@ impl Component for SettingsSidebar {
 
         let nav_item = |group: SettingsGroupId| {
             let handler = on_select.clone();
+            let hint_badge = crate::ui::settings::settings_vim_hint_for_group(group);
             SettingsNavRow {
                 label: group.label().to_string(),
                 icon: group.icon().to_string(),
                 active: !self.searching && self.active_group == group,
                 trailing_icon: None,
+                hint_badge,
                 on_press: EventHandler::new(move |_| handler.call(group)),
                 key: DiffKey::from(&group.as_str()),
             }
@@ -99,6 +101,7 @@ impl Component for SettingsSidebar {
                             icon: "sliders".to_string(),
                             active: false,
                             trailing_icon: Some("open".to_string()),
+                            hint_badge: crate::ui::settings::settings_vim_hint_for_link("ladybird"),
                             on_press: EventHandler::new(move |_| {
                                 open_ladybird_core.invoke_or_log(Command::TabNew {
                                     url: Some("about:settings".to_string()),
@@ -113,6 +116,7 @@ impl Component for SettingsSidebar {
                             icon: "info".to_string(),
                             active: false,
                             trailing_icon: None,
+                            hint_badge: crate::ui::settings::settings_vim_hint_for_link("about"),
                             on_press: EventHandler::new(move |_| {
                                 about_core.invoke_or_log(Command::AppAbout);
                             }),
@@ -129,6 +133,7 @@ struct SettingsNavRow {
     icon: String,
     active: bool,
     trailing_icon: Option<String>,
+    hint_badge: Option<String>,
     on_press: EventHandler<()>,
     key: DiffKey,
 }
@@ -234,6 +239,22 @@ impl Component for SettingsNavRow {
                     .as_ref()
                     .map(|ico| Icon::new(ico.clone()).size(12.5).role(ThemeRole::TextMuted)),
             )
+            .maybe_child(self.hint_badge.as_ref().map(|badge| {
+                rect()
+                    .height(Size::px(16.0))
+                    .padding(Gaps::new(0.0, 5.0, 0.0, 5.0))
+                    .corner_radius(CornerRadius::new_all(4.0))
+                    .background(Color::from_rgb(0xa2, 0x57, 0x72))
+                    .center()
+                    .child(
+                        label()
+                            .text(badge.clone())
+                            .font_size(11.0)
+                            .font_weight(FontWeight::BOLD)
+                            .font_family("monospace")
+                            .color(Color::from_rgb(0xee, 0xf5, 0xff)),
+                    )
+            }))
     }
 
     fn render_key(&self) -> DiffKey {

@@ -31,19 +31,42 @@ impl Component for VimSettingsGroup {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();
-        let (vim_enabled, statusline, input_status) = {
+        let palette = SettingsPalette::for_scheme(theme.scheme);
+        let (vim_enabled, statusline, browser_settings, input_status) = {
             let model = core.model().read();
             (
                 model.vim_mode_enabled,
                 model.statusline.clone(),
+                model.settings.clone(),
                 service_status_in(&model.services, ServiceId::InputServer),
             )
         };
 
+        let mut leader_draft = use_state(|| browser_settings.vim_leader.clone());
+        let mut last_model_leader = use_state(|| browser_settings.vim_leader.clone());
+        if *last_model_leader.peek() != browser_settings.vim_leader {
+            last_model_leader.set(browser_settings.vim_leader.clone());
+            leader_draft.set(browser_settings.vim_leader.clone());
+        }
+        let mut timeout_draft = use_state(|| browser_settings.vim_timeoutlen.to_string());
+        let mut last_model_timeout = use_state(|| browser_settings.vim_timeoutlen);
+        if *last_model_timeout.peek() != browser_settings.vim_timeoutlen {
+            last_model_timeout.set(browser_settings.vim_timeoutlen);
+            timeout_draft.set(browser_settings.vim_timeoutlen.to_string());
+        }
+
         let core_vim = core.clone();
+        let core_sl_enabled = core.clone();
         let core_show = core.clone();
+        let core_leader = core.clone();
+        let core_timeout = core.clone();
         let core_restart = core.clone();
         let input_down = !matches!(input_status, ServiceStatus::Running);
+        let user_json_hint = zendia_browser_core::settings::user_keymap_profile_paths()
+            .into_iter()
+            .next()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.config/zendia/zendia/zendia.json".to_string());
 
         rect()
             .width(Size::fill())
@@ -69,6 +92,12 @@ impl Component for VimSettingsGroup {
                 .description("Off by default so Zendia behaves like a standard browser until you turn it on.")
                 .key("vim-enabled")
                 .into_element(),
+                SettingsToggleRow::new("Show mode indicator", statusline.enabled, move |next| {
+                    core_sl_enabled.invoke_or_log(Command::StatuslineSetEnabled { enabled: next });
+                })
+                .description("Display Zendia's mode mascot and pending keys in the bottom corner when Vim mode is on.")
+                .key("vim-statusline-enabled")
+                .into_element(),
                 SettingsChoiceRow::new(
                     "Mode indicator resting style",
                     statusline.show.as_str(),
@@ -86,6 +115,43 @@ impl Component for VimSettingsGroup {
                 .description("Controls how the mascot and mode pill rest after key activity settles.")
                 .key("vim-statusline-show")
                 .into_element(),
+                settings_text_input_row(
+                    "Leader key",
+                    "Prefix token expanded by <leader> mappings (e.g. <Space>, , or \\).",
+                    leader_draft,
+                    "<Space>",
+                    palette,
+                    move |val| {
+                        core_leader.invoke_or_log(Command::SettingsSet {
+                            key: "vim.leader".to_string(),
+                            value: val,
+                        });
+                    },
+                ),
+                settings_text_input_row(
+                    "Sequence timeout (ms)",
+                    "Milliseconds an ambiguous prefix waits before settling (10–10000 ms).",
+                    timeout_draft,
+                    "300",
+                    palette,
+                    move |val| {
+                        core_timeout.invoke_or_log(Command::SettingsSet {
+                            key: "vim.timeoutlen".to_string(),
+                            value: val,
+                        });
+                    },
+                ),
+                rect()
+                    .width(Size::fill())
+                    .padding(Gaps::new(4.0, 8.0, 2.0, 8.0))
+                    .child(
+                        label()
+                            .text(format!("User keymap overrides: {user_json_hint}"))
+                            .font_size(11.5)
+                            .font_family("monospace")
+                            .color(theme.color(ThemeRole::TextMuted)),
+                    )
+                    .into_element(),
             ]))
             .child(settings_card(vec![
                 subsection_heading(
@@ -133,6 +199,90 @@ fn shortcut_hint_row(title: &str, keys: &str) -> Element {
         .into_element()
 }
 
+fn settings_text_input_row(
+    title: &str,
+    description: &str,
+    draft: State<String>,
+    placeholder: &str,
+    palette: SettingsPalette,
+    on_commit: impl Fn(String) + Clone + 'static,
+) -> Element {
+    let theme = use_theme();
+    let commit_enter = on_commit.clone();
+    let commit_btn = on_commit;
+    rect()
+        .width(Size::fill())
+        .padding(Gaps::new(8.0, 8.0, 8.0, 8.0))
+        .direction(Direction::Horizontal)
+        .content(Content::Flex)
+        .main_align(Alignment::SpaceBetween)
+        .cross_align(Alignment::center())
+        .spacing(12.0)
+        .child(
+            rect()
+                .width(Size::flex(1.0))
+                .spacing(2.0)
+                .child(
+                    label()
+                        .text(title.to_string())
+                        .font_size(13.5)
+                        .font_weight(FontWeight::MEDIUM)
+                        .color(theme.color(ThemeRole::Text)),
+                )
+                .child(
+                    label()
+                        .text(description.to_string())
+                        .font_size(12.0)
+                        .color(theme.color(ThemeRole::TextMuted)),
+                ),
+        )
+        .child(
+            rect()
+                .direction(Direction::Horizontal)
+                .cross_align(Alignment::center())
+                .spacing(6.0)
+                .child(
+                    rect()
+                        .width(Size::px(124.0))
+                        .height(Size::px(32.0))
+                        .padding(Gaps::new(0.0, 8.0, 0.0, 8.0))
+                        .corner_radius(CornerRadius::new_all(7.0))
+                        .background(palette.input_bg)
+                        .border(
+                            Border::new()
+                                .width(1.0)
+                                .alignment(BorderAlignment::Inner)
+                                .fill(palette.input_border),
+                        )
+                        .main_align(Alignment::center())
+                        .font_size(12.5)
+                        .child(
+                            TextField::new(draft)
+                                .placeholder(placeholder.to_string())
+                                .width(Size::fill())
+                                .padding(Gaps::new(0.0, 2.0, 0.0, 2.0))
+                                .background(Color::TRANSPARENT)
+                                .focus_background(Color::TRANSPARENT)
+                                .color(theme.color(ThemeRole::Text))
+                                .placeholder_color(theme.color(ThemeRole::TextMuted))
+                                .on_submit(move |_| {
+                                    let val = draft.peek().trim().to_string();
+                                    if !val.is_empty() {
+                                        commit_enter(val);
+                                    }
+                                }),
+                        ),
+                )
+                .child(SettingsButton::new("Apply", move |_| {
+                    let val = draft.peek().trim().to_string();
+                    if !val.is_empty() {
+                        commit_btn(val);
+                    }
+                })),
+        )
+        .into_element()
+}
+
 /// Agents settings group: default agent, dock layout/side, automation toggles, instructions link, and AgentServer health.
 #[derive(Clone, PartialEq)]
 pub struct AgentsSettingsGroup;
@@ -159,8 +309,17 @@ impl Component for AgentsSettingsGroup {
         let core_agents_layout = core.clone();
         let core_steal = core.clone();
         let core_loop = core.clone();
+        let core_dictation = core.clone();
         let core_instr = core.clone();
         let agent_down = !matches!(agent_status, ServiceStatus::Running);
+        let theme = use_theme();
+        let palette = SettingsPalette::for_scheme(theme.scheme);
+        let mut dict_key_draft = use_state(|| browser_settings.dictation_hold_key.clone());
+        let mut last_dict_key = use_state(|| browser_settings.dictation_hold_key.clone());
+        if *last_dict_key.peek() != browser_settings.dictation_hold_key {
+            last_dict_key.set(browser_settings.dictation_hold_key.clone());
+            dict_key_draft.set(browser_settings.dictation_hold_key.clone());
+        }
 
         let agent_cards: Vec<Element> = agents
             .iter()
@@ -297,6 +456,19 @@ impl Component for AgentsSettingsGroup {
                 .description("Prompt an agent to keep working until all items in its task list complete.")
                 .key("agent-loop")
                 .into_element(),
+                settings_text_input_row(
+                    "Hold-to-dictate key",
+                    "Hold anywhere in the browser window to open the Agent panel and dictate (e.g. <A-Space>).",
+                    dict_key_draft,
+                    "<A-Space>",
+                    palette,
+                    move |val| {
+                        core_dictation.invoke_or_log(Command::SettingsSet {
+                            key: "agent.dictation_hold_key".to_string(),
+                            value: val,
+                        });
+                    },
+                ),
                 rect()
                     .width(Size::fill())
                     .padding(Gaps::new(4.0, 8.0, 2.0, 8.0))

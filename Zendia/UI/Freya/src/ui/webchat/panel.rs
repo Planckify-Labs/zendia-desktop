@@ -671,7 +671,8 @@ impl Component for WebChatPanel {
             }
         };
 
-        // WC-05: Escape closes accounts menu -> add-site bar -> panel (or returns focus to page in split).
+        // WC-05: Escape closes accounts menu -> add-site bar -> panel (or returns focus to page in split),
+        // while leaving jump labels, pending sequences, and visual mode to vim (`VimParity.md:142,1103`).
         let panel_focused = self.resolved.focused;
         let eff_layout = self.resolved.effective_layout;
         let core_esc = core.clone();
@@ -694,15 +695,39 @@ impl Component for WebChatPanel {
                     e.prevent_default();
                     return;
                 }
-                if eff_layout == SidePanelLayout::Split {
-                    ds.set_focus(None);
-                    if let Some(ctx) = &page_surfaces {
-                        ctx.request_focus_active_surface();
-                    }
-                    e.stop_propagation();
-                    e.prevent_default();
-                    return;
+            }
+            let (vim_keeps_esc, leave_insert) = {
+                let model = core_esc.model().peek();
+                if model.vim_mode_enabled {
+                    let keeps = model.page_hints.is_some()
+                        || !model.pending_keys.is_empty()
+                        || model.pending_count.is_some()
+                        || model.input_mode == zendia_browser_core::model::InputMode::Visual;
+                    let leave_ins = model.input_mode == zendia_browser_core::model::InputMode::Insert;
+                    (keeps, leave_ins)
+                } else {
+                    (false, false)
                 }
+            };
+            if vim_keeps_esc {
+                return;
+            }
+            if leave_insert {
+                core_esc.invoke_or_log(Command::Vim(zendia_browser_core::vim_keys::VimCommand::ModeNormal));
+            }
+            core_esc.invoke_or_log(Command::Vim(
+                zendia_browser_core::vim_keys::VimCommand::KeyedPageChanged { tab_id: None },
+            ));
+            if let Some(mut ds) = dock_state
+                && eff_layout == SidePanelLayout::Split
+            {
+                ds.set_focus(None);
+                if let Some(ctx) = &page_surfaces {
+                    ctx.request_focus_active_surface();
+                }
+                e.stop_propagation();
+                e.prevent_default();
+                return;
             }
             e.stop_propagation();
             e.prevent_default();
@@ -1107,14 +1132,18 @@ impl KeyExt for WebChatAccountsMenu {
 
 impl Component for WebChatAccountsMenu {
     fn render(&self) -> impl IntoElement {
+        let core = use_core();
         let theme = use_theme();
         let a11y_id = use_a11y();
         let mut active_idx = use_state(|| 0usize);
+        let mut accounts = use_state(|| vec!["Account 1".to_string()]);
+        let mut selected_account = use_state(|| 0usize);
+        let mut next_account_num = use_state(|| 2usize);
 
         let is_open = self.open;
         use_side_effect_with_deps(&is_open, move |open: &bool| {
             if *open {
-                active_idx.set(0);
+                active_idx.set((*selected_account.peek()).min(accounts.peek().len().saturating_sub(1)));
                 a11y_id.request_focus();
             }
         });
@@ -1128,7 +1157,11 @@ impl Component for WebChatAccountsMenu {
         let active_bg = theme.rgba(ThemeRole::Accent).with_alpha(0.16).to_color();
         let text_col = theme.color(ThemeRole::Text);
 
-        let cur = *active_idx.read();
+        let acc_list = accounts.read().clone();
+        let acc_count = acc_list.len();
+        let total_rows = acc_count + 3;
+        let cur = (*active_idx.read()).min(total_rows.saturating_sub(1));
+        let sel_acc = (*selected_account.read()).min(acc_count.saturating_sub(1));
         let on_toggle_same = self.on_toggle_same_as_browser.clone();
         let on_refresh = self.on_refresh_logins.clone();
         let on_close = self.on_close.clone();
@@ -1136,6 +1169,57 @@ impl Component for WebChatAccountsMenu {
         let on_toggle_key = self.on_toggle_same_as_browser.clone();
         let on_refresh_key = self.on_refresh_logins.clone();
         let on_close_key = self.on_close.clone();
+        let core_keys = core.clone();
+
+        let mut account_rows: Vec<Element> = Vec::with_capacity(acc_count);
+        for (idx, acc_name) in acc_list.iter().enumerate() {
+            let is_checked = idx == sel_acc;
+            let close_acc = on_close.clone();
+            let name_str = acc_name.clone();
+            account_rows.push(
+                rect()
+                    .key(format!("wc-acc-{idx}-{name_str}"))
+                    .a11y_role(AccessibilityRole::MenuItemRadio)
+                    .a11y_alt(name_str.clone())
+                    .width(Size::fill())
+                    .padding(Gaps::new(7.0, 10.0, 7.0, 10.0))
+                    .corner_radius(CornerRadius::new_all(8.0))
+                    .background(if cur == idx { active_bg } else { Color::TRANSPARENT })
+                    .direction(Direction::Horizontal)
+                    .cross_align(Alignment::center())
+                    .spacing(8.0)
+                    .cursor(CursorIcon::Pointer)
+                    .on_pointer_enter(move |_| active_idx.set_if_modified(idx))
+                    .on_press(move |e: Event<PressEventData>| {
+                        e.stop_propagation();
+                        selected_account.set_if_modified(idx);
+                        close_acc.call(());
+                    })
+                    .child(
+                        rect()
+                            .width(Size::px(14.0))
+                            .height(Size::px(14.0))
+                            .center()
+                            .maybe_child(is_checked.then(|| Icon::new("check").size(12.0).role(ThemeRole::Text))),
+                    )
+                    .child(
+                        label()
+                            .text(name_str)
+                            .font_size(12.0)
+                            .font_weight(if is_checked {
+                                FontWeight::SEMI_BOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .color(text_col),
+                    )
+                    .into_element(),
+            );
+        }
+
+        let add_row_idx = acc_count;
+        let same_row_idx = acc_count + 1;
+        let refresh_row_idx = acc_count + 2;
 
         let menu_card = rect()
             .a11y_id(a11y_id)
@@ -1157,16 +1241,41 @@ impl Component for WebChatAccountsMenu {
             .shadow(theme.shadows.card.to_shadow())
             .on_pointer_down(|e: Event<PointerEventData>| e.stop_propagation())
             .on_key_down(move |e: Event<KeyboardEventData>| {
-                if let Some(action) = classify_list_key(&e, ListNavConfig::menu()) {
+                if matches!(e.key, Key::Named(NamedKey::Tab)) {
+                    on_close_key.call(());
+                    e.stop_propagation();
+                    e.prevent_default();
+                    return;
+                }
+                if matches!(e.key, Key::Named(NamedKey::Delete | NamedKey::Backspace)) {
+                    let c = *active_idx.peek();
+                    let mut list = accounts.peek().clone();
+                    if c < list.len() && list.len() > 1 {
+                        list.remove(c);
+                        let new_len = list.len();
+                        accounts.set(list);
+                        if *selected_account.peek() >= new_len {
+                            selected_account.set(new_len - 1);
+                        }
+                        active_idx.set(c.min(new_len - 1));
+                    }
+                    e.stop_propagation();
+                    e.prevent_default();
+                    return;
+                }
+                let vim_enabled = core_keys.model().peek().vim_mode_enabled;
+                if let Some(action) = classify_list_key(&e, ListNavConfig::menu().with_vim_keys(vim_enabled)) {
+                    let n_acc = accounts.peek().len();
+                    let n_rows = n_acc + 3;
                     match action {
                         ListNavAction::MoveNext => {
-                            let next = (*active_idx.peek() + 1) % 4;
+                            let next = (*active_idx.peek() + 1) % n_rows;
                             active_idx.set(next);
                             e.stop_propagation();
                         }
                         ListNavAction::MovePrev => {
                             let c = *active_idx.peek();
-                            active_idx.set(if c == 0 { 3 } else { c - 1 });
+                            active_idx.set(if c == 0 { n_rows - 1 } else { c - 1 });
                             e.stop_propagation();
                         }
                         ListNavAction::First => {
@@ -1174,16 +1283,27 @@ impl Component for WebChatAccountsMenu {
                             e.stop_propagation();
                         }
                         ListNavAction::Last => {
-                            active_idx.set(3);
+                            active_idx.set(n_rows - 1);
                             e.stop_propagation();
                         }
                         ListNavAction::Activate => {
-                            match *active_idx.peek() {
-                                0 => on_close_key.call(()),
-                                1 => on_close_key.call(()),
-                                2 => on_toggle_key.call(()),
-                                3 => on_refresh_key.call(()),
-                                _ => {}
+                            let c = *active_idx.peek();
+                            if c < n_acc {
+                                selected_account.set_if_modified(c);
+                                on_close_key.call(());
+                            } else if c == n_acc {
+                                let num = *next_account_num.peek();
+                                next_account_num.set(num + 1);
+                                let mut list = accounts.peek().clone();
+                                list.push(format!("Account {num}"));
+                                let new_idx = list.len() - 1;
+                                accounts.set(list);
+                                selected_account.set(new_idx);
+                                active_idx.set(new_idx);
+                            } else if c == n_acc + 1 {
+                                on_toggle_key.call(());
+                            } else if c == n_acc + 2 {
+                                on_refresh_key.call(());
                             }
                             e.stop_propagation();
                         }
@@ -1191,42 +1311,17 @@ impl Component for WebChatAccountsMenu {
                             on_close_key.call(());
                             e.stop_propagation();
                         }
-                        _ => {}
+                        _ => {
+                            e.stop_propagation();
+                        }
                     }
+                } else {
+                    e.stop_propagation();
                 }
             })
+            .children(account_rows)
             .child(
-                // Row 0: Account 1 (active/checked)
-                rect()
-                    .a11y_role(AccessibilityRole::MenuItemRadio)
-                    .a11y_alt("Account 1")
-                    .width(Size::fill())
-                    .padding(Gaps::new(7.0, 10.0, 7.0, 10.0))
-                    .corner_radius(CornerRadius::new_all(8.0))
-                    .background(if cur == 0 { active_bg } else { Color::TRANSPARENT })
-                    .direction(Direction::Horizontal)
-                    .cross_align(Alignment::center())
-                    .spacing(8.0)
-                    .cursor(CursorIcon::Pointer)
-                    .on_pointer_enter(move |_| active_idx.set_if_modified(0))
-                    .on_press({
-                        let close = on_close.clone();
-                        move |e: Event<PressEventData>| {
-                            e.stop_propagation();
-                            close.call(());
-                        }
-                    })
-                    .child(rect().width(Size::px(14.0)).height(Size::px(14.0)).center())
-                    .child(
-                        label()
-                            .text("Account 1")
-                            .font_size(12.0)
-                            .font_weight(FontWeight::SEMI_BOLD)
-                            .color(text_col),
-                    ),
-            )
-            .child(
-                // 0.5px separator under Account 1 (`P3-04`)
+                // 0.5px separator under accounts (`P3-04`)
                 rect()
                     .width(Size::fill())
                     .height(Size::px(0.5))
@@ -1234,40 +1329,55 @@ impl Component for WebChatAccountsMenu {
                     .background(sep_col),
             )
             .child(
-                // Row 1: + Add new account (full primary Text color, `P3-04`)
+                // + Add new account (full primary Text color, `P3-04`, `AGK-05`)
                 rect()
                     .a11y_role(AccessibilityRole::MenuItem)
                     .a11y_alt("Add new account")
                     .width(Size::fill())
                     .padding(Gaps::new(7.0, 10.0, 7.0, 10.0))
                     .corner_radius(CornerRadius::new_all(8.0))
-                    .background(if cur == 1 { active_bg } else { Color::TRANSPARENT })
+                    .background(if cur == add_row_idx {
+                        active_bg
+                    } else {
+                        Color::TRANSPARENT
+                    })
                     .direction(Direction::Horizontal)
                     .cross_align(Alignment::center())
                     .spacing(8.0)
                     .cursor(CursorIcon::Pointer)
-                    .on_pointer_enter(move |_| active_idx.set_if_modified(1))
+                    .on_pointer_enter(move |_| active_idx.set_if_modified(add_row_idx))
                     .on_press(move |e: Event<PressEventData>| {
                         e.stop_propagation();
-                        on_close.call(());
+                        let num = *next_account_num.peek();
+                        next_account_num.set(num + 1);
+                        let mut list = accounts.peek().clone();
+                        list.push(format!("Account {num}"));
+                        let new_idx = list.len() - 1;
+                        accounts.set(list);
+                        selected_account.set(new_idx);
+                        active_idx.set(new_idx);
                     })
                     .child(Icon::new("plus").size(14.0).role(ThemeRole::Text))
                     .child(label().text("Add new account").font_size(12.0).color(text_col)),
             )
             .child(
-                // Row 2: Same as regular browsing (primary Text color, matching `account-menu-dark.png`)
+                // Same as regular browsing (primary Text color, matching `account-menu-dark.png`)
                 rect()
                     .a11y_role(AccessibilityRole::MenuItemCheckBox)
                     .a11y_alt("Same as regular browsing")
                     .width(Size::fill())
                     .padding(Gaps::new(7.0, 10.0, 7.0, 10.0))
                     .corner_radius(CornerRadius::new_all(8.0))
-                    .background(if cur == 2 { active_bg } else { Color::TRANSPARENT })
+                    .background(if cur == same_row_idx {
+                        active_bg
+                    } else {
+                        Color::TRANSPARENT
+                    })
                     .direction(Direction::Horizontal)
                     .cross_align(Alignment::center())
                     .spacing(8.0)
                     .cursor(CursorIcon::Pointer)
-                    .on_pointer_enter(move |_| active_idx.set_if_modified(2))
+                    .on_pointer_enter(move |_| active_idx.set_if_modified(same_row_idx))
                     .on_press(move |e: Event<PressEventData>| {
                         e.stop_propagation();
                         on_toggle_same.call(());
@@ -1284,19 +1394,23 @@ impl Component for WebChatAccountsMenu {
                     .child(label().text("Same as regular browsing").font_size(12.0).color(text_col)),
             )
             .child(
-                // Row 3: Refresh logins from browser
+                // Refresh logins from browser
                 rect()
                     .a11y_role(AccessibilityRole::MenuItem)
                     .a11y_alt("Refresh logins from browser")
                     .width(Size::fill())
                     .padding(Gaps::new(7.0, 10.0, 7.0, 10.0))
                     .corner_radius(CornerRadius::new_all(8.0))
-                    .background(if cur == 3 { active_bg } else { Color::TRANSPARENT })
+                    .background(if cur == refresh_row_idx {
+                        active_bg
+                    } else {
+                        Color::TRANSPARENT
+                    })
                     .direction(Direction::Horizontal)
                     .cross_align(Alignment::center())
                     .spacing(8.0)
                     .cursor(CursorIcon::Pointer)
-                    .on_pointer_enter(move |_| active_idx.set_if_modified(3))
+                    .on_pointer_enter(move |_| active_idx.set_if_modified(refresh_row_idx))
                     .on_press(move |e: Event<PressEventData>| {
                         e.stop_propagation();
                         on_refresh.call(());

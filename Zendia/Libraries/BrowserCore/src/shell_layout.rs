@@ -232,6 +232,8 @@ pub fn build_sidebar_context_menu(model: &BrowserModel, key_table: Option<&KeyTa
 pub struct ShellLayoutRecord {
     pub layout: LayoutSettings,
     pub panel_prefs: BTreeMap<SidePanelId, SidePanelPrefs>,
+    /// True once the user explicitly toggles compact mode or `compact_hide`, so vim mode defaults respect user choice (`CFG-03`).
+    pub user_customized_compact: bool,
 }
 
 /// Returns the default config file path (`$XDG_CONFIG_HOME/zendia/layout.conf`).
@@ -334,6 +336,11 @@ pub fn load_shell_layout_from(path: &Path) -> Option<ShellLayoutRecord> {
                     record.layout.tab_switch_motion = b;
                 }
             }
+            "user_customized_compact" => {
+                if let Ok(b) = value.parse::<bool>() {
+                    record.user_customized_compact = b;
+                }
+            }
             other if other.starts_with("panel.") => {
                 let rest = &other["panel.".len()..];
                 let Some((id_str, field)) = rest.rsplit_once('.') else {
@@ -371,7 +378,9 @@ pub fn load_shell_layout_from(path: &Path) -> Option<ShellLayoutRecord> {
             _ => {}
         }
     }
-    record.layout.sidebar_expanded = !matches!(record.layout.toolbar_layout, ToolbarLayout::Collapsed);
+    if matches!(record.layout.toolbar_layout, ToolbarLayout::Collapsed) {
+        record.layout.sidebar_expanded = false;
+    }
     normalize_compact_layout(&mut record.layout);
     Some(record)
 }
@@ -398,6 +407,7 @@ pub fn save_shell_layout_to(path: &Path, record: &ShellLayoutRecord) -> std::io:
     out.push_str(&format!("compact_mode={}\n", record.layout.compact_mode));
     out.push_str(&format!("compact_hide={}\n", record.layout.compact_hide.as_str()));
     out.push_str(&format!("tab_switch_motion={}\n", record.layout.tab_switch_motion));
+    out.push_str(&format!("user_customized_compact={}\n", record.user_customized_compact));
     for (panel_id, prefs) in &record.panel_prefs {
         let id = panel_id.as_str();
         out.push_str(&format!("panel.{id}.layout={}\n", panel_layout_str(prefs.layout)));
@@ -536,6 +546,7 @@ mod tests {
                 tab_switch_motion: false,
             },
             panel_prefs: BTreeMap::new(),
+            user_customized_compact: true,
         };
         record.panel_prefs.insert(
             SidePanelId::new(WEBCHAT_PANEL_ID),

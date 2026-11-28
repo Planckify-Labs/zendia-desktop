@@ -116,3 +116,8 @@ pub fn use_provide_core_with_observer(
 pub fn use_core() -> CoreView {
     use_consume::<CoreView>()
 }
+
+/// Accesses the window's [`CoreView`] when installed in Freya context.
+pub fn try_use_core() -> Option<CoreView> {
+    try_consume_context::<CoreView>()
+}

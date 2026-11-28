@@ -271,6 +271,10 @@ pub struct SplitGroup {
     pub direction: SplitDirection,
     pub tab_ids: Vec<TabId>,
     pub ratios: Vec<f32>,
+    /// Recursive split layout tree (`nsSplitNode` / `nsSplitLeafNode`, `WIN-10`, `WIN-17`).
+    pub tree: Option<crate::split::SplitNode>,
+    /// Tab currently filling the split view (`wm` / chip zoom, `WIN-09`, `WIN-14`).
+    pub zoomed_tab: Option<TabId>,
 }
 
 /// Lifecycle state of a download.
@@ -763,7 +767,7 @@ impl LayoutSettings {
 
     /// Whether the active toolbar layout renders a full-width top toolbar above the sidebar and page.
     pub fn has_top_toolbar(&self) -> bool {
-        !matches!(self.toolbar_layout, ToolbarLayout::Single)
+        !matches!(self.toolbar_layout, ToolbarLayout::Single) || !self.sidebar_expanded
     }
 
     /// Whether single-toolbar compact mode provides the collapsible compact top bar for Agents, Chat, and window
@@ -801,6 +805,9 @@ impl LayoutSettings {
 
     /// Resolves which [`ToolbarArea`] an item occupies under this layout's toolbar mode and compact state.
     pub fn resolve_toolbar_area(&self, rules: ToolbarPlacementRules) -> Option<ToolbarArea> {
+        if !self.sidebar_expanded {
+            return rules.collapsed_toolbar;
+        }
         match self.toolbar_layout {
             ToolbarLayout::Single if self.has_compact_top_bar() => rules.single_toolbar_compact,
             ToolbarLayout::Single => rules.single_toolbar,
@@ -871,14 +878,28 @@ pub struct BrowserModel {
     pub extension_commands: Vec<ExtensionCommand>,
     pub pending_extension_prompt: Option<ExtensionPrompt>,
     pub vim_mode_enabled: bool,
+    /// Auxiliary page surface (extension popup or web chat panel) that currently owns vim keyboard focus, if any.
+    pub keyed_page: Option<TabId>,
+    /// Whether an editable field has focus on the effective keyed page.
+    pub page_editing: bool,
+    /// Whether explicit `I` insert mode is active on the effective keyed page.
+    pub explicit_insert: bool,
+    /// Whether an async mode-changing page action is in flight on the effective keyed page (`RT-04`).
+    pub mode_transition_pending: bool,
     pub shield_enabled: bool,
     pub onboarding: OnboardingState,
     pub zoom_level: f32,
+    /// Per-tab zoom levels (`SL-03`, `JMP-01`).
+    pub tab_zoom: BTreeMap<TabId, f32>,
     pub about_update_status: crate::menus::AboutUpdateStatus,
     /// Original URL recorded when a tab was pinned (for Zen's pinned URL-drift reset button).
     pub pinned_urls: BTreeMap<TabId, String>,
     /// Tabs currently unloaded/discarded (`pending="true"` in Zen).
     pub unloaded_tabs: std::collections::BTreeSet<TabId>,
+    /// Spaces whose pinned-tabs section is collapsed in the sidebar (`EXP-16`).
+    pub collapsed_pinned_spaces: std::collections::BTreeSet<SpaceId>,
+    /// Optional OS dark-mode preference reported by the windowing shell (`None` defaults to `true`, `NAV-11`).
+    pub system_prefers_dark: Option<bool>,
     /// Optional parent folder mapping for nested folders (`FLD-05`).
     pub folder_parents: BTreeMap<FolderId, FolderId>,
     /// Active native page-DOM hint overlay session (`s`, `gs`, `S`, `v`+`s`, `i`, `gc`).
@@ -887,12 +908,14 @@ pub struct BrowserModel {
     pub visual_caret: Option<zendia_automation::ViewportRect>,
     /// What a yank or a put just took on the page, which the UI flashes for a moment.
     pub page_flash: Option<PageFlash>,
+    /// Transient `1.2 s` pane-chip flash `(tab_id, seq)` triggered by split mutations outside Window mode (`WIN-11`).
+    pub chip_flash: Option<(TabId, u64)>,
     /// Find in page: the last text searched, which `n` and `N` search again, and its matches.
     pub page_find: PageFind,
 }
 
 /// Find in page (`/`, `n`, `N`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageFind {
     /// The last text searched for.
     pub query: String,
@@ -902,6 +925,34 @@ pub struct PageFind {
     pub current: Option<usize>,
     /// How many matches the page has, once it has counted them.
     pub total: Option<usize>,
+    /// Highlight every match on the page (`NAV-09`).
+    pub highlight_all: bool,
+    /// Case-sensitive matching (`NAV-09`).
+    pub match_case: bool,
+    /// Whole-word matching (`NAV-09`).
+    pub whole_words: bool,
+}
+
+impl Default for PageFind {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            tab_id: None,
+            current: None,
+            total: None,
+            highlight_all: true,
+            match_case: false,
+            whole_words: false,
+        }
+    }
+}
+
+/// Whether a page flash highlights yanked text or a field where a yank was put (`YNK-05`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PageFlashKind {
+    #[default]
+    Yank,
+    Put,
 }
 
 /// Rects of a page that the UI highlights for a moment: the text a visual yank copied, or the field a put went in.
@@ -911,6 +962,7 @@ pub struct PageFlash {
     pub serial: u64,
     pub tab_id: TabId,
     pub rects: Vec<zendia_automation::ViewportRect>,
+    pub kind: PageFlashKind,
 }
 
 impl BrowserModel {
@@ -928,6 +980,25 @@ impl BrowserModel {
 
     pub fn active_tab(&self) -> Option<&Tab> {
         self.active_tab.and_then(|id| self.tab(id))
+    }
+
+    /// Returns the page (`TabId`) that currently receives page-level vim keys and commands:
+    /// an auxiliary focused view (`keyed_page`), else an open Glance (`PG-02`), else `active_tab`.
+    pub fn effective_keyed_tab(&self) -> Option<TabId> {
+        self.keyed_page
+            .or_else(|| self.glance.as_ref().map(|g| g.tab_id))
+            .or(self.active_tab)
+    }
+
+    /// Returns the zoom factor of `tab_id` (`JMP-01`, `SL-03`).
+    pub fn zoom_for_tab(&self, tab_id: TabId) -> f32 {
+        self.tab_zoom.get(&tab_id).copied().unwrap_or_else(|| {
+            if self.effective_keyed_tab() == Some(tab_id) && self.zoom_level > 0.0 {
+                self.zoom_level
+            } else {
+                1.0
+            }
+        })
     }
 
     pub fn space(&self, space_id: SpaceId) -> Option<&Space> {
@@ -1311,6 +1382,10 @@ impl BrowserModel {
                 self.pinned_tabs.retain(|item| item.tab_id != *tab_id);
                 self.pinned_urls.remove(tab_id);
                 self.unloaded_tabs.remove(tab_id);
+                self.tab_zoom.remove(tab_id);
+                if self.keyed_page == Some(*tab_id) {
+                    self.keyed_page = None;
+                }
                 for folder in &mut self.folders {
                     folder.tab_ids.retain(|id| id != tab_id);
                 }
@@ -1652,6 +1727,22 @@ impl BrowserModel {
                 self.zoom_level = *zoom_level;
                 true
             }
+            Event::TabZoomChanged { tab_id, zoom_level } => {
+                self.tab_zoom.insert(*tab_id, *zoom_level);
+                true
+            }
+            Event::VimPageStateChanged {
+                keyed_page,
+                page_editing,
+                explicit_insert,
+                mode_transition_pending,
+            } => {
+                self.keyed_page = *keyed_page;
+                self.page_editing = *page_editing;
+                self.explicit_insert = *explicit_insert;
+                self.mode_transition_pending = *mode_transition_pending;
+                true
+            }
             Event::AboutUpdateStatusChanged { status } => {
                 self.about_update_status = status.clone();
                 true
@@ -1662,6 +1753,12 @@ impl BrowserModel {
             }
             Event::TabUnloadedChanged { unloaded_tabs } => {
                 self.unloaded_tabs = unloaded_tabs.clone();
+                true
+            }
+            Event::PinnedCollapsedChanged {
+                collapsed_pinned_spaces,
+            } => {
+                self.collapsed_pinned_spaces = collapsed_pinned_spaces.clone();
                 true
             }
             Event::FolderHierarchyChanged {
@@ -1720,6 +1817,10 @@ impl BrowserModel {
                 self.page_flash = Some(flash.clone());
                 true
             }
+            Event::PaneChipFlashed { tab_id, seq } => {
+                self.chip_flash = Some((*tab_id, *seq));
+                true
+            }
             Event::PageFindChanged { find } => {
                 self.page_find = find.clone();
                 true
@@ -1729,6 +1830,9 @@ impl BrowserModel {
             | Event::ClipboardCopyRequested { .. }
             | Event::PickerChosen { .. }
             | Event::RegionCaptured { .. }
+            | Event::PageMoved { .. }
+            | Event::PopupTargetsUpdated { .. }
+            | Event::YankRingChanged
             | Event::ViewRequested { .. }
             | Event::ModelReplaced => false,
         }

@@ -18,8 +18,14 @@ use zendia_browser_core::address_bar::SearchEngine;
 use zendia_browser_core::commands::{Command, CommandError, CommandResult, MediaAction};
 use zendia_browser_core::model::{Tab, TabId, TabKind};
 use zendia_browser_core::stub::StubBackend;
-use zendia_browser_core::tab_source::{TabSource, TabUpdate};
+use zendia_browser_core::tab_source::{PointerEventKind, PointerStep, TabSource, TabUpdate, TouchStage};
 use zendia_browser_core::vim_keys::{FieldEdit, VimCommand};
+
+struct QueuedPointerAction {
+    view_id: u64,
+    step: PointerStep,
+    scale: f64,
+}
 
 /// Per-view capability flags cached from `Hub::ViewState` for building context menus.
 #[derive(Clone, Copy, Debug, Default)]
@@ -41,11 +47,15 @@ pub struct HubTabAdapter {
     core: Arc<StubBackend>,
     viewport: Mutex<ViewportState>,
     capabilities: Mutex<HashMap<u64, ViewCapabilities>>,
+    view_to_tab: Mutex<HashMap<u64, TabId>>,
+    discarded_tabs: Mutex<HashMap<TabId, (Option<u64>, String)>>,
     auxiliary_views: Mutex<HashSet<u64>>,
     auxiliary_loading: Mutex<HashMap<u64, bool>>,
+    embedder_focus_reported: Mutex<HashSet<u64>>,
     next_request_id: AtomicU64,
     /// Automation World requests sent without the runtime, kept until answered in case the page has none yet.
     automation_requests: Mutex<HashMap<u64, (u64, AutomationRequest)>>,
+    pointer_worker: Mutex<Option<std::sync::mpsc::Sender<QueuedPointerAction>>>,
 }
 
 impl HubTabAdapter {
@@ -61,11 +71,40 @@ impl HubTabAdapter {
                 device_pixel_ratio,
             }),
             capabilities: Mutex::new(HashMap::new()),
+            view_to_tab: Mutex::new(HashMap::new()),
+            discarded_tabs: Mutex::new(HashMap::new()),
             auxiliary_views: Mutex::new(HashSet::new()),
             auxiliary_loading: Mutex::new(HashMap::new()),
+            embedder_focus_reported: Mutex::new(HashSet::new()),
             next_request_id: AtomicU64::new(1),
             automation_requests: Mutex::new(HashMap::new()),
+            pointer_worker: Mutex::new(None),
         }
+    }
+
+    pub fn tab_id_for_view(&self, view_id: u64) -> TabId {
+        self.view_to_tab
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&view_id)
+            .copied()
+            .unwrap_or(TabId(view_id))
+    }
+
+    pub fn session_history_items(&self, tab_id: TabId, direction: i32) -> Vec<(i32, String)> {
+        let Ok(view_id) = self.view_id_for_tab(tab_id, "navigation.history_items") else {
+            return Vec::new();
+        };
+        hub::connection()
+            .send_sync(server::ViewSessionHistoryTraversalItems { view_id, direction })
+            .map(|reply| {
+                reply
+                    .items
+                    .into_iter()
+                    .map(|item| (item.step, item.url.as_str().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn view_capabilities(&self, view_id: u64) -> ViewCapabilities {
@@ -100,9 +139,8 @@ impl HubTabAdapter {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .insert(view_id, caps);
-        if self.core.model().active_tab == Some(TabId(view_id)) {
-            self.core.feed_zoom_level(caps.zoom_level);
-        }
+        self.core
+            .feed_zoom_level_for_tab(self.tab_id_for_view(view_id), caps.zoom_level);
     }
 
     pub fn has_view(&self, view_id: u64) -> bool {
@@ -135,12 +173,44 @@ impl HubTabAdapter {
             }
             return;
         }
-        self.core.feed_automation_response(TabId(view_id), response);
+        if matches!(response, AutomationResponse::EditableFocus { .. }) {
+            self.embedder_focus_reported
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(view_id);
+        }
+        self.core
+            .feed_automation_response(self.tab_id_for_view(view_id), response);
+    }
+
+    /// Resets per-document state when `view_id` begins loading a new document (`MD-02`, `MD-03`).
+    pub fn on_load_start(&self, view_id: u64) {
+        self.embedder_focus_reported
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
+        self.core.on_tab_navigated(self.tab_id_for_view(view_id), None);
+    }
+
+    /// Eagerly installs the Automation World runtime once `view_id` finishes loading so focus, scroll, resize, and
+    /// copy listeners are active before the first vim command (`INS-02`, `JMP-04`, `SL-02`, `YNK-02`).
+    pub fn on_load_finish(&self, view_id: u64) {
+        if self.has_view(view_id) {
+            self.post_automation(view_id, AutomationRequest::Init { watch_mutations: false }, true);
+        }
+    }
+
+    /// Posts an arbitrary [`AutomationRequest`] to `view_id` in the Automation World (`EXT-01`).
+    pub fn post_automation_request(&self, view_id: u64, request: AutomationRequest) {
+        if self.has_view(view_id) {
+            self.post_automation(view_id, request, false);
+        }
     }
 
     /// The page counted find in page's matches, or moved to one.
     pub fn on_find_in_page(&self, view_id: u64, current: usize, total: Option<usize>) {
-        self.core.feed_find_result(TabId(view_id), current, total);
+        self.core
+            .feed_find_result(self.tab_id_for_view(view_id), current, total);
     }
 
     fn post_automation(&self, view_id: u64, request: AutomationRequest, with_runtime: bool) {
@@ -204,6 +274,10 @@ impl HubTabAdapter {
             .insert(view_id, true);
         self.set_up_view(view_id);
         self.record_capabilities(view_id, &created.state);
+        let _ = self.core.invoke(Command::Vim(VimCommand::RegisterAuxiliaryPage {
+            tab_id: TabId(view_id),
+            registered: true,
+        }));
         load_in_hub(view_id, URL_URL::from_serialization(url.to_string()));
         Some(view_id)
     }
@@ -246,6 +320,10 @@ impl HubTabAdapter {
             .insert(view_id, true);
         self.set_up_view(view_id);
         self.record_capabilities(view_id, &created.state);
+        let _ = self.core.invoke(Command::Vim(VimCommand::RegisterAuxiliaryPage {
+            tab_id: TabId(view_id),
+            registered: true,
+        }));
         before_load(view_id);
         load_in_hub(view_id, URL_URL::from_serialization(url.to_string()));
         Some(view_id)
@@ -261,10 +339,18 @@ impl HubTabAdapter {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&view_id);
+        self.embedder_focus_reported
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
         self.capabilities
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&view_id);
+        let _ = self.core.invoke(Command::Vim(VimCommand::RegisterAuxiliaryPage {
+            tab_id: TabId(view_id),
+            registered: false,
+        }));
         hub::connection().post_or_log(server::DestroyView { view_id });
     }
 
@@ -390,8 +476,12 @@ impl HubTabAdapter {
     /// Visibility (`ViewSetSystemVisibilityState`) and `ViewSetCurrentTabOfWindow` are managed per mounted
     /// [`PageSurface`], so activating one pane in a split view does not hide sibling panes that remain on screen.
     pub fn activate_view(&self, view_id: u64) {
+        self.activate_view_for_tab(view_id, self.tab_id_for_view(view_id));
+    }
+
+    fn activate_view_for_tab(&self, view_id: u64, tab_id: TabId) {
         hub::connection().post_or_log(server::ActiveViewChanged { view_id: Some(view_id) });
-        self.core.feed_tab_activated(Some(TabId(view_id)));
+        self.core.feed_tab_activated(Some(tab_id));
     }
 
     /// Adopts an existing Hub view into the core's tab list, placed after `after` when given.
@@ -399,6 +489,10 @@ impl HubTabAdapter {
         if self.has_view(view_id) {
             return;
         }
+        self.view_to_tab
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(view_id, TabId(view_id));
         self.set_up_view(view_id);
         self.record_capabilities(view_id, state);
         let should_activate = activate_tab || self.core.model().active_tab.is_none();
@@ -422,7 +516,7 @@ impl HubTabAdapter {
         };
         self.core.feed_tab_opened(tab, after, false);
         if should_activate {
-            self.activate_view(view_id);
+            self.activate_view_for_tab(view_id, TabId(view_id));
         }
     }
 
@@ -472,20 +566,35 @@ impl HubTabAdapter {
         if !self.has_view(view_id) {
             return;
         }
+        let tab_id = self
+            .view_to_tab
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id)
+            .unwrap_or(TabId(view_id));
+        self.discarded_tabs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&tab_id);
         self.capabilities
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&view_id);
+        self.embedder_focus_reported
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
         hub::connection().post_or_log(server::DestroyView { view_id });
-        if let Some(next) = self.core.feed_tab_closed(TabId(view_id)) {
-            self.activate_view(next.0);
+        if let Some(next) = self.core.feed_tab_closed(tab_id) {
+            let _ = self.activate_tab(next);
         }
     }
 
     pub fn on_view_state_changed(&self, view_id: u64, state: &Hub_ViewState) {
+        let tab_id = self.tab_id_for_view(view_id);
         self.record_capabilities(view_id, state);
         self.core.feed_tab_updated(
-            TabId(view_id),
+            tab_id,
             TabUpdate {
                 title: Some(state.title.to_string_lossy()),
                 url: Some(state.displayed_url.as_str().to_string()),
@@ -495,19 +604,27 @@ impl HubTabAdapter {
                 ..TabUpdate::default()
             },
         );
-        // NB: The page turns its input method on while a field has the focus, which is when vim mode types into it.
-        let editing = state.input_method_state.is_enabled;
-        if self.core.page_is_editing(TabId(view_id)) != editing {
-            let _ = self.core.invoke(Command::Vim(VimCommand::EditableFocusChanged {
-                tab_id: Some(TabId(view_id)),
-                editing,
-            }));
+        // Once WebContent reports editable focus directly over the embedder channel (`INS-01`), do not overwrite
+        // non-IME editable elements (`email`, `number`, `date`, `<select>`) with `input_method_state.is_enabled`.
+        let has_embedder_focus = self
+            .embedder_focus_reported
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&view_id);
+        if !has_embedder_focus {
+            let editing = state.input_method_state.is_enabled;
+            if self.core.page_is_editing(tab_id) != editing {
+                let _ = self.core.invoke(Command::Vim(VimCommand::EditableFocusChanged {
+                    tab_id: Some(tab_id),
+                    editing,
+                }));
+            }
         }
     }
 
     pub fn on_title_changed(&self, view_id: u64, title: String) {
         self.core.feed_tab_updated(
-            TabId(view_id),
+            self.tab_id_for_view(view_id),
             TabUpdate {
                 title: Some(title),
                 ..TabUpdate::default()
@@ -517,7 +634,7 @@ impl HubTabAdapter {
 
     pub fn on_url_changed(&self, view_id: u64, url: String) {
         self.core.feed_tab_updated(
-            TabId(view_id),
+            self.tab_id_for_view(view_id),
             TabUpdate {
                 url: Some(url),
                 ..TabUpdate::default()
@@ -527,7 +644,7 @@ impl HubTabAdapter {
 
     pub fn on_loading_state_changed(&self, view_id: u64, is_loading: bool) {
         self.core.feed_tab_updated(
-            TabId(view_id),
+            self.tab_id_for_view(view_id),
             TabUpdate {
                 is_loading: Some(is_loading),
                 ..TabUpdate::default()
@@ -536,14 +653,21 @@ impl HubTabAdapter {
     }
 
     fn view_id_for_tab(&self, tab_id: TabId, command: &str) -> Result<u64, CommandError> {
-        self.core
-            .model()
-            .tab(tab_id)
-            .and_then(|tab| tab.view_id)
-            .ok_or_else(|| CommandError::TargetNotFound {
-                command: command.to_string(),
-                target: format!("Hub view for tab {}", tab_id.0),
-            })
+        if let Some(view_id) = self.core.model().tab(tab_id).and_then(|tab| tab.view_id) {
+            return Ok(view_id);
+        }
+        if self
+            .auxiliary_views
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&tab_id.0)
+        {
+            return Ok(tab_id.0);
+        }
+        Err(CommandError::TargetNotFound {
+            command: command.to_string(),
+            target: format!("Hub view for tab {}", tab_id.0),
+        })
     }
 }
 
@@ -555,8 +679,13 @@ fn load_in_hub(view_id: u64, url: URL_URL) {
     });
 }
 
-/// A press of the primary button at `position`, as a user's click would make it.
-fn click_event(r#type: Web_MouseEvent_Type, position: Web_DevicePixelPoint, held: bool) -> Web_MouseEvent {
+/// A press of the primary button at `position`, as a user's click would make it (`modifiers` holds Ctrl for capital hints, `JMP-03`).
+fn click_event(
+    r#type: Web_MouseEvent_Type,
+    position: Web_DevicePixelPoint,
+    held: bool,
+    modifiers: Web_UIEvents_KeyModifier,
+) -> Web_MouseEvent {
     Web_MouseEvent {
         r#type,
         position: position.clone(),
@@ -571,7 +700,7 @@ fn click_event(r#type: Web_MouseEvent_Type, position: Web_DevicePixelPoint, held
         } else {
             Web_UIEvents_MouseButton::None
         },
-        modifiers: Web_UIEvents_KeyModifier::Mod_None,
+        modifiers,
         wheel_delta_x: 0.0,
         wheel_delta_y: 0.0,
         wheel_tick_120ths_x: 0.0,
@@ -614,28 +743,135 @@ fn editing_key_event(
 
 impl TabSource for HubTabAdapter {
     fn click_at(&self, tab_id: TabId, x: f64, y: f64) -> CommandResult {
+        self.click_at_with_modifiers(tab_id, x, y, false)
+    }
+
+    fn click_at_with_modifiers(&self, tab_id: TabId, x: f64, y: f64, ctrl: bool) -> CommandResult {
         let view_id = self.view_id_for_tab(tab_id, "click")?;
         let (_, device_pixel_ratio) = self.viewport();
+        let zoom = f64::from(self.view_capabilities(view_id).zoom_level.max(0.1));
+        let scale = device_pixel_ratio * zoom;
         let position = Web_DevicePixelPoint {
-            x: (x * device_pixel_ratio).round() as i32,
-            y: (y * device_pixel_ratio).round() as i32,
+            x: (x * scale).round() as i32,
+            y: (y * scale).round() as i32,
         };
-        for (r#type, held) in [
-            (Web_MouseEvent_Type::MouseMove, false),
-            (Web_MouseEvent_Type::MouseDown, true),
-            (Web_MouseEvent_Type::MouseUp, false),
+        let press_modifiers = if ctrl {
+            Web_UIEvents_KeyModifier::Mod_Ctrl
+        } else {
+            Web_UIEvents_KeyModifier::Mod_None
+        };
+        for (r#type, held, modifiers) in [
+            (
+                Web_MouseEvent_Type::MouseMove,
+                false,
+                Web_UIEvents_KeyModifier::Mod_None,
+            ),
+            (Web_MouseEvent_Type::MouseDown, true, press_modifiers),
+            (Web_MouseEvent_Type::MouseUp, false, press_modifiers),
         ] {
             hub::connection().post_or_log(server::ViewEnqueueMouseEvent {
                 view_id,
                 input_id: 0,
-                event: click_event(r#type, position.clone(), held),
+                event: click_event(r#type, position.clone(), held, modifiers),
             });
+        }
+        Ok(())
+    }
+
+    fn dispatch_pointer_steps(&self, tab_id: TabId, steps: &[PointerStep]) -> CommandResult {
+        if steps.is_empty() {
+            return Ok(());
+        }
+        let view_id = self.view_id_for_tab(tab_id, "pointer")?;
+        let (_, device_pixel_ratio) = self.viewport();
+        let zoom = f64::from(self.view_capabilities(view_id).zoom_level.max(0.1));
+        let scale = device_pixel_ratio * zoom;
+        let send_one = |view_id: u64, step: PointerStep, scale: f64| {
+            let position = Web_DevicePixelPoint {
+                x: (step.x * scale).round() as i32,
+                y: (step.y * scale).round() as i32,
+            };
+            let r#type = match step.kind {
+                PointerEventKind::Move => Web_MouseEvent_Type::MouseMove,
+                PointerEventKind::Down => Web_MouseEvent_Type::MouseDown,
+                PointerEventKind::Up => Web_MouseEvent_Type::MouseUp,
+            };
+            hub::connection().post_or_log(server::ViewEnqueueMouseEvent {
+                view_id,
+                input_id: 0,
+                event: click_event(r#type, position, step.buttons != 0, Web_UIEvents_KeyModifier::Mod_None),
+            });
+            if let Some(touch) = step.touch {
+                let stage = match touch {
+                    TouchStage::Start => "start",
+                    TouchStage::Move => "move",
+                    TouchStage::End => "end",
+                };
+                let req = AutomationRequest::DispatchTouch {
+                    stage: stage.to_string(),
+                    x: step.x as f32,
+                    y: step.y as f32,
+                    reset_chain: touch == TouchStage::Start,
+                };
+                if let Ok(script) = zendia_automation::build_eval_script(&req, false) {
+                    hub::connection().post_or_log(server::ViewEmbedderMessage {
+                        view_id,
+                        request_id: 0,
+                        world: libipc_rust::wire::Utf8String::from(zendia_automation::AUTOMATION_WORLD_NAME),
+                        script: libipc_rust::wire::Utf8String::from(script),
+                    });
+                }
+            }
+        };
+
+        let mut guard = self.pointer_worker.lock().unwrap_or_else(|error| error.into_inner());
+        let needs_worker = guard.is_some() || steps.iter().any(|s| s.pause_ms > 0);
+        if !needs_worker {
+            drop(guard);
+            for &step in steps {
+                send_one(view_id, step, scale);
+            }
+            return Ok(());
+        }
+        let sender = guard
+            .get_or_insert_with(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<QueuedPointerAction>();
+                std::thread::spawn(move || {
+                    while let Ok(item) = rx.recv() {
+                        send_one(item.view_id, item.step, item.scale);
+                        if item.step.pause_ms > 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(item.step.pause_ms));
+                        }
+                    }
+                });
+                tx
+            })
+            .clone();
+        drop(guard);
+        for &step in steps {
+            let _ = sender.send(QueuedPointerAction { view_id, step, scale });
         }
         Ok(())
     }
 
     fn edit_field(&self, tab_id: TabId, edit: FieldEdit) -> CommandResult {
         let view_id = self.view_id_for_tab(tab_id, edit.name())?;
+        match edit {
+            FieldEdit::DeleteToLineStart => {
+                // Route `<C-u>` through the Automation World so column-0 caret on line > 1 never deletes `\n` (`INS-03`).
+                self.post_automation(view_id, AutomationRequest::EditDeleteToLineStart, false);
+                return Ok(());
+            }
+            FieldEdit::DeleteToLineEnd => {
+                self.post_automation(view_id, AutomationRequest::EditDeleteToLineEnd, false);
+                return Ok(());
+            }
+            FieldEdit::DeleteCharForward => {
+                self.post_automation(view_id, AutomationRequest::EditDeleteCharForward, false);
+                return Ok(());
+            }
+            FieldEdit::DeleteWordBackward | FieldEdit::DeleteCharBackward => {}
+        }
         let command = |r#type, extend_selection| Web_TextEditingCommand {
             r#type,
             extend_selection,
@@ -645,13 +881,7 @@ impl TabSource for HubTabAdapter {
                 Web_UIEvents_KeyModifier::Mod_Ctrl,
                 vec![command(Web_TextEditingCommand_Type::DeleteWordBackward, false)],
             ),
-            FieldEdit::DeleteToLineStart => (
-                Web_UIEvents_KeyModifier::Mod_None,
-                vec![
-                    command(Web_TextEditingCommand_Type::MoveToBeginningOfLine, true),
-                    command(Web_TextEditingCommand_Type::DeleteBackward, false),
-                ],
-            ),
+            FieldEdit::DeleteToLineStart | FieldEdit::DeleteToLineEnd | FieldEdit::DeleteCharForward => unreachable!(),
             FieldEdit::DeleteCharBackward => (
                 Web_UIEvents_KeyModifier::Mod_None,
                 vec![command(Web_TextEditingCommand_Type::DeleteBackward, false)],
@@ -674,12 +904,27 @@ impl TabSource for HubTabAdapter {
     }
 
     fn find_in_page(&self, tab_id: TabId, query: &str) -> CommandResult {
+        self.find_in_page_with_options(tab_id, query, false, false, true)
+    }
+
+    fn find_in_page_with_options(
+        &self,
+        tab_id: TabId,
+        query: &str,
+        match_case: bool,
+        _whole_words: bool,
+        highlight_all: bool,
+    ) -> CommandResult {
         let view_id = self.view_id_for_tab(tab_id, "page.find")?;
         hub::connection().post_or_log(server::ViewFindInPage {
             view_id,
             query: libipc_rust::wire::Utf16String::from(query),
-            case_sensitivity: AK_CaseSensitivity::CaseInsensitive,
-            highlight_all_matches: true,
+            case_sensitivity: if match_case {
+                AK_CaseSensitivity::CaseSensitive
+            } else {
+                AK_CaseSensitivity::CaseInsensitive
+            },
+            highlight_all_matches: highlight_all,
         });
         Ok(())
     }
@@ -714,12 +959,19 @@ impl TabSource for HubTabAdapter {
             });
         };
         let Some(view_id) = tab.view_id else {
-            return Err(CommandError::TargetNotFound {
-                command: "tab.close".to_string(),
-                target: format!("Hub view for tab {}", tab_id.0),
-            });
+            drop(model);
+            self.discarded_tabs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&tab_id);
+            if let Some(next) = self.core.feed_tab_closed(tab_id) {
+                let _ = self.activate_tab(next);
+            }
+            return Ok(());
         };
-        if force || tab.closing {
+        let tab_closing = tab.closing;
+        drop(model);
+        if force || tab_closing {
             // NB: A page that does not answer is closed without asking it again.
             self.finish_close_tab(view_id);
         } else {
@@ -737,20 +989,122 @@ impl TabSource for HubTabAdapter {
     }
 
     fn activate_tab(&self, tab_id: TabId) -> CommandResult {
+        let existing_tab = self.core.model().tab(tab_id).cloned();
+        if let Some(tab) = existing_tab
+            && tab.view_id.is_none()
+        {
+            let discarded = self
+                .discarded_tabs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&tab_id);
+            let (_, device_pixel_ratio) = self.viewport();
+            let hub = hub::connection();
+            let created = hub
+                .send_sync(server::CreateView {
+                    request: Hub_NewViewRequest {
+                        is_private: WebView_IsPrivate::No,
+                        device_pixel_ratio,
+                        maximum_frames_per_second: 60.0,
+                        display_id: None,
+                        screen_shows_high_dynamic_range: false,
+                        system_theme: crate::page_style::system_theme(),
+                        screen_rects: None,
+                        owner_view_id: None,
+                        websites_prefer_dark: false,
+                        is_tab: true,
+                    },
+                })
+                .map_err(|error| CommandError::Failed(format!("unable to restore discarded tab view: {error}")))?;
+            let new_view_id = created.view_id;
+            self.view_to_tab
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(new_view_id, tab_id);
+            self.core.set_tab_view_id(tab_id, Some(new_view_id));
+            self.set_up_view(new_view_id);
+            self.record_capabilities(new_view_id, &created.state);
+            match discarded {
+                Some((Some(discarded_tab_state_id), _)) => {
+                    hub.post_or_log(server::ViewRestoreStateOfDiscardedTab {
+                        view_id: new_view_id,
+                        discarded_tab_state_id,
+                    });
+                }
+                Some((None, saved_url)) if !saved_url.is_empty() => {
+                    load_in_hub(new_view_id, URL_URL::from_serialization(saved_url));
+                }
+                _ if !tab.url.is_empty() => {
+                    load_in_hub(new_view_id, URL_URL::from_serialization(tab.url));
+                }
+                _ => {}
+            }
+            self.activate_view_for_tab(new_view_id, tab_id);
+            return Ok(());
+        }
         let view_id = self.view_id_for_tab(tab_id, "tab.activate")?;
-        self.activate_view(view_id);
+        self.activate_view_for_tab(view_id, tab_id);
         Ok(())
     }
 
     fn navigate_back(&self, tab_id: TabId) -> CommandResult {
-        let view_id = self.view_id_for_tab(tab_id, "navigation.back")?;
-        hub::connection().post_or_log(server::ViewTraverseTheHistoryByDelta { view_id, delta: -1 });
-        Ok(())
+        self.navigate_history(tab_id, -1)
     }
 
     fn navigate_forward(&self, tab_id: TabId) -> CommandResult {
-        let view_id = self.view_id_for_tab(tab_id, "navigation.forward")?;
-        hub::connection().post_or_log(server::ViewTraverseTheHistoryByDelta { view_id, delta: 1 });
+        self.navigate_history(tab_id, 1)
+    }
+
+    fn navigate_history(&self, tab_id: TabId, delta: i32) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "navigation.history")?;
+        hub::connection().post_or_log(server::ViewTraverseTheHistoryByDelta { view_id, delta });
+        Ok(())
+    }
+
+    fn navigate_history_to_step(&self, tab_id: TabId, step: i32) -> CommandResult {
+        let view_id = self.view_id_for_tab(tab_id, "navigation.history_step")?;
+        hub::connection().post_or_log(server::ViewTraverseTheHistoryToStep { view_id, step });
+        Ok(())
+    }
+
+    fn set_tab_muted(&self, tab_id: TabId, _muted: bool) -> CommandResult {
+        if let Ok(view_id) = self.view_id_for_tab(tab_id, "tab.toggle_mute") {
+            hub::connection().post_or_log(server::ViewTogglePageMuteState { view_id });
+        }
+        Ok(())
+    }
+
+    fn unload_tab(&self, tab_id: TabId) -> CommandResult {
+        let tab = self.core.model().tab(tab_id).cloned();
+        let Some(tab) = tab else {
+            return Ok(());
+        };
+        let Some(view_id) = tab.view_id else {
+            return Ok(());
+        };
+        let hub = hub::connection();
+        let discarded_id = hub
+            .send_sync(server::ViewKeepStateForDiscarding { view_id })
+            .ok()
+            .and_then(|reply| reply.discarded_tab_state_id);
+        self.discarded_tabs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(tab_id, (discarded_id, tab.url));
+        self.view_to_tab
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
+        self.capabilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
+        self.embedder_focus_reported
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&view_id);
+        self.core.set_tab_view_id(tab_id, None);
+        hub.post_or_log(server::DestroyView { view_id });
         Ok(())
     }
 
@@ -793,14 +1147,15 @@ impl TabSource for HubTabAdapter {
 
     fn cut_selection(&self, tab_id: TabId) -> CommandResult {
         let view_id = self.view_id_for_tab(tab_id, "page.cut")?;
-        hub::connection().post_or_log(server::ViewCutSelection { view_id });
+        // Trigger the page's own cut action through the Automation World so `YNK-02` records the cut text into the yank ring.
+        self.post_automation(view_id, AutomationRequest::CutSelection, false);
         Ok(())
     }
 
     fn copy_selection(&self, tab_id: TabId) -> CommandResult {
         let view_id = self.view_id_for_tab(tab_id, "page.copy")?;
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        hub::connection().post_or_log(server::ViewRequestSelectedText { view_id, request_id });
+        // Trigger the page's own copy action so `copy` listeners run and both `text/html` and `text/plain` are copied.
+        self.post_automation(view_id, AutomationRequest::CopySelection, false);
         Ok(())
     }
 

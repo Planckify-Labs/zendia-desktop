@@ -8,16 +8,25 @@
 //! background service states.
 
 use super::StubBackend;
-use crate::commands::{ArgumentSchema, ArgumentType, Command, CommandDescriptor, CommandError, CommandResult};
+use crate::commands::{
+    ArgumentSchema, ArgumentType, Command, CommandDescriptor, CommandError, CommandResult, UblockAction,
+};
 use crate::contributions::ContributionSource;
 use crate::events::{Event, ViewRequest};
 use crate::model::{BrowserModel, ServiceId, ServiceState, ServiceStatus};
 use crate::modules::{
-    ExtensionId, PluginId, PluginStatus, cycle_service_status, extension_to_toolbar_item, parse_service_id,
-    parse_service_status, plugin_to_side_panel, service_down_summary, service_label, service_status_in,
-    service_status_label, unpinned_site_extensions,
+    ExtensionId, PluginId, PluginStatus, SAMPLE_EXTENSION_ID, cycle_service_status, extension_to_toolbar_item,
+    parse_service_id, parse_service_status, plugin_to_side_panel, service_down_summary, service_label,
+    service_status_in, service_status_label, unpinned_site_extensions,
 };
 use crate::settings::{SettingsGroupId, apply_browser_setting, reset_browser_settings_group};
+
+fn is_ublock_extension(id: &str, name: &str) -> bool {
+    matches!(
+        id,
+        "uBlock0@raymondhill.net" | "cjpalhdlnbpafiamejdnhcphjbkeiagm" | SAMPLE_EXTENSION_ID
+    ) || name.eq_ignore_ascii_case("uBlock Origin")
+}
 
 fn find_arg<'a>(args: &'a [(String, String)], key: &str) -> Option<&'a str> {
     args.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
@@ -106,9 +115,14 @@ pub(crate) fn parse_command(name: &str, args: &[(String, String)]) -> Result<Opt
             extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
             pinned: parse_bool_arg(name, args, "pinned", true)?,
         })),
-        "extension.invoke_action" => Ok(Some(Command::ExtensionInvokeAction {
-            extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
-        })),
+        "extension.invoke_action" => {
+            let extension_id = ExtensionId::new(parse_required_string(name, args, "extension_id")?);
+            if parse_bool_arg(name, args, "from_keyboard", false)? {
+                Ok(Some(Command::ExtensionInvokeActionFromKeyboard { extension_id }))
+            } else {
+                Ok(Some(Command::ExtensionInvokeAction { extension_id }))
+            }
+        }
         "extension.remove" => Ok(Some(Command::ExtensionRemove {
             extension_id: ExtensionId::new(parse_required_string(name, args, "extension_id")?),
         })),
@@ -178,7 +192,7 @@ pub(crate) fn parse_command(name: &str, args: &[(String, String)]) -> Result<Opt
                 extension_id: ExtensionId::new(ext_id),
             }))
         }
-        _ => Ok(None),
+        other => Ok(UblockAction::parse(other).map(|action| Command::UblockInvoke { action })),
     }
 }
 
@@ -446,6 +460,71 @@ pub(crate) fn command_descriptors() -> Vec<CommandDescriptor> {
                 "Service id (agent_server, input_server, plugin_host, extension_server)",
             )],
         },
+        CommandDescriptor {
+            name: "agent.select_and_open".to_string(),
+            title: "Select Agent and Open Panel".to_string(),
+            description: "Switch to an installed AI agent and open the Agent panel".to_string(),
+            arguments: vec![ArgumentSchema::new("agent_id", ArgumentType::String, true, "Agent id")],
+        },
+        CommandDescriptor {
+            name: "statusline.set_enabled".to_string(),
+            title: "Show or Hide Vim Mode Indicator".to_string(),
+            description: "Enable or disable showing Zendia's Vim mode indicator in the corner".to_string(),
+            arguments: vec![ArgumentSchema::new(
+                "enabled",
+                ArgumentType::Bool,
+                true,
+                "Whether the Vim mode indicator is shown",
+            )],
+        },
+        CommandDescriptor {
+            name: "ublock.popup".to_string(),
+            title: "uBlock Origin Popup".to_string(),
+            description: "Open uBlock Origin's popup with keyboard hints".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "ublock.zapper".to_string(),
+            title: "uBlock Element Zapper".to_string(),
+            description: "Launch uBlock Origin's element zapper on the active page".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "ublock.picker".to_string(),
+            title: "uBlock Element Picker".to_string(),
+            description: "Launch uBlock Origin's element picker on the active page".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "ublock.logger".to_string(),
+            title: "uBlock Logger".to_string(),
+            description: "Open uBlock Origin's request logger".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "ublock.dashboard".to_string(),
+            title: "uBlock Settings Dashboard".to_string(),
+            description: "Open uBlock Origin's dashboard".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "ublock.relax".to_string(),
+            title: "uBlock Relax Blocking".to_string(),
+            description: "Relax uBlock Origin's blocking mode on the active page".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "ublock.toggle_cosmetic".to_string(),
+            title: "uBlock Toggle Cosmetic Filtering".to_string(),
+            description: "Toggle uBlock Origin cosmetic filtering on the active site".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
+            name: "ublock.toggle_javascript".to_string(),
+            title: "uBlock Toggle JavaScript".to_string(),
+            description: "Toggle JavaScript blocking in uBlock Origin on the active site".to_string(),
+            arguments: Vec::new(),
+        },
     ]
 }
 
@@ -524,6 +603,9 @@ impl StubBackend {
                     })?;
                     state.model.settings.clone()
                 };
+                if key == "vim.leader" {
+                    self.refresh_active_vim_profile();
+                }
                 self.bus.publish(Event::BrowserSettingsChanged { settings });
                 Ok(())
             }
@@ -533,6 +615,9 @@ impl StubBackend {
                     reset_browser_settings_group(&mut state.model.settings, group);
                     state.model.settings.clone()
                 };
+                if group == SettingsGroupId::Vim {
+                    self.refresh_active_vim_profile();
+                }
                 self.bus.publish(Event::BrowserSettingsChanged { settings });
                 Ok(())
             }
@@ -750,6 +835,10 @@ impl StubBackend {
                 self.bus.publish(Event::ContributionsChanged { contributions });
                 Ok(())
             }
+            Command::ExtensionInvokeActionFromKeyboard { extension_id } => {
+                self.mark_extension_popup_from_keyboard();
+                self.handle_settings_or_module_command(Command::ExtensionInvokeAction { extension_id })
+            }
             Command::ExtensionInvokeAction { extension_id } => {
                 if let Some(source) = self.current_extension_source() {
                     let status = {
@@ -798,14 +887,33 @@ impl StubBackend {
             }
             Command::ExtensionRemove { extension_id } => {
                 if let Some(source) = self.current_extension_source() {
+                    {
+                        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                        let was_ublock = state
+                            .model
+                            .extensions
+                            .iter()
+                            .any(|e| e.id == extension_id && is_ublock_extension(&e.id.0, &e.name));
+                        if was_ublock {
+                            state.model.shield_enabled = false;
+                        }
+                    }
                     return source.remove(&extension_id);
                 }
                 let (extensions, contributions) = {
                     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let was_ublock = state
+                        .model
+                        .extensions
+                        .iter()
+                        .any(|e| e.id == extension_id && is_ublock_extension(&e.id.0, &e.name));
                     let before = state.model.extensions.len();
                     state.model.extensions.retain(|e| e.id != extension_id);
                     if state.model.extensions.len() == before {
                         return Err(CommandError::Failed(format!("unknown extension `{}`", extension_id.0)));
+                    }
+                    if was_ublock {
+                        state.model.shield_enabled = false;
                     }
                     sync_module_contributions(&mut state.model);
                     (state.model.extensions.clone(), state.model.contributions.clone())
@@ -813,6 +921,43 @@ impl StubBackend {
                 self.bus.publish(Event::ExtensionsChanged { extensions });
                 self.bus.publish(Event::ContributionsChanged { contributions });
                 Ok(())
+            }
+            Command::UblockInvoke { action } => {
+                let target_ext = {
+                    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                    let running = matches!(
+                        service_status_in(&state.model.services, ServiceId::ExtensionServer),
+                        ServiceStatus::Running
+                    );
+                    if !running {
+                        None
+                    } else {
+                        state
+                            .model
+                            .extensions
+                            .iter()
+                            .find(|e| e.enabled && is_ublock_extension(&e.id.0, &e.name))
+                            .map(|e| e.id.clone())
+                    }
+                };
+                let Some(extension_id) = target_ext else {
+                    self.show_toast(
+                        "uBlock Origin is turned off or not installed.".to_string(),
+                        None,
+                        Some(2800),
+                    );
+                    return Ok(());
+                };
+                match action.manifest_command() {
+                    None => {
+                        self.mark_extension_popup_from_keyboard();
+                        self.handle_settings_or_module_command(Command::ExtensionInvokeAction { extension_id })
+                    }
+                    Some(cmd_name) => self.handle_settings_or_module_command(Command::ExtensionInvokeCommand {
+                        extension_id,
+                        name: cmd_name.to_string(),
+                    }),
+                }
             }
             Command::ExtensionReload { extension_id } => {
                 if let Some(source) = self.current_extension_source() {
@@ -1132,5 +1277,137 @@ mod tests {
                 group: Some(SettingsGroupId::Extensions),
             }
         );
+    }
+
+    #[test]
+    fn ublock_popup_marks_compact_auto_toggle_and_panel_rules_match_fork() {
+        use crate::agent::AGENT_PANEL_ID;
+        use crate::contributions::{SidePanelId, SidePanelLayout};
+        use crate::model::CompactHide;
+        use crate::webchat::WEBCHAT_PANEL_ID;
+
+        let core = StubBackend::new();
+        let sub = core.subscribe();
+
+        // CFG-03: Enabling vim mode auto-enables compact mode (`Both`) until user customizes compact mode.
+        assert!(!core.model().layout.compact_mode);
+        core.invoke(Command::VimSetEnabled { enabled: true }).unwrap();
+        assert!(core.model().layout.compact_mode);
+        assert_eq!(core.model().layout.compact_hide, CompactHide::Both);
+        core.invoke(Command::VimSetEnabled { enabled: false }).unwrap();
+        assert!(!core.model().layout.compact_mode);
+
+        core.invoke(Command::LayoutSetCompactMode { enabled: false }).unwrap();
+        assert!(core.user_customized_compact());
+        core.invoke(Command::VimSetEnabled { enabled: true }).unwrap();
+        assert!(!core.model().layout.compact_mode);
+        core.invoke(Command::from_name_and_args("layout.reset", &[]).unwrap())
+            .unwrap();
+        assert!(!core.user_customized_compact());
+        assert!(core.model().layout.compact_mode);
+
+        // EXT-06 & EXT-01: When ExtensionServer is stopped, ublock.popup toasts; when running, marks popup keyboard-opened.
+        core.invoke(Command::ServiceSetState {
+            service: ServiceId::ExtensionServer,
+            status: ServiceStatus::Stopped { reason: None },
+        })
+        .unwrap();
+        core.invoke(Command::from_name_and_args("ublock.popup", &[]).unwrap())
+            .unwrap();
+        assert!(
+            core.model()
+                .toasts
+                .iter()
+                .any(|t| t.message == "uBlock Origin is turned off or not installed.")
+        );
+
+        core.invoke(Command::ServiceSetState {
+            service: ServiceId::ExtensionServer,
+            status: ServiceStatus::Running,
+        })
+        .unwrap();
+        while sub.try_recv().is_ok() {}
+        core.invoke(Command::from_name_and_args("ublock.popup", &[]).unwrap())
+            .unwrap();
+        core.open_extension_popup(ExtensionId::new(SAMPLE_EXTENSION_ID), "ext://popup.html".to_string());
+        let mut saw_kbd_popup = false;
+        while let Ok(ev) = sub.try_recv() {
+            if let Event::ViewRequested {
+                request: ViewRequest::ExtensionPopupOpen { from_keyboard, .. },
+                ..
+            } = ev
+            {
+                saw_kbd_popup = from_keyboard;
+            }
+        }
+        assert!(saw_kbd_popup, "ublock.popup should mark popup as keyboard-opened");
+
+        // AGK-06 & AGK-07: `agent.select_and_open` selects the agent and closes WebChat; Explorer closes non-Split Agent panel.
+        core.invoke(Command::PanelOpen {
+            panel_id: SidePanelId::new(WEBCHAT_PANEL_ID),
+            focus: true,
+        })
+        .unwrap();
+        while sub.try_recv().is_ok() {}
+        core.invoke(
+            Command::from_name_and_args("agent.select_and_open", &[("agent_id".into(), "codex".into())]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(core.model().default_agent_id.unwrap().0, "codex");
+        let mut closed_webchat = false;
+        while let Ok(ev) = sub.try_recv() {
+            if matches!(
+                ev,
+                Event::ViewRequested {
+                    request: ViewRequest::PanelClose { ref panel_id },
+                    ..
+                } if panel_id.as_str() == WEBCHAT_PANEL_ID
+            ) {
+                closed_webchat = true;
+            }
+        }
+        assert!(closed_webchat);
+
+        core.invoke(Command::ExplorerOpen).unwrap();
+        let mut closed_float_agent = false;
+        while let Ok(ev) = sub.try_recv() {
+            if matches!(
+                ev,
+                Event::ViewRequested {
+                    request: ViewRequest::PanelClose { ref panel_id },
+                    ..
+                } if panel_id.as_str() == AGENT_PANEL_ID
+            ) {
+                closed_float_agent = true;
+            }
+        }
+        assert!(closed_float_agent, "floating agent panel should close on Explorer open");
+        core.invoke(Command::ExplorerClose).unwrap();
+
+        core.invoke(Command::PanelSetLayout {
+            panel_id: SidePanelId::new(AGENT_PANEL_ID),
+            layout: SidePanelLayout::Split,
+        })
+        .unwrap();
+        core.invoke(Command::PanelOpen {
+            panel_id: SidePanelId::new(AGENT_PANEL_ID),
+            focus: true,
+        })
+        .unwrap();
+        while sub.try_recv().is_ok() {}
+        core.invoke(Command::ExplorerOpen).unwrap();
+        let mut closed_split_agent = false;
+        while let Ok(ev) = sub.try_recv() {
+            if matches!(
+                ev,
+                Event::ViewRequested {
+                    request: ViewRequest::PanelClose { ref panel_id },
+                    ..
+                } if panel_id.as_str() == AGENT_PANEL_ID
+            ) {
+                closed_split_agent = true;
+            }
+        }
+        assert!(!closed_split_agent, "split agent panel must stay open on Explorer open");
     }
 }

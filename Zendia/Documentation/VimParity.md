@@ -47,14 +47,14 @@ reuse here (confirmed 2026-11-27).
 
 | ID | What happens now | Evidence |
 | --- | --- | --- |
-| [INS-04](#insert-mode-and-fields) | **After `i`, typed characters often never reach the page**: at startup, after switching tabs or panes, and more (reported from use) | L, C |
-| [EXP-01](#explorer-sidebar) | In the sidebar, `d` closes the **active** tab, not the selected row. `c p e M U R r >` also act on the active tab | L, T |
-| [INS-01](#insert-mode-and-fields) | Email, number and date fields and `<select>` never enter insert mode. Typing runs vim keys: `r` reloads the page, `p` loads the clipboard's address | L, C |
-| [RT-02](#key-routing) | Mapped letters cannot be typed into the web chat panel or an extension popup while vim mode is on (also [EXT-02](#extensions)) | C |
-| [RT-01](#key-routing) | Vim mode turns off every standard shortcut: Ctrl+T, Ctrl+W, Ctrl+Tab, F5, Alt+Left, zoom and the rest | L, T, C |
-| [JMP-01](#jump-labels-s-gs-s-and-i) | On a zoomed page, picking a label clicks the wrong place | C |
-| [NAV-20](#tabs-history-addresses-find-spaces-and-session) | After renaming a space from the keys with the library closed, jump labels stop taking letters | L, C |
-| [WIN-01](#splits-panels-and-window-mode) | `<leader>\|` and `<leader>-` cannot split a tab (reported from use) | L, T |
+| ~~[INS-04](#insert-mode-and-fields)~~ ✓ | **Done** — Page surface takes keyboard focus at startup, on tab/pane/popup switch, and when overlays close | L, C |
+| ~~[EXP-01](#explorer-sidebar)~~ ✓ | **Done** — Explorer commands (`d c p e M U R r >`) act on the selected/cursor sidebar rows rather than the active tab | L, T |
+| ~~[INS-01](#insert-mode-and-fields)~~ ✓ | **Done** — Non-text editable controls (`email`, `number`, `date`, `time`, `<select>`, etc.) report focus and enter insert mode | L, C |
+| ~~[RT-02](#key-routing)~~ ✓ | **Done** — Web chat and extension popup pages have independent vim modes, engines, and field focus (also [EXT-02](#extensions)) | C |
+| ~~[RT-01](#key-routing)~~ ✓ | **Done** — Unused keys with nothing pending fall back to `standard.toml` shortcuts | L, T, C |
+| ~~[JMP-01](#jump-labels-s-gs-s-and-i)~~ ✓ | **Done** — Page clicks multiply by `device_pixel_ratio * tab_zoom` | C |
+| ~~[NAV-20](#tabs-history-addresses-find-spaces-and-session)~~ ✓ | **Done** — Space rename only intercepts keys while the rename UI is on screen | L, C |
+| ~~[WIN-01](#splits-panels-and-window-mode)~~ ✓ | **Done** — `<leader>\|` / `w v` and `<leader>-` / `w s` open the split picker and divide only the current pane | L, T |
 
 ## Root causes
 
@@ -76,14 +76,17 @@ Do not "fix" these without asking.
 | --- | --- |
 | A field that a page focuses by itself puts the page in insert mode. The fork refused such a focus (up to 3 times, until the user did something) | Requested 2026-11-27 |
 | Boosts are not ported, so `<leader>ob` and `gb` have no mapping | `FreyaUIPort.md`, "Not ported"; confirmed 2026-11-27 |
+| `<leader>ff` opens the URL bar on the page's address. The fork opened it empty, as a search over tabs, history and bookmarks | Commit `bf45459f719`; confirmed 2026-11-27 |
+| Vim mode is off until the user turns it on, also as the choice offered in the first-run setup. The fork had it on by default | `Architecture.md`, "Vim mode (optional)"; confirmed 2026-11-27 |
 
-These were decided **before** the identical bar was restated. Confirm that each still stands:
+Decisions resolved on 2026-11-27 (not approved differences — match the fork or implement in full):
 
-| Difference | Where it came from |
+| Item | Decision |
 | --- | --- |
-| `v` leaves out words that are clipped or covered, and a paragraph's bar spans its connected lines only | Fix made 2026-11-27 after `v` was reported broken |
-| `<leader>ff` opens the URL bar on the page's address. The fork opened it empty, as a search over tabs, history and bookmarks | Commit `bf45459f719` |
-| Vim mode is off until the user turns it on, also as the choice offered in the first-run setup. The fork had it on by default | `Architecture.md`, "Vim mode (optional)" |
+| `v` word and paragraph filtering | Exclude hidden (`visibility: hidden`, `opacity: 0`), overflow-clipped, covered, and UA-shadow-root text from `v` while fixing `clippedRect` and `wordShows` so button text and adjacent links without spaces (`VIS-04`) are labeled accurately and `opacity: 0` controls remain jumpable in `s`/`gs`/`i` (`JMP-02`) |
+| Picker `/` filter (PIC-02) | Remove the `/` filter in vim pickers so pickers match the old fork strictly |
+| Native Settings window (PG-01) | Add full vim support inside the native Settings and Extension Manager window: scroll motions, `s` jump labels on controls, `i` / `<Esc>` field modes, and the statusline |
+| Engine boundaries (`Architecture.md` / `FORK.md`) | Route page-side capabilities (non-text editable focus, frames, scroll/resize/copy notifications, closed shadow roots) over the existing Isolated Worlds and generic Embedder Channel seams rather than adding feature-specific Hub IPC messages |
 
 An earlier approval for larger jump labels was withdrawn on 2026-11-27 after use ("the labeling is not really as good as
 the old forks"): [JMP-06](#jump-labels-s-gs-s-and-i).
@@ -113,13 +116,13 @@ Fork behaviour (`fork: Zendia.sys.mjs`, `config/ZendiaOptions.sys.mjs`):
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| CFG-01 | P1 | C | Turning vim on or off in Settings or the app menu is not saved. A restart brings back the onboarding choice (`stub.rs:2999`) | Persist the setting where it is changed |
-| CFG-02 | P2 | C | The statusline resting style is not saved | Persist it |
-| CFG-03 | P1 | T | Turning vim on applies none of the layout defaults | Apply and restore them as the fork does |
-| CFG-04 | P1 | C | No user keymap file: the profile is compiled in (`keymap_context.rs:53`) | Load user profiles over the base profile |
-| CFG-05 | P1 | C | No leader or `timeoutlen` setting | Add both, applied live |
-| CFG-06 | P3 | C | Notation: the fork reads an unknown or unclosed `<` as a literal and a space as `<Space>`. The port rejects the first and ignores the second | Match once user maps exist |
-| CFG-07 | P3 | C | The Vim settings page says standard shortcuts remain available, which is false until RT-01 is fixed | Fix RT-01, then check the text |
+| ~~CFG-01~~ ✓ | P1 | C | Turning vim on or off in Settings or the app menu is not saved. A restart brings back the onboarding choice (`stub.rs:2999`) | **Done** — Persisted in `<profile>/vim.conf` on every toggle and loaded at startup |
+| ~~CFG-02~~ ✓ | P2 | C | The statusline resting style is not saved | **Done** — Persisted `statusline_enabled` and `statusline_show` in `<profile>/vim.conf` |
+| ~~CFG-03~~ ✓ | P1 | T | Turning vim on applies none of the layout defaults | **Done** — Auto-applies `compact_mode = true, compact_hide = Both` until user customizes compact mode, and restores on `layout.reset` |
+| ~~CFG-04~~ ✓ | P1 | C | No user keymap file: the profile is compiled in (`keymap_context.rs:53`) | **Done** — Loads `<profile>/zendia/zendia.json` (`extras`, `plugins`, priority-1000 `keymaps`, `rhs: false` unmap, fork action translation) |
+| ~~CFG-05~~ ✓ | P1 | C | No leader or `timeoutlen` setting | **Done** — Added live `vim_leader` and `vim_timeoutlen` settings persisted in `vim.conf` and reloaded across engines |
+| ~~CFG-06~~ ✓ | P3 | C | Notation: the fork reads an unknown or unclosed `<` as a literal and a space as `<Space>`. The port rejects the first and ignores the second | **Done** — Matched fork `KeySequence::parse` for literal `<` and raw space as `<Space>` |
+| ~~CFG-07~~ ✓ | P3 | C | The Vim settings page says standard shortcuts remain available, which is false until RT-01 is fixed | **Done** — RT-01 fixed and Vim settings page expanded with statusline, leader, timeoutlen, and `zendia.json` controls |
 
 ## Key routing
 
@@ -141,12 +144,12 @@ Fork behaviour (`fork: actors/ZendiaKeysChild.sys.mjs`, `Zendia.sys.mjs`, `core/
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| RT-01 | P0 | L, T, C | With vim on, only the vim tables are consulted. Unused keys never reach `standard.toml`: Ctrl+T, Ctrl+W (normal), Ctrl+Tab, Ctrl+Shift+T, Ctrl+R, F5, Alt+Left, Ctrl+=, Ctrl+-, Ctrl+Q, Ctrl+N and others do nothing | When the engine does not use a key and has nothing pending, resolve it in the standard table. Vim maps win where both have the key |
-| RT-02 | P0 | C | A web chat or extension popup page uses the active tab's mode (`surface.rs:313`). A mapped letter is taken from the page, then dropped (`browser.rs:966`, `:987`) or run on the tab. Their fields never report focus, as `hub_adapter.rs:485` looks them up as tabs | Give each page view its own mode and field state |
-| RT-03 | P1 | C | While labels, the explorer, the toolbar or the library keep keys, keydown is withheld but keyup is forwarded (`surface.rs:310` against `:334`) | Record every withheld key so its keyup is withheld too |
-| RT-04 | P1 | C | Page actions answer asynchronously and the keys typed meanwhile run as vim keys. `i` with several fields captures nothing until its labels arrive (`stub/page_actions.rs`, `InputChoose`); text typed right after `i` or `gi` runs commands until insert mode is reported | Hold keys while a page action that changes mode is in flight, then handle them in order (`start_jump` already does this for jumps) |
-| RT-05 | P2 | C | The browser's own text fields apply Ctrl+W, Ctrl+U and Ctrl+H with vim **off** too (`text_field.rs:208`), so Ctrl+W in the URL bar no longer closes the tab. Other insert maps do not apply there | Apply insert maps there only with vim on |
-| RT-06 | P2 | R | The which-key popup and the window both handle Backspace, which may go back two levels | Let the engine alone handle it |
+| ~~RT-01~~ ✓ | P0 | L, T, C | With vim on, only the vim tables are consulted. Unused keys never reach `standard.toml`: Ctrl+T, Ctrl+W (normal), Ctrl+Tab, Ctrl+Shift+T, Ctrl+R, F5, Alt+Left, Ctrl+=, Ctrl+-, Ctrl+Q, Ctrl+N and others do nothing | **Done** — Unused keys with nothing pending fall back to `standard.toml`; vim mappings win |
+| ~~RT-02~~ ✓ | P0 | C | A web chat or extension popup page uses the active tab's mode (`surface.rs:313`). A mapped letter is taken from the page, then dropped (`browser.rs:966`, `:987`) or run on the tab. Their fields never report focus, as `hub_adapter.rs:485` looks them up as tabs | **Done** — Per-page `PageVimState` + `KeyEngine` + `auxiliary_pages` |
+| ~~RT-03~~ ✓ | P1 | C | While labels, the explorer, the toolbar or the library keep keys, keydown is withheld but keyup is forwarded (`surface.rs:310` against `:334`) | **Done** — Withheld `KeyDown` codes suppress matching `KeyUp` events |
+| ~~RT-04~~ ✓ | P1 | C | Page actions answer asynchronously and the keys typed meanwhile run as vim keys. `i` with several fields captures nothing until its labels arrive (`stub/page_actions.rs`, `InputChoose`); text typed right after `i` or `gi` runs commands until insert mode is reported | **Done** — `mode_transition_pending` holds and replays keys in FIFO order |
+| ~~RT-05~~ ✓ | P2 | C | The browser's own text fields apply Ctrl+W, Ctrl+U and Ctrl+H with vim **off** too (`text_field.rs:208`), so Ctrl+W in the URL bar no longer closes the tab. Other insert maps do not apply there | **Done** — Insert editing keys in `TextField` gated on `vim_mode_enabled` |
+| ~~RT-06~~ ✓ | P2 | R | The which-key popup and the window both handle Backspace, which may go back two levels | **Done** — `KeyEngine` alone handles `<BS>` while keys are pending |
 
 ## Modes
 
@@ -166,9 +169,9 @@ page in normal mode even if it kept a field focused (ported). A **clicked** tab 
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| MD-01 | P1 | T | There is one mode for the window. Switching tabs and back loses visual mode and `I` insert mode (`stub/vim.rs:49`). Pending keys are shared too | Keep mode, explicit insert and pending keys per page |
-| MD-02 | P1 | T | Visual mode survives a navigation | A new document starts in normal mode |
-| MD-03 | P1 | T | Jump labels survive a tab switch and a navigation, and keep taking keys, so typing on the new tab picks hidden labels | End the jump on tab switch, navigation and page unload; keep it per page |
+| ~~MD-01~~ ✓ | P1 | T | There is one mode for the window. Switching tabs and back loses visual mode and `I` insert mode (`stub/vim.rs:49`). Pending keys are shared too | **Done** — Mode, explicit insert, and pending keys kept per page |
+| ~~MD-02~~ ✓ | P1 | T | Visual mode survives a navigation | **Done** — Navigation and unload reset document-scoped vim state to normal mode |
+| ~~MD-03~~ ✓ | P1 | T | Jump labels survive a tab switch and a navigation, and keep taking keys, so typing on the new tab picks hidden labels | **Done** — Jump labels are per page and end on tab switch, navigation, and unload |
 
 ## Insert mode and fields
 
@@ -189,10 +192,10 @@ Fork behaviour (`fork: plugins/ZendiaInputs*.sys.mjs`, `ZendiaEdit*.sys.mjs`, `c
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| INS-04 | P0 | L, C | **Characters typed after vim moves to a page do not reach it** until the page is clicked (table below). The field is chosen, but the page does not have the window's keyboard focus: a page surface takes it on a mouse press (`ui/page/surface.rs:212`), and `request_focus_active_surface` returns it to the surface used last, which after a switch is gone | Whenever the page that should get keys changes, and at startup and after anything closes, move keyboard focus to that page's surface |
-| INS-01 | P0 | L, C | A field counts as focused only when the input method is on. That is false for every input without a text selection (`email`, `number`, `date`, `time`, `month`, `week`, `datetime-local`; `HTMLInputElement.cpp:4110`) and for `select`. The page stays in normal mode while the user types | Report "an editable element has the focus" on its own (extend the embedder seam, or report focus changes from the Automation World), with the fork's definition of editable |
-| INS-02 | P2 | C | `gi` only remembers fields focused after the Automation World script was first loaded into the document (`automation_world.js:1262`) | Load the script with the document, or have the engine report the last field |
-| INS-03 | P2 | R | `<C-u>` is "select to line start, then delete backward" (`hub_adapter.rs:637`). With the caret already at the line start this may delete the line break | Check, and delete only to the line start |
+| ~~INS-04~~ ✓ | P0 | L, C | **Characters typed after vim moves to a page do not reach it** until the page is clicked (table below). The field is chosen, but the page does not have the window's keyboard focus: a page surface takes it on a mouse press (`ui/page/surface.rs:212`), and `request_focus_active_surface` returns it to the surface used last, which after a switch is gone | **Done** — `PageSurfaceContext` focuses the effective page surface at startup, on page/tab/popup switch, and when overlays close |
+| ~~INS-01~~ ✓ | P0 | L, C | A field counts as focused only when the input method is on. That is false for every input without a text selection (`email`, `number`, `date`, `time`, `month`, `week`, `datetime-local`; `HTMLInputElement.cpp:4110`) and for `select`. The page stays in normal mode while the user types | **Done** — Reported via generic embedder push (`editable_focus`) and Automation World with the fork's editable definition |
+| ~~INS-02~~ ✓ | P2 | C | `gi` only remembers fields focused after the Automation World script was first loaded into the document (`automation_world.js:1262`) | **Done** — `AutomationRequest::Init` sent on load finish seeds `lastField` |
+| ~~INS-03~~ ✓ | P2 | R | `<C-u>` is "select to line start, then delete backward" (`hub_adapter.rs:637`). With the caret already at the line start this may delete the line break | **Done** — `EditDeleteToLineStart` deletes only back to the current line start |
 
 Where typing after `i` or `gi` worked in the real window (INS-04):
 
@@ -215,7 +218,7 @@ The test for a fix: do each step on the left, press `i`, type, and see the text 
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| FRM-01 | P1 | L, C | The script runs only in the top document (`PageClient.cpp:2950`). Nothing inside an `iframe`, same origin or not, gets labels, is found by `i` `]i` `gi`, can be reached by `S` or `v`, or is part of a CAPTCHA | Run the Automation World in every frame and aggregate in the browser |
+| ~~FRM-01~~ ✓ | P1 | L, C | The script runs only in the top document (`PageClient.cpp:2950`). Nothing inside an `iframe`, same origin or not, gets labels, is found by `i` `]i` `gi`, can be reached by `S` or `v`, or is part of a CAPTCHA | **Done** — Self-installs Automation World into child frames via `__zendiaEvalFrame`, aggregates scaled uncovered rects, and routes picks/fields/visual motions across frames |
 
 Fork behaviour to rebuild (`fork: plugins/ZendiaJumpContent.sys.mjs:196-370`, `actors/ZendiaKeys*.sys.mjs`):
 
@@ -262,26 +265,26 @@ Fork behaviour (`fork: plugins/ZendiaTabs.sys.mjs`, `ZendiaNavigation`, `ZendiaF
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| NAV-01 | P1 | C | **Security.** `p` and `P` load the clipboard text with no scheme check, so `javascript:` and `file:` addresses pass (`browser.rs:741`) | Fix up the text, then open http and https only |
-| NAV-02 | P1 | C | `<leader>qs` reopens every tab in the closed-tab list (`tab_actions.rs:504`) | Restore the last session |
-| NAV-03 | P1 | T | `<leader>bf` takes the tab out of its folder; there is no picker | Add the "Move to Folder" picker |
-| NAV-04 | P1 | T | `<leader>bj` opens a tab search picker | Label the sidebar rows |
-| NAV-05 | P1 | C | `<leader>qw` exits the whole application (`browser.rs:773`) | Close the window |
-| NAV-06 | P1 | C | `<leader>uz` does nothing (`stub.rs:3443`) | Reader view, once the engine side exists |
-| NAV-07 | P2 | C | `<leader>bm` and explorer `m` open the menu at a fixed point, 240 by 96 (`browser.rs:730`) | Anchor it to the row, showing the sidebar |
-| NAV-08 | P2 | R | A counted back or forward runs single steps one after another, which may move only once | Jump by the count in one request |
-| NAV-09 | P2 | C | The find bar is new UI without the fork's find bar options (highlight all, match case, whole words) | Match the fork's find bar |
-| NAV-10 | P2 | C | The `<leader>x` extensions picker differs | See [EXT-05](#extensions) |
-| NAV-11 | P3 | C | `un` clears sidebar notifications and toasts; `ub` goes from "system" to dark whatever is showing | Match the fork |
-| NAV-12 | P2 | C | `<leader>E` also changes the toolbar layout (`stub.rs:2938`), so the single toolbar is gone after toggling. The fork flips only the sidebar | Change only whether the sidebar is expanded |
-| NAV-13 | P1 | T, C | `<leader><Tab>d` deletes the space at once and moves its tabs to the neighbouring space (`stub.rs:1204`). The fork asks first: "Delete Space?", "Are you sure you want to delete { name }? This action cannot be undone." | Confirm first, then do what the fork does with the space and its tabs |
-| NAV-14 | P1 | T, C | `<leader><Tab>u` only shows the toast "Unloaded tabs in …"; nothing is unloaded (`stub.rs`, `SpaceUnload`) | Unload the space's tabs |
-| NAV-15 | P2 | T, C | `<leader><Tab><Tab>` creates a space at once. The fork opens its new space form | Open the form |
-| NAV-16 | P1 | C | `<leader>bM` and sidebar `M` flip the mute icon only; nothing tells the web engine (`handle_tab_toggle_mute`) | Mute the tab's page |
-| NAV-17 | P1 | C | `<leader>bu` and sidebar `U` only mark the tab as unloaded and switch away; its page stays loaded (`handle_tab_unload`) | Unload the page, and load it again on activation |
-| NAV-18 | P1 | L, T, C | `<leader>,` `<leader>fb` `<leader>fr` `<leader>/` do not filter. The URL bar opens holding a selected `%`, `^` or `?` and offers to search the web for it; typing replaces it, and nothing is restricted | Restrict the URL bar to tabs, history or web search, with no prefix in the query |
-| NAV-19 | P1 | C | `<leader><Tab>r` and `<leader><Tab>i` show nothing while the library is closed: the rename field and icon picker are drawn only in the library's Spaces section (`browser.rs:563`) | Show the sidebar and rename or pick there, as the fork does |
-| NAV-20 | P0 | L, C | After `<leader><Tab>r` with the library closed, the unseen rename stays on, and the window then stops sending keys to jump labels (`browser.rs:1004`). Letters typed at `s` labels would run vim commands instead | Never keep a rename that is not on screen (fix with NAV-19) |
+| ~~NAV-01~~ ✓ | P1 | C | **Security.** `p` and `P` load the clipboard text with no scheme check, so `javascript:` and `file:` addresses pass (`browser.rs:741`) | **Done** — `resolve_clipboard_paste_url` trims single-line input, fixes up URL/search, and opens `http:`/`https:` only |
+| ~~NAV-02~~ ✓ | P1 | C | `<leader>qs` reopens every tab in the closed-tab list (`tab_actions.rs:504`) | **Done** — Saves live session to `session.conf`, rotates to `session.prev.conf` on startup, and restores previous session |
+| ~~NAV-03~~ ✓ | P1 | T | `<leader>bf` takes the tab out of its folder; there is no picker | **Done** — Opens `"Move to Folder"` picker with `New Folder` (`n`), folders, and `Remove from Folder` (`u`) |
+| ~~NAV-04~~ ✓ | P1 | T | `<leader>bj` opens a tab search picker | **Done** — Labels visible sidebar rows and switches directly to the picked tab |
+| ~~NAV-05~~ ✓ | P1 | C | `<leader>qw` exits the whole application (`browser.rs:773`) | **Done** — Closes the current browser window without exiting the whole app |
+| ~~NAV-06~~ ✓ | P1 | C | `<leader>uz` does nothing (`stub.rs:3443`) | **Done** — Toggles Reader Mode via Automation World |
+| ~~NAV-07~~ ✓ | P2 | C | `<leader>bm` and explorer `m` open the menu at a fixed point, 240 by 96 (`browser.rs:730`) | **Done** — Reveals sidebar if hidden and anchors tab/folder menus to the row |
+| ~~NAV-08~~ ✓ | P2 | R | A counted back or forward runs single steps one after another, which may move only once | **Done** — Traverses history by `±count` in a single `ViewTraverseTheHistoryByDelta` call |
+| ~~NAV-09~~ ✓ | P2 | C | The find bar is new UI without the fork's find bar options (highlight all, match case, whole words) | **Done** — Added Highlight All, Match Case, and Whole Words toggles wired to `ViewFindInPage` |
+| ~~NAV-10~~ ✓ | P2 | C | The `<leader>x` extensions picker differs | **Done** — Matched fork `<leader>x` picker (see [EXT-05](#extensions)) |
+| ~~NAV-11~~ ✓ | P3 | C | `un` clears sidebar notifications and toasts; `ub` goes from "system" to dark whatever is showing | **Done** — `un` dismisses toasts/prompts cleanly and `ub` flips away from the resolved system scheme |
+| ~~NAV-12~~ ✓ | P2 | C | `<leader>E` also changes the toolbar layout (`stub.rs:2938`), so the single toolbar is gone after toggling. The fork flips only the sidebar | **Done** — Flips `sidebar_expanded` without overwriting `ToolbarLayout::Single` |
+| ~~NAV-13~~ ✓ | P1 | T, C | `<leader><Tab>d` deletes the space at once and moves its tabs to the neighbouring space (`stub.rs:1204`). The fork asks first: "Delete Space?", "Are you sure you want to delete { name }? This action cannot be undone." | **Done** — Prompts confirmation before deleting non-empty spaces and closes their tabs cleanly |
+| ~~NAV-14~~ ✓ | P1 | T, C | `<leader><Tab>u` only shows the toast "Unloaded tabs in …"; nothing is unloaded (`stub.rs`, `SpaceUnload`) | **Done** — Discards inactive tabs' Hub views via `unload_tab` and restores on activation |
+| ~~NAV-15~~ ✓ | P2 | T, C | `<leader><Tab><Tab>` creates a space at once. The fork opens its new space form | **Done** — Mapped `<leader><Tab><Tab>` to `space.create_form.open` |
+| ~~NAV-16~~ ✓ | P1 | C | `<leader>bM` and sidebar `M` flip the mute icon only; nothing tells the web engine (`handle_tab_toggle_mute`) | **Done** — Wired `TabSource::set_tab_muted` to `ViewTogglePageMuteState` |
+| ~~NAV-17~~ ✓ | P1 | C | `<leader>bu` and sidebar `U` only mark the tab as unloaded and switch away; its page stays loaded (`handle_tab_unload`) | **Done** — Preserves discard state, destroys `view_id`, and recreates/restores view on activation |
+| ~~NAV-18~~ ✓ | P1 | L, T, C | `<leader>,` `<leader>fb` `<leader>fr` `<leader>/` do not filter. The URL bar opens holding a selected `%`, `^` or `?` and offers to search the web for it; typing replaces it, and nothing is restricted | **Done** — Added `AddressBarFilter` (`Tabs`, `History`, `Bookmarks`, `WebSearch`) with removable mode chip and empty query |
+| ~~NAV-19~~ ✓ | P1 | C | `<leader><Tab>r` and `<leader><Tab>i` show nothing while the library is closed: the rename field and icon picker are drawn only in the library's Spaces section (`browser.rs:563`) | **Done** — Reveals sidebar for inline space rename and live `SpaceIconPickerOverlay` |
+| ~~NAV-20~~ ✓ | P0 | L, C | After `<leader><Tab>r` with the library closed, the unseen rename stays on, and the window then stops sending keys to jump labels (`browser.rs:1004`). Letters typed at `s` labels would run vim commands instead | **Done** — Off-screen library space rename never intercepts keys |
 
 `-`, `r`, `R`, `yy`, tab close, reopen, pin, essential and duplicate, and moving between spaces are wired and looked
 right in the core.
@@ -390,13 +393,13 @@ are hidden, and its search prompt is not visible while the agent notice is at th
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| JMP-01 | P0 | C | A pick clicks at CSS position × device pixel ratio, ignoring page zoom (`hub_adapter.rs:616`). The overlay does scale by zoom, so the label looks right and the click lands elsewhere. This also affects the CAPTCHA keys | Multiply by the tab's zoom. Keep zoom per tab |
-| JMP-02 | P1 | L, C | Elements with `opacity: 0` are skipped (`automation_world.js:135`, `:291`), so styled checkboxes, radios and file inputs get no label. The fork's check ignores opacity | Use the fork's visibility test for controls and fields |
-| JMP-03 | P2 | C | A capital label opens only `<a href>` in a background tab; every other control gets a plain click (`:1393`) | Send a real click with Ctrl held |
-| JMP-04 | P2 | C | Labels and the visual cursor move only after a vim scroll or mouse wheel, 180 ms later (`ui/vim/mod.rs:227`). Page scripts scrolling, resizes and layout changes leave them behind | Report scroll and resize from the page |
-| JMP-05 | P2 | C | Closed shadow roots are not searched | Needs engine support in the isolated world |
-| JMP-06 | P2 | L, C | Labels look and sit differently, and read worse than the fork's (reported from use): a dim over the page, bigger labels that cover small controls, placed 2 left and centred instead of 2 right and 2 down | Match the fork column of the style table |
-| JMP-07 | P2 | L | The `› text` prompt of `gs` and `S` is drawn under the agent notice pill at the bottom of the window and cannot be read while the pill shows | Draw the prompt above it, or move one of them |
+| ~~JMP-01~~ ✓ | P0 | C | A pick clicks at CSS position × device pixel ratio, ignoring page zoom (`hub_adapter.rs:616`). The overlay does scale by zoom, so the label looks right and the click lands elsewhere. This also affects the CAPTCHA keys | **Done** — Multiplied by per-tab zoom (`tab_zoom`) |
+| ~~JMP-02~~ ✓ | P1 | L, C | Elements with `opacity: 0` are skipped (`automation_world.js:135`, `:291`), so styled checkboxes, radios and file inputs get no label. The fork's check ignores opacity | **Done** — Uses `element.checkVisibility()` with no options so `opacity: 0` controls and fields are included |
+| ~~JMP-03~~ ✓ | P2 | C | A capital label opens only `<a href>` in a background tab; every other control gets a plain click (`:1393`) | **Done** — Sends real click with `Mod_Ctrl` via `click_at_with_modifiers` on capital hints |
+| ~~JMP-04~~ ✓ | P2 | C | Labels and the visual cursor move only after a vim scroll or mouse wheel, 180 ms later (`ui/vim/mod.rs:227`). Page scripts scrolling, resizes and layout changes leave them behind | **Done** — Reports scroll and resize from top and child frames, queues in-flight refreshes, and keeps existing labels drawn smoothly |
+| ~~JMP-05~~ ✓ | P2 | C | Closed shadow roots are not searched | **Done** — Exposed `__zendiaShadowRoot` in isolated world and wired into `childRoots` |
+| ~~JMP-06~~ ✓ | P2 | L, C | Labels look and sit differently, and read worse than the fork's (reported from use): a dim over the page, bigger labels that cover small controls, placed 2 left and centred instead of 2 right and 2 down | **Done** — Matched every font, padding, color, shadow, no-dim, collision, and clamping value from the fork style table |
+| ~~JMP-07~~ ✓ | P2 | L | The `› text` prompt of `gs` and `S` is drawn under the agent notice pill at the bottom of the window and cannot be read while the pill shows | **Done** — Raises the prompt above closed-panel bottom pills on `CHROME_OVERLAY_LEVEL` |
 
 Also MD-03 (labels survive tab switches), FRM-01 (frames), RT-04 (`i` and type-ahead), CAP-03 (`s` in a challenge).
 Label assignment, ordering, `<CR>`, `<BS>`, `<Esc>`, chords and the text-jump rules match.
@@ -588,15 +591,15 @@ pages' state.
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| CAP-01 | P1 | L, C | No frames, so a CAPTCHA in a frame is not reached: on the framed test pages no CAPTCHA key changed anything (needs FRM-01) | Frames first |
-| CAP-02 | P1 | C | None of the recognition rules: services, widgets, own and drawn CAPTCHAs, solved state | Port `ZendiaCaptcha.sys.mjs` |
-| CAP-03 | P1 | C | No staying jump: a pick ends it, from `gc` and from `s` alike; no sticky labels, re-reads or end conditions | Port the fork's `JumpSession` |
-| CAP-04 | P1 | C | None of `<CR>` `<Tab>` `<C-r>` `<C-a>` `<C-p>` in the labels. `<CR>` picks the first target, `<Tab>` is ignored, the Ctrl keys end the jump | Add them with the flash messages |
-| CAP-05 | P1 | C | No cursor: `.`, `,` (in `s` too), and the fallback when nothing can be labeled | Needs hover, button-held and drag mouse input through the Hub |
-| CAP-06 | P1 | C | No holding or dragging: slider, ruler, board, piece, press-and-hold | Part of the cursor |
-| CAP-07 | P1 | L, C | `<leader>c…` match loose words in a few elements. `ci` takes the first field of any kind, `ca` never switches back, and `cv` may press any "submit" or "continue" button inside a box whose class mentions a challenge | Use the purpose rules, only inside recognised CAPTCHAs |
-| CAP-08 | P1 | C | A picked answer field does not return the keys to the labels on `<Esc>` | Part of the staying jump |
-| CAP-09 | P2 | C | None of the prompts or messages | Copy the strings above |
+| ~~CAP-01~~ ✓ | P1 | L, C | No frames, so a CAPTCHA in a frame is not reached: on the framed test pages no CAPTCHA key changed anything (needs FRM-01) | **Done** — Runs Automation World in child frames and aggregates CAPTCHA controls, canvases, and areas across frames |
+| ~~CAP-02~~ ✓ | P1 | C | None of the recognition rules: services, widgets, own and drawn CAPTCHAs, solved state | **Done** — Ported `ZendiaCaptcha` (15 service frame rules, widgets, scripts, token states, honeypots, `ownCaptchas`, `ownChallenges`, `SOLVED_MARKS`, and pure math) with `test_captcha` unit tests |
+| ~~CAP-03~~ ✓ | P1 | C | No staying jump: a pick ends it, from `gc` and from `s` alike; no sticky labels, re-reads or end conditions | **Done** — Ported staying jump (`gc`, `<leader>cc`, `s` inside challenges, `orPage`, `stickyLabels`, 350 ms / 900 ms polls, 3-miss and solved exit) |
+| ~~CAP-04~~ ✓ | P1 | C | None of `<CR>` `<Tab>` `<C-r>` `<C-a>` `<C-p>` in the labels. `<CR>` picks the first target, `<Tab>` is ignored, the Ctrl keys end the jump | **Done** — Added `<CR>` `<Tab>` `<C-r>` `<C-a>` `<C-p>` with re-read before 1500 ms `"no <purpose> here"` flash notices |
+| ~~CAP-05~~ ✓ | P1 | C | No cursor: `.`, `,` (in `s` too), and the fallback when nothing can be labeled | **Done** — Ported `PointerPad` keyboard cursor (`.` / `,` in `gc` and `s`, 0-target cursor fallback, grid/ruler/board `<Tab>` cycle, and Hub mouse + touch dispatch) |
+| ~~CAP-06~~ ✓ | P1 | C | No holding or dragging: slider, ruler, board, piece, press-and-hold | **Done** — Added capital/draggable/slider/board-piece hold, 21-stop slider ruler, gobang board lattice, `v` toggle hold, `<Esc>` undo, and 12 px / 8 ms drag + touch paths |
+| ~~CAP-07~~ ✓ | P1 | L, C | `<leader>c…` match loose words in a few elements. `ci` takes the first field of any kind, `ca` never switches back, and `cv` may press any "submit" or "continue" button inside a box whose class mentions a challenge | **Done** — Uses `purposeOf` strictly inside recognised CAPTCHAs (`<leader>ca` toggles audio and visual) and refocuses top window |
+| ~~CAP-08~~ ✓ | P1 | C | A picked answer field does not return the keys to the labels on `<Esc>` | **Done** — Staying jump yields keys while `page_editing` is true and reclaims them on `<Esc>` |
+| ~~CAP-09~~ ✓ | P2 | C | None of the prompts or messages | **Done** — Added exact fork staying prompt, missing-purpose notices, no-CAPTCHA cursor banner, `"click"` flash, and cursor prompt strings |
 
 JMP-01 (zoom) breaks CAPTCHA clicks too. The fork's `captcha.fill` and agent-driven jumps belong to the agent work.
 
@@ -619,10 +622,10 @@ they use.
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| VIS-01 | P2 | C | The cursor is scrolled into view only through the focused element's scroller or the document (`automation_world.js:1060`), so it can leave sight inside other scrolling boxes | Scroll every ancestor |
-| VIS-02 | P2 | C | `y` copies plain text only (`:1231`) | Copy as the page's own copy does |
-| VIS-03 | P3 | C | Text hidden by opacity is left out of words and text objects, which the fork included | Match, unless the word filter is kept |
-| VIS-04 | P2 | L | `v` offers no word on a row of links written without spaces, nor on a button's text. The fork labeled both. The port's word filter is the likely cause | Offer them as the fork does |
+| ~~VIS-01~~ ✓ | P2 | C | The cursor is scrolled into view only through the focused element's scroller or the document (`automation_world.js:1060`), so it can leave sight inside other scrolling boxes | **Done** — `revealRectInAncestors` scrolls every scrollable ancestor up through shadow roots, document, and parent frames |
+| ~~VIS-02~~ ✓ | P2 | C | `y` copies plain text only (`:1231`) | **Done** — Invokes `__zendiaCopy` (`perform_copy_action(ClipboardActionTrigger::User)`) and retains both `text/html` and `text/plain` clipboard items |
+| ~~VIS-03~~ ✓ | P3 | C | Text hidden by opacity is left out of words and text objects, which the fork included | **Done** — `isTextRendered` excludes hidden (`visibility: hidden`, `opacity: 0`) dropdowns/tooltips and UA shadow roots from `v`/`S` while `isRendered` keeps `opacity: 0` controls jumpable in `s`/`gs`/`i` (`JMP-02`) |
+| ~~VIS-04~~ ✓ | P2 | L | `v` offers no word on a row of links written without spaces, nor on a button's text. The fork labeled both. The port's word filter is the likely cause | **Done** — Fixed `clippedRect`, `firstRangeRect`, and `wordShows` to label button text and adjacent links without spaces while still filtering overflow-clipped and covered words |
 
 Also MD-01, MD-02, JMP-04, FRM-01.
 
@@ -642,11 +645,11 @@ Fork behaviour (`fork: core/ZendiaYankRing.sys.mjs`, `plugins/ZendiaYank*.sys.mj
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| YNK-01 | P1 | C | Kept in memory only | Persist in the profile |
-| YNK-02 | P1 | C | Ctrl+C, cut and menu copies in pages do not join the ring | Report page copies |
-| YNK-03 | P1 | C | The system clipboard is not added when the history opens | Add it |
-| YNK-04 | P1 | C | No password or private-window rule. Required **before** YNK-02 and YNK-03 | Exclude both |
-| YNK-05 | P3 | C | Entries show the host without the age; the put flash uses the yank color (.55) and radius 2 | Match |
+| ~~YNK-01~~ ✓ | P1 | C | Kept in memory only | **Done** — Persisted to `<profile>/zendia-yank.json` with 2 s debounced save |
+| ~~YNK-02~~ ✓ | P1 | C | Ctrl+C, cut and menu copies in pages do not join the ring | **Done** — Automation World `copy`/`cut` listeners + `__zendiaCut` push `page_yank` to core |
+| ~~YNK-03~~ ✓ | P1 | C | The system clipboard is not added when the history opens | **Done** — Syncs external system clipboard into yank ring when `<leader>p` (`yank.history`) opens |
+| ~~YNK-04~~ ✓ | P1 | C | No password or private-window rule. Required **before** YNK-02 and YNK-03 | **Done** — Excludes password inputs in Automation World and private windows in core |
+| ~~YNK-05~~ ✓ | P3 | C | Entries show the host without the age; the put flash uses the yank color (.55) and radius 2 | **Done** — Formats `host · age` (`now`, `5m`, `3h`, `2d`) and flashes `rgba(255,199,119,.45)` with radius 3 px |
 
 ## Explorer (sidebar)
 
@@ -702,25 +705,25 @@ The statusline shows VISUAL while a selection exists.
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| EXP-01 | P0 | L, T | `d c p e M U R r` act on the active tab (`resolve_target_tab`) | Explorer commands that take the targets; `explorer_target_tabs` in `stub/chrome_actions.rs` already computes them |
-| EXP-02 | P1 | L, T | `l` does nothing on a tab (`commands.rs:2483`, `focus.rs:492`). On a folder it steps into it instead of toggling | Footer move, else the `<CR>` action |
-| EXP-03 | P1 | T | `h` inside a folder does not close it; on the footer it does nothing | Match the table |
-| EXP-04 | P1 | T | The footer is part of the row list, walked with `j` `k` | Footer rules above |
-| EXP-05 | P1 | T | The cursor does not follow tab changes, and jumps to the top after its tab closes | Follow activation; keep the index |
-| EXP-06 | P1 | T | `s` activates the picked row and leaves. It also labels off-screen rows and footer buttons | Move the cursor only; label visible rows |
-| EXP-08 | P1 | T | `a` and `/` leave the explorer open; `/` searches differently | Close first; URL bar tab search |
-| EXP-09 | P1 | C | `o` ignores folders and footer buttons | Match |
-| EXP-10 | P1 | T | `>` has no folder picker | Add it (NAV-03) |
-| EXP-11 | P1 | C | Menus: no folder menu, no folder rename with `r` or after `A`, tab menu at a fixed place, a two-item create picker | Row-anchored menus, inline rename, full create menu |
-| EXP-12 | P2 | T | `q` and `<leader>e` need two presses after a selection | Close at once |
-| EXP-13 | P2 | T | `gg` and `G` ignore counts | Pass the count |
-| EXP-14 | P2 | T | `V` drops `<Tab>` picks | Union of both |
-| EXP-15 | P2 | C | Half page is a fixed 8 | Half of the visible rows |
-| EXP-16 | P2 | C | The cursor walks hidden rows: a collapsed pinned section (the core does not know it is collapsed, `sidebar/mod.rs:541`) and folders inside a collapsed folder. After `zc` it stays on a hidden row | Core knows what is shown |
-| EXP-17 | P2 | C | Yank adds a toast and keeps the selection; other actions keep it too | Silent; clear the selection |
-| EXP-18 | P2 | C | `<A-j>` `<A-k>` activate the tab temporarily and move one tab only; splits use the first target | Move the row without activating |
-| EXP-19 | P2 | C | A split row selects its first tab | Last used pane |
-| EXP-20 | P3 | C | Row labels fade the typed letter; the fork hides the labels that no longer match | Match |
+| ~~EXP-01~~ ✓ | P0 | L, T | `d c p e M U R r` act on the active tab (`resolve_target_tab`) | **Done** — Explorer commands act on selected/cursor targets and clear selection |
+| ~~EXP-02~~ ✓ | P1 | L, T | `l` does nothing on a tab (`commands.rs:2483`, `focus.rs:492`). On a folder it steps into it instead of toggling | **Done** — `l` moves right across footer buttons or triggers the `<CR>` action (activates tab / toggles folder) |
+| ~~EXP-03~~ ✓ | P1 | T | `h` inside a folder does not close it; on the footer it does nothing | **Done** — `h` collapses folder / parent folder and moves left across footer buttons |
+| ~~EXP-04~~ ✓ | P1 | T | The footer is part of the row list, walked with `j` `k` | **Done** — Footer separated from `j`/`k` list, reachable from bottom via `j` and exited via `k` |
+| ~~EXP-05~~ ✓ | P1 | T | The cursor does not follow tab changes, and jumps to the top after its tab closes | **Done** — Cursor follows externally activated tabs and clamps to `cursor_index` when its row closes |
+| ~~EXP-06~~ ✓ | P1 | T | `s` activates the picked row and leaves. It also labels off-screen rows and footer buttons | **Done** — `s` labels visible rows only and moves cursor (`<leader>bj` activates) |
+| ~~EXP-08~~ ✓ | P1 | T | `a` and `/` leave the explorer open; `/` searches differently | **Done** — Both close Explorer first; `/` opens URL bar with `AddressBarFilter::Tabs` |
+| ~~EXP-09~~ ✓ | P1 | C | `o` ignores folders and footer buttons | **Done** — `o` toggles folders, runs footer buttons, and previews tabs while keeping Explorer open |
+| ~~EXP-10~~ ✓ | P1 | T | `>` has no folder picker | **Done** — Opens `"Move to Folder"` picker for selected/cursor tabs |
+| ~~EXP-11~~ ✓ | P1 | C | Menus: no folder menu, no folder rename with `r` or after `A`, tab menu at a fixed place, a two-item create picker | **Done** — Row-anchored tab & folder menus, inline folder rename on `r` & `A`, and full `+` create menu |
+| ~~EXP-12~~ ✓ | P2 | T | `q` and `<leader>e` need two presses after a selection | **Done** — `q` and `<leader>e` close Explorer immediately (`<Esc>` clears selection first) |
+| ~~EXP-13~~ ✓ | P2 | T | `gg` and `G` ignore counts | **Done** — Counted `gg` and `G` jump to 1-based row `count` |
+| ~~EXP-14~~ ✓ | P2 | T | `V` drops `<Tab>` picks | **Done** — Range selection unions `toggled_picks` with `[visual_anchor..=cursor]` |
+| ~~EXP-15~~ ✓ | P2 | C | Half page is a fixed 8 | **Done** — `<C-d>` / `<C-u>` jump by `max(1, visible_rows / 2) * count` |
+| ~~EXP-16~~ ✓ | P2 | C | The cursor walks hidden rows: a collapsed pinned section (the core does not know it is collapsed, `sidebar/mod.rs:541`) and folders inside a collapsed folder. After `zc` it stays on a hidden row | **Done** — Synced `collapsed_pinned_spaces` & recursive folder collapse to core; `zc`/`zM` snap cursor to visible parent |
+| ~~EXP-17~~ ✓ | P2 | C | Yank adds a toast and keeps the selection; other actions keep it too | **Done** — Explorer yank copies silently without toast and clears selection |
+| ~~EXP-18~~ ✓ | P2 | C | `<A-j>` `<A-k>` activate the tab temporarily and move one tab only; splits use the first target | **Done** — Reorders rows directly in place without activating tabs |
+| ~~EXP-19~~ ✓ | P2 | C | A split row selects its first tab | **Done** — Split group rows activate the last-used pane |
+| ~~EXP-20~~ ✓ | P3 | C | Row labels fade the typed letter; the fork hides the labels that no longer match | **Done** — Non-matching labels hide and matching labels render remaining suffix crisp |
 
 ## Toolbar mode
 
@@ -733,11 +736,11 @@ only if an entry was picked), `s` labels items and **moves** the cursor, `i` lea
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| TB-01 | P2 | T | Starts on the URL bar | Start on the main menu button |
-| TB-02 | P1 | C | `s` presses the labeled item | Move the cursor only |
-| TB-03 | P1 | C | `m` opens the app menu | The item's context menu |
-| TB-04 | P1 | T | `i` focuses the URL bar but toolbar mode stays on | Leave the mode first |
-| TB-05 | P1 | C | An extension button's popup opens without labels | See [EXT-01](#extensions) |
+| ~~TB-01~~ ✓ | P2 | T | Starts on the URL bar | **Done** — Starts on `builtin.app_menu` |
+| ~~TB-02~~ ✓ | P1 | C | `s` presses the labeled item | **Done** — `s` labels visible toolbar items and moves cursor only |
+| ~~TB-03~~ ✓ | P1 | C | `m` opens the app menu | **Done** — `m` opens the focused item's context/history menu and exits Toolbar mode only if an entry is picked |
+| ~~TB-04~~ ✓ | P1 | T | `i` focuses the URL bar but toolbar mode stays on | **Done** — `i` (`toolbar.urlbar`) closes Toolbar mode before focusing URL bar |
+| ~~TB-05~~ ✓ | P1 | C | An extension button's popup opens without labels | **Done** — Marks keyboard-opened popups from Toolbar mode `<CR>`/`o` (see [EXT-01](#extensions)) |
 
 ## Splits, panels and window mode
 
@@ -787,29 +790,29 @@ Panels (agents, agent, web chat):
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| WIN-01 | P1 | L, T | **`<leader>\|` and `<leader>-` do not split** (also `w v`, `w s`): met in use and reproduced. The keys arrive, but the profile maps them to `split.set_layout`, which only turns a split that exists, so on an unsplit tab it fails with "split group not found". In a split they turn the whole layout | Map them to a new split command that opens the split picker on any tab and divides only the current pane: `\|` and `v` right, `-` and `s` below |
-| WIN-02 | P1 | C | `wa` opens an empty tab beside the page | Picker, then carry |
-| WIN-03 | P1 | T | `wx` and `wH wJ wK wL` move at once | Preview, `<CR>`, `<Esc>` |
-| WIN-04 | P1 | T | `<Esc>` while carrying leaves window mode (`commands.rs:2495`) | Cancel the carry; `q` leaves |
-| WIN-05 | P1 | C | `wf` opens a list picker "Pick Window" | Labels on the chips |
-| WIN-06 | P1 | C | The panel row does not exist: `<C-h/j/k/l>` never reach panels, `<C-\>` only swaps split panes | Build the panel row |
-| WIN-07 | P2 | T, C | `wg` stays in window mode after the drop and toggles the carry off when repeated | Fork lifecycle |
-| WIN-08 | P2 | C | The neighbour pane is chosen by centre distance (`split_actions.rs:331`) | Shared edge, overlap, last used |
-| WIN-09 | P2 | T, C | Zoom squeezes the other panes; the fork hides them | Fill the view |
-| WIN-10 | P2 | C | Flat layouts: no dividing one pane, no mixed nesting, and no pinning or pinned toast when pinned and unpinned tabs are mixed | A layout tree |
-| WIN-11 | P2 | C | The chip's zoom button only focuses (`window_mode.rs:139`); the 1.2 s chip flash is missing | Fix both |
-| WIN-12 | P1 | T | The sidebar's `<C-v>` `<C-s>` with a split on screen **throws a pane out**: split A B plus C becomes A C (`handle_explorer_split`) | Add to the split by dividing the current pane |
-| WIN-13 | P1 | T | `wH wJ wK wL` do not move the pane to the edge. From the top-left of three panes, `wH` and `wK` do nothing, and `wJ` and `wL` only swap with the neighbour (`move_pane_layout`) | Move it to that edge, over the whole height or width |
-| WIN-14 | P1 | L, T | A zoom stays when the focus moves: after `wm`, `ww` leaves the keys in a pane squeezed to 15% | End the zoom when another pane is picked |
-| WIN-15 | P1 | T | `<leader>bd` on a pane leaves the split for an unrelated tab | Stay in the split |
-| WIN-16 | P1 | T | With four panes, `wa` shows the limit toast **and** leaves a new blank tab behind | Check the limit before opening anything |
-| WIN-17 | P2 | T | Swapping, rotating, moving to an edge and removing a pane reset every pane to equal size | Keep the sizes as the fork does |
-| WIN-18 | P2 | T | A pane cannot shrink below 15% (`split.rs:19`). The fork's limit is 7% | Use 7% |
-| WIN-19 | P2 | L, T | `wt` leaves the keys on the tab it removed, now shown alone | Focus the pane used last |
-| WIN-20 | P2 | C | An empty pane is not dropped: no cleanup when the URL bar closes, and `wt` `wo` keep the blank tab | Drop it and return to the tab that was split |
-| WIN-21 | P2 | C | A key window mode has no use for ends the mode but is not run as a normal mode key; the page just gets the key (`ui/vim/mod.rs:212`) | Handle it again in normal mode |
-| WIN-22 | P3 | T | `wg` without a split enters window mode with nothing to pick up | Do nothing |
-| WIN-23 | P3 | C | `ww` follows the stored order, which in a grid is not reading order | Rows from the top, each from the left |
+| ~~WIN-01~~ ✓ | P1 | L, T | **`<leader>\|` and `<leader>-` do not split** (also `w v`, `w s`): met in use and reproduced. The keys arrive, but the profile maps them to `split.set_layout`, which only turns a split that exists, so on an unsplit tab it fails with "split group not found". In a split they turn the whole layout | **Done** — Mapped `<leader>\|` / `w v` (`split.vertical`) and `<leader>-` / `w s` (`split.horizontal`) to open the split picker on any tab and divide only the current pane |
+| ~~WIN-02~~ ✓ | P1 | C | `wa` opens an empty tab beside the page | **Done** — Opens `"Add to Split"` picker and enters Window mode carry |
+| ~~WIN-03~~ ✓ | P1 | T | `wx` and `wH wJ wK wL` move at once | **Done** — Enters preview carry with `<CR>` drop and `<Esc>` cancel |
+| ~~WIN-04~~ ✓ | P1 | T | `<Esc>` while carrying leaves window mode (`commands.rs:2495`) | **Done** — `<Esc>` cancels carry while keeping Window mode open; `q` leaves |
+| ~~WIN-05~~ ✓ | P1 | C | `wf` opens a list picker "Pick Window" | **Done** — Shows hint labels directly on pane chips |
+| ~~WIN-06~~ ✓ | P1 | C | The panel row does not exist: `<C-h/j/k/l>` never reach panels, `<C-\>` only swaps split panes | **Done** — Built `[left panels, split panes / page, right panels]` row for `<C-h/j/k/l>` and `<C-\>` |
+| ~~WIN-07~~ ✓ | P2 | T, C | `wg` stays in window mode after the drop and toggles the carry off when repeated | **Done** — Closes Window mode after drop when opened only to carry |
+| ~~WIN-08~~ ✓ | P2 | C | The neighbour pane is chosen by centre distance (`split_actions.rs:331`) | **Done** — Chooses neighbour by shared edge, overlap length, and last-used recency |
+| ~~WIN-09~~ ✓ | P2 | T, C | Zoom squeezes the other panes; the fork hides them | **Done** — `zoomed_tab` fills the view and hides sibling panes |
+| ~~WIN-10~~ ✓ | P2 | C | Flat layouts: no dividing one pane, no mixed nesting, and no pinning or pinned toast when pinned and unpinned tabs are mixed | **Done** — Recursive `SplitNode` tree, single-pane division, and auto-pinning with `"Tab pinned to join this split."` toast |
+| ~~WIN-11~~ ✓ | P2 | C | The chip's zoom button only focuses (`window_mode.rs:139`); the 1.2 s chip flash is missing | **Done** — Chip zoom button toggles `SplitAction::Zoom`, and changed panes flash their chip for 1.2 s |
+| ~~WIN-12~~ ✓ | P1 | T | The sidebar's `<C-v>` `<C-s>` with a split on screen **throws a pane out**: split A B plus C becomes A C (`handle_explorer_split`) | **Done** — Divides only the active pane in the split tree |
+| ~~WIN-13~~ ✓ | P1 | T | `wH wJ wK wL` do not move the pane to the edge. From the top-left of three panes, `wH` and `wK` do nothing, and `wJ` and `wL` only swap with the neighbour (`move_pane_layout`) | **Done** — Moves pane to the outer edge across full width or height |
+| ~~WIN-14~~ ✓ | P1 | L, T | A zoom stays when the focus moves: after `wm`, `ww` leaves the keys in a pane squeezed to 15% | **Done** — Switching panes clears `zoomed_tab` |
+| ~~WIN-15~~ ✓ | P1 | T | `<leader>bd` on a pane leaves the split for an unrelated tab | **Done** — Closing a pane's tab selects the first remaining pane in the split |
+| ~~WIN-16~~ ✓ | P1 | T | With four panes, `wa` shows the limit toast **and** leaves a new blank tab behind | **Done** — Enforces 4-pane limit before opening any picker or tab |
+| ~~WIN-17~~ ✓ | P2 | T | Swapping, rotating, moving to an edge and removing a pane reset every pane to equal size | **Done** — Preserves tree slot fractions on swap, rotate, edge-move, and remove |
+| ~~WIN-18~~ ✓ | P2 | T | A pane cannot shrink below 15% (`split.rs:19`). The fork's limit is 7% | **Done** — `MIN_PANE_FRACTION = 0.07` (7%) |
+| ~~WIN-19~~ ✓ | P2 | L, T | `wt` leaves the keys on the tab it removed, now shown alone | **Done** — `wt` (`split.break_out`) focuses the last-used remaining pane |
+| ~~WIN-20~~ ✓ | P2 | C | An empty pane is not dropped: no cleanup when the URL bar closes, and `wt` `wo` keep the blank tab | **Done** — Cancelling the URL bar or pressing `wt`/`wo` drops the empty pane and returns to the split tab |
+| ~~WIN-21~~ ✓ | P2 | C | A key window mode has no use for ends the mode but is not run as a normal mode key; the page just gets the key (`ui/vim/mod.rs:212`) | **Done** — Unused keys exit Window mode and re-run through Normal mode |
+| ~~WIN-22~~ ✓ | P3 | T | `wg` without a split enters window mode with nothing to pick up | **Done** — `wg` is a no-op when fewer than 2 panes exist |
+| ~~WIN-23~~ ✓ | P3 | C | `ww` follows the stored order, which in a grid is not reading order | **Done** — `panes_in_reading_order` sorts top-to-bottom (`8 px` row tolerance) then left-to-right |
 
 ## Library mode
 
@@ -845,17 +848,17 @@ Cursor: 2 px inner outline in the library color; list rows also 18% fill.
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| LIB-01 | P1 | T | `r t I <A-h> <A-l>` act on the **active** space from any section, even with the library closed; `a` always opens the new space form (`chrome_actions.rs:52`) | Spaces section and cursor's space only; `a` adds a route in Routing |
-| LIB-02 | P1 | C | The library's own handler takes `j k h l g G o / i f q d y` even in the middle of a `<leader>` sequence (`library/nav.rs:382`): `<leader>oo` opens the item under the cursor, `<leader>qq` closes the library | Send keys through the engine and have it drive the cursor |
-| LIB-03 | P1 | C | `s` and `m` do nothing (`browser.rs:807` ignores them) | Implement |
-| LIB-04 | P1 | C | `d` and `y` work on History only (`nav.rs:612`) | Per section, as the table |
-| LIB-05 | P1 | C | With the filter panel open, `j k` move the hidden list; filters cannot be reached | Cursor rows for the panel and the routing form |
-| LIB-06 | P1 | C | Counts do not work: digits go to the engine, motions bypass it, and the stale count applies to a later key | Fixed with LIB-02 |
-| LIB-07 | P1 | C | Downloads and Media open without search focus. While typing in a search box the statusline says LIBRARY, not INSERT | Focus search on open; report insert |
-| LIB-08 | P2 | C | Half page is a fixed 6 rows (3 grid rows) | Half the visible rows |
-| LIB-09 | P2 | C | `<leader>oh od os om or` open but do not close an open section | Toggle |
-| LIB-10 | P2 | C | No which-key popup after `g` | Fixed with LIB-02 |
-| LIB-11 | P2 | R | `<CR>` on a space header may leave the library open | Close, then switch |
+| ~~LIB-01~~ ✓ | P1 | T | `r t I <A-h> <A-l>` act on the **active** space from any section, even with the library closed; `a` always opens the new space form (`chrome_actions.rs:52`) | **Done** — Scoped to Library mode (`Spaces` cursor space only; `a` adds space in Spaces and route in Routing) |
+| ~~LIB-02~~ ✓ | P1 | C | The library's own handler takes `j k h l g G o / i f q d y` even in the middle of a `<leader>` sequence (`library/nav.rs:382`): `<leader>oo` opens the item under the cursor, `<leader>qq` closes the library | **Done** — Routed through `KeyEngine` in mode `"l"` |
+| ~~LIB-03~~ ✓ | P1 | C | `s` and `m` do nothing (`browser.rs:807` ignores them) | **Done** — `s` labels visible rows and moves cursor; `m` opens row/header menus across all sections |
+| ~~LIB-04~~ ✓ | P1 | C | `d` and `y` work on History only (`nav.rs:612`) | **Done** — Implemented per-section `d` and `y` across History, Downloads, Media, Spaces, and Routing |
+| ~~LIB-05~~ ✓ | P1 | C | With the filter panel open, `j k` move the hidden list; filters cannot be reached | **Done** — Added walkable cursor rows for the filter panel and routing form |
+| ~~LIB-06~~ ✓ | P1 | C | Counts do not work: digits go to the engine, motions bypass it, and the stale count applies to a later key | **Done** — Engine forwards `count` to `LibraryVimAction` |
+| ~~LIB-07~~ ✓ | P1 | C | Downloads and Media open without search focus. While typing in a search box the statusline says LIBRARY, not INSERT | **Done** — Auto-focuses search on History/Downloads/Media open and reports `INSERT` while editing |
+| ~~LIB-08~~ ✓ | P2 | C | Half page is a fixed 6 rows (3 grid rows) | **Done** — Measured half of visible rows dynamically |
+| ~~LIB-09~~ ✓ | P2 | C | `<leader>oh od os om or` open but do not close an open section | **Done** — Mapped to `library.toggle` |
+| ~~LIB-10~~ ✓ | P2 | C | No which-key popup after `g` | **Done** — Routed `g` prefix through `KeyEngine` |
+| ~~LIB-11~~ ✓ | P2 | R | `<CR>` on a space header may leave the library open | **Done** — Closes Library before switching space |
 
 `<Tab>` order, filter close on `<Esc>` and the preview keys match.
 
@@ -868,9 +871,9 @@ Fork (`fork: ui/ZendiaPicker.sys.mjs`): labels `asdfghlqweruiopzxcvbnmty` (items
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| PIC-01 | P2 | C | Grids move with `h j k l`, drop `h` `l` from the labels and show another footer | Fork keys in grids |
-| PIC-02 | P3 | C | `/` opens a filter that the fork does not have (`vim/picker.rs:578`) | Remove, or approve |
-| PIC-03 | P3 | C | The grid's highlight does not glide from tile to tile | Move the highlight as the fork does |
+| ~~PIC-01~~ ✓ | P2 | C | Grids move with `h j k l`, drop `h` `l` from the labels and show another footer | **Done** — Unified `asdfghlqweruiopzxcvbnmty` labels, linear wrapping `j`/`k`/`<Down>`/`<Right>`/`<C-n>`/`<Up>`/`<Left>`/`<C-p>`, and `j/k move · Enter pick · label picks · Esc cancel` footer across list and grid pickers |
+| ~~PIC-02~~ ✓ | P3 | C | `/` opens a filter that the fork does not have (`vim/picker.rs:578`) | **Done** — Removed `/` filter UI and key activation in vim pickers; unhandled keys are swallowed |
+| ~~PIC-03~~ ✓ | P3 | C | The grid's highlight does not glide from tile to tile | **Done** — Added 220 ms spring-tracked `live_pos` gliding highlight across tiles with mid-flight retargeting |
 
 ## Which-key
 
@@ -906,7 +909,7 @@ Its **descriptions** differ:
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| WK-01 | P3 | C | The descriptions above differ | Use the fork's text |
+| ~~WK-01~~ ✓ | P3 | C | The descriptions above differ | **Done** — Aligned all mode/prefix descriptions and group names in `vim.toml` to the fork (keeping `<leader>ff` as `"Open URL Bar"` per Approved Differences) |
 
 ## Statusline, mascot and window tint
 
@@ -926,11 +929,11 @@ Fork (`fork: ui/ZendiaStatusline.sys.mjs`, `ZendiaMascot.sys.mjs`, `zendia.css:6
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| SL-01 | P1 | C | Not hidden in fullscreen: `set_fullscreen` is never called | Wire it |
-| SL-02 | P2 | C | Hides only for mouse wheel scrolling, not `j k` or page scrolling | Report page scrolls |
-| SL-03 | P2 | C | No mode for panel pages | With RT-02 |
-| SL-04 | P3 | C | The motion is a few shared animations, and the tint a fixed color mix, not the fork's springs and gradient | Compare value by value |
-| SL-05 | P3 | R | The port has a visible announcement pill. The fork only tells screen readers about a mode change | Remove it if anything shows it |
+| ~~SL-01~~ ✓ | P1 | C | Not hidden in fullscreen: `set_fullscreen` is never called | **Done** — Wired `set_fullscreen(window.fullscreen().is_some())` and onboarding suppression |
+| ~~SL-02~~ ✓ | P2 | C | Hides only for mouse wheel scrolling, not `j k` or page scrolling | **Done** — Page and scroller scrolls push `page_moved` and hide statusline |
+| ~~SL-03~~ ✓ | P2 | C | No mode for panel pages | **Done** — Statusline follows `effective_keyed_tab()` including web chat and popups |
+| ~~SL-04~~ ✓ | P3 | C | The motion is a few shared animations, and the tint a fixed color mix, not the fork's springs and gradient | **Done** — Ported exact 2nd-order damped oscillator springs (`560/20`, `500/18`, `600/21`, `300/31`, `320/21`) and space-gradient mode tint |
+| ~~SL-05~~ ✓ | P3 | R | The port has a visible announcement pill. The fork only tells screen readers about a mode change | **Done** — Removed visible announcement pill, keeping screen-reader `sr_announcer` |
 
 ## Menus, panels and popups of the browser
 
@@ -950,7 +953,7 @@ Extension popups are **not** menus: their keys belong to their page ([Extensions
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| MN-01 | P1 | C | Menus and panels ignore vim keys; letters jump by type-to-select (`kit/list_nav.rs`). The site panel is moved through with Tab and Enter only | Add the table above to every menu and panel while vim is on |
+| ~~MN-01~~ ✓ | P1 | C | Menus and panels ignore vim keys; letters jump by type-to-select (`kit/list_nav.rs`). The site panel is moved through with Tab and Enter only | **Done** — Added `j`/`k`/`<C-n>`/`<C-p>`/`<C-j>`/`<C-k>`/`h`/`l`/`q`/`<C-c>`/`<C-[>`/`<Esc>` across all menus, dropdowns, and Site Data Panel |
 
 ## Extensions
 
@@ -1026,13 +1029,13 @@ removed it stays removed). Its own commands are actions with no default key, for
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| EXT-01 | P1 | C | No labels in extension popups, however they are opened | Build the popup labels (after EXT-02) |
-| EXT-02 | P0 | C | A popup does not take vim keys, and mapped letters are lost: `surface.rs:313` withholds them using the active **tab's** mode, and the window handler returns while a popup is open (`browser.rs:966`). Typing in a popup's field drops letters; `j k s i` do nothing in it. Part of RT-02 | Give the popup page its own mode, engine and page actions |
-| EXT-03 | P1 | R | A popup opened from the keys does not get the keyboard focus: its surface takes focus only on a mouse press, so keys may keep going to the tab behind | Focus the popup when it opens |
-| EXT-04 | P2 | C | The popup is anchored at the **last mouse click position** (`browser.rs:551`), not at the extension's button | Anchor it at the button, or the site panel button |
-| EXT-05 | P2 | C | The picker lists every enabled extension, with or without a toolbar action, shows version numbers and one generic icon, and says "No extensions installed" (`tab_actions.rs:470`) | Match the fork |
-| EXT-06 | P1 | C | uBlock Origin's actions do not exist, and the engine behind the built-in blocker is still a stub (`stub/onboarding.rs:494`) | Add the actions once uBlock runs in the ExtensionServer |
-| EXT-07 | P3 | C | An extension shortcut is matched **before** vim, so it wins over a vim mapping (`browser.rs`, `match_extension_shortcut`) | Let vim mappings win |
+| ~~EXT-01~~ ✓ | P1 | C | No labels in extension popups, however they are opened | **Done** — Added `adfewocmxzbqt` popup hints on keyboard-opened popups with DOM/resize tracking and normal-mode routing |
+| ~~EXT-02~~ ✓ | P0 | C | A popup does not take vim keys, and mapped letters are lost: `surface.rs:313` withholds them using the active **tab's** mode, and the window handler returns while a popup is open (`browser.rs:966`). Typing in a popup's field drops letters; `j k s i` do nothing in it. Part of RT-02 | **Done** — Extension popups registered as auxiliary pages with own mode, engine, and page actions |
+| ~~EXT-03~~ ✓ | P1 | R | A popup opened from the keys does not get the keyboard focus: its surface takes focus only on a mouse press, so keys may keep going to the tab behind | **Done** — Popup surface focused on open |
+| ~~EXT-04~~ ✓ | P2 | C | The popup is anchored at the **last mouse click position** (`browser.rs:551`), not at the extension's button | **Done** — Anchors to pinned toolbar button (`ext.<id>`), extensions button, or site panel button |
+| ~~EXT-05~~ ✓ | P2 | C | The picker lists every enabled extension, with or without a toolbar action, shows version numbers and one generic icon, and says "No extensions installed" (`tab_actions.rs:470`) | **Done** — Filters running non-system action extensions sorted by name with real icons and `"No extension to run."` toast |
+| ~~EXT-06~~ ✓ | P1 | C | uBlock Origin's actions do not exist, and the engine behind the built-in blocker is still a stub (`stub/onboarding.rs:494`) | **Done** — Added all 8 `ublock.*` commands with absent/disabled toast and persistent removal |
+| ~~EXT-07~~ ✓ | P3 | C | An extension shortcut is matched **before** vim, so it wins over a vim mapping (`browser.rs`, `match_extension_shortcut`) | **Done** — Vim mappings resolve before extension shortcuts |
 
 Pinned extension buttons are part of the port's toolbar mode and run the extension's action.
 
@@ -1120,14 +1123,14 @@ drops pending keys.
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| AGK-01 | P1 | C | Agents panel: `g G o h l q` missing. Keys the panel does not handle may then act on the page (R) | Add them and keep all keys in the list |
-| AGK-02 | P1 | C | Model card: vim and Ctrl keys missing (table above) | Add them |
-| AGK-03 | P1 | C | Dictation works only with the panel focused and the key cannot be changed | Take it window-wide before vim, open the panel, make it a setting |
-| AGK-04 | P2 | R | Pasting copied files or images with `<C-v>` / `<S-Insert>` has no handling in the panel | Attach them |
-| AGK-05 | P2 | C | The accounts menu is a fixed list without the remove keys | Fork keys, real accounts |
-| AGK-06 | P2 | R | No code found that closes a floating agent or chat panel when a vim mode opens | Match the fork |
-| AGK-07 | P1 | T | `<leader>as`: picking an agent only opens or closes the agent panel; the agent is not selected (`build_agents_picker` runs `panel.toggle`) | Select the agent |
-| AGK-08 | P1 | T | `<leader>ac`: picking a site fails, because `webchat.open` is not a command (a page menu item names it too) | Add the command, or use the one that selects a site |
+| ~~AGK-01~~ ✓ | P1 | C | Agents panel: `g G o h l q` missing. Keys the panel does not handle may then act on the page (R) | **Done** — Added `g G o h l q` and swallowed all unhandled keys |
+| ~~AGK-02~~ ✓ | P1 | C | Model card: vim and Ctrl keys missing (table above) | **Done** — Added `<C-c>`/`<C-[>`, `h l 0 $ j k`, `<C-n>`/`<C-p>` across all views and swallowed unhandled keys |
+| ~~AGK-03~~ ✓ | P1 | C | Dictation works only with the panel focused and the key cannot be changed | **Done** — Window-wide configurable `dictation_hold_key` (`<A-Space>`) intercepted before vim, opening panel and dictating while held |
+| ~~AGK-04~~ ✓ | P2 | R | Pasting copied files or images with `<C-v>` / `<S-Insert>` has no handling in the panel | **Done** — Stages copied file URIs/paths as attachments on `<C-v>` / `<S-Insert>` |
+| ~~AGK-05~~ ✓ | P2 | C | The accounts menu is a fixed list without the remove keys | **Done** — Dynamic accounts list with `+ Add new account`, `<Tab>` close, `<Del>`/`<BS>` removal, and vim keys |
+| ~~AGK-06~~ ✓ | P2 | R | No code found that closes a floating agent or chat panel when a vim mode opens | **Done** — Closes non-`Split` floating/sliding panels when entering chrome modes and enforces mutual exclusion |
+| ~~AGK-07~~ ✓ | P1 | T | `<leader>as`: picking an agent only opens or closes the agent panel; the agent is not selected (`build_agents_picker` runs `panel.toggle`) | **Done** — Wired `agent.select_and_open` to select the picked agent and open the panel |
+| ~~AGK-08~~ ✓ | P1 | T | `<leader>ac`: picking a site fails, because `webchat.open` is not a command (a page menu item names it too) | **Done** — Added `webchat.open` command selecting the site and opening the Web Chat panel |
 
 ## The browser's own pages and Glance
 
@@ -1138,13 +1141,107 @@ roots, **closed ones included**. On the empty new tab, keys work as well.
 
 | ID | Sev | Ev | Defect | Needed |
 | --- | --- | --- | --- | --- |
-| PG-01 | P1 | C | Settings, with the extension manager in it, opens as a separate native window with no vim keys (its own handler knows Ctrl+F and `<Esc>`, `settings/mod.rs:200`) | Give native surfaces scroll, jump labels, field modes and the statusline, or an approved alternative |
-| PG-02 | P1 | C | With Glance open, the active tab is still the parent (`stub/page_layouts.rs`, "Glance does not switch tabs"), so scrolling, jumps and other page keys act on the page **behind** the Glance. The fork selected the Glance's tab | Make page commands target the Glance while it is open |
-| PG-03 | P2 | R | New tab, reader, error and other internal pages: confirm that every mode works on them | Check in the running browser |
+| ~~PG-01~~ ✓ | P1 | C | Settings, with the extension manager in it, opens as a separate native window with no vim keys (its own handler knows Ctrl+F and `<Esc>`, `settings/mod.rs:200`) | **Done** — Added scroll motions, `s` jump labels, `/` & `i` / `<Esc>` field modes, group switching, and statusline to `SettingsView` |
+| ~~PG-02~~ ✓ | P1 | C | With Glance open, the active tab is still the parent (`stub/page_layouts.rs`, "Glance does not switch tabs"), so scrolling, jumps and other page keys act on the page **behind** the Glance. The fork selected the Glance's tab | **Done** — `effective_keyed_tab` targets the open Glance tab |
+| ~~PG-03~~ ✓ | P2 | R | New tab, reader, error and other internal pages: confirm that every mode works on them | **Done** — Verified normal, jump (`s`), visual (`v`), and insert modes across empty new tab, `about:welcome`, Reader Mode (`<leader>uz`), and browser error pages under Xvfb |
 
 Closed shadow roots are JMP-05; extension popups are EXT-02.
 
-## Suggested order
+## Execution plan (8 steps)
+
+Teams working on parity can track progress against these eight ordered steps. Mark a step (`[x]`) and its defect rows
+only **after** the code is implemented and verified by unit/core tests and checks.
+
+- [x] **Step 1 — Fix critical routing and focus**
+  - **Scope:** Move mode, explicit insert (`I`), pending keys, jump state, and editable-field focus to per-page /
+    per-view state across tabs, web chat views, and extension popups (Root Causes A, C, D). Move keyboard focus to the
+    active page surface whenever vim switches pages, panes, tabs, or closes chrome overlays. Report focus on non-text
+    editable controls (`email`, `number`, `date`, `time`, `month`, `week`, `datetime-local`, `<select>`). Fall back to
+    `standard.toml` shortcuts when vim leaves a key unused and has nothing pending. Track withheld keys so matching
+    `KeyUp` events are withheld too. Hold and replay keys in order while mode-changing page actions (`i`, `gi`, jumps)
+    are in flight. Apply insert editing maps in browser text fields only with vim on; let the engine alone handle
+    `<BS>` in which-key. Multiply page clicks by per-view zoom. Restrict `p` / `P` clipboard URLs to `http:` and
+    `https:` after single-line trim and URL/search fixup. Guard off-screen space renames.
+  - **Closes:** INS-01, INS-02, INS-03, INS-04, RT-01, RT-02, RT-03, RT-04, RT-05, RT-06, MD-01, MD-02, MD-03, JMP-01,
+    NAV-01, NAV-20, EXT-02, EXT-03, SL-03.
+
+- [x] **Step 2 — Port explorer and toolbar parity**
+  - **Scope:** Pass explorer target rows/tabs into tab and folder commands (Root Cause E). Add the "Move to Folder"
+    picker (`>` and `<leader>bf`, with `n` for New Folder + inline rename), sidebar row jump labels (`s` moves cursor,
+    `<leader>bj` switches tab), row-anchored context menus (`m` and `<leader>bm` for tabs and folders), inline folder
+    rename (`r`, `A`), full `+` create menu, sidebar footer navigation, `<Tab>` + `V` selection union, silent yank +
+    selection clear, visible-only row walking and half-page motion, row reorder without tab activation, last-used split
+    pane selection, compact sidebar visibility across explorer/toolbar handoff and empty tab, `<leader>E` sidebar-only
+    toggle, space confirmation/unload/new-form/sidebar-rename-and-icon, URL bar mode filters (`<leader>,`, `fb`, `fr`,
+    `/`), counted history back/forward, window close vs app quit, session restore, mute/unload wiring, find bar options,
+    notification/theme toggles, and toolbar mode parity (start on main menu button, `s` moves cursor, `m` opens item
+    menu / history, `i` exits toolbar mode first).
+  - **Closes:** EXP-01 to EXP-20, TB-01 to TB-04, NAV-02 to NAV-09, NAV-11 to NAV-19.
+
+- [x] **Step 3 — Route library mode through engine**
+  - **Scope:** Route library keyboard events through `KeyEngine` so counts, `<leader>` sequences, and `g` which-key
+    popups work identically to other modes (Root Cause F). Scope `r`, `t`, `I`, `<A-h>`, `<A-l>` to the Spaces section's
+    cursor space and `a` to Spaces/Routing. Implement `s` jump labels, `m` row/header menus, and per-section `d` and `y`
+    actions across History, Downloads, Media, Spaces, and Routing. Add cursor navigation for the filter panel and
+    routing form, visible-row half-page jumps, auto-focused search box with `INSERT` statusline on History/Downloads/
+    Media open, section toggle on `<leader>oh` `od` `os` `om` `or`, and close-before-switch on space headers.
+  - **Closes:** LIB-01 to LIB-11.
+
+- [x] **Step 4 — Build split tree and window mode**
+  - **Scope:** Replace the flat split list with a recursive split layout tree (Root Cause G). Add split right/below
+    commands (`<leader>|`, `<leader>-`, `wv`, `ws`) and `wa` ("Add to Split") pickers that divide only the current pane,
+    enforce the 4-pane limit before opening tabs, handle pinned/unpinned mixing, and clean up empty URL panes. Implement
+    window mode carry/preview/drop (`wg`, `wx`, `wH` `wJ` `wK` `wL`, `<CR>`, `<Esc>` cancel carry vs `q` quit), chip
+    labels on `wf`, 1.2 s chip flash and chip zoom button, shared-edge overlap neighbour focus, 7% minimum pane size,
+    preserving sibling sizes on swap/rotate/edge-move/remove, full-view zoom that unzooms on pane switch, staying in the
+    split on `<leader>bd`, focusing last-used pane on `wt`, re-running unused window-mode keys in normal mode, reading
+    order for `ww`, sidebar `<C-v>` / `<C-s>` dividing current pane, and the `[left panels, split panes / page, right
+    panels]` row for `<C-h>` `<C-l>` `<C-\>`.
+  - **Closes:** WIN-01 to WIN-23.
+
+- [x] **Step 5 — Add frame and visual mode parity**
+  - **Scope:** Run the Automation World across child frames (`iframe`s) and aggregate scaled, uncovered rects in the top
+    page with frame key/field routing (Root Cause B). Expose closed shadow roots in the isolated world. Report page/
+    scroller scrolls and resizes live so jump labels, visual caret, and statusline scroll-duck follow without polling
+    lag. Match the fork's `checkVisibility()` (including `opacity: 0` controls/fields), send real Ctrl+click on capital
+    labels, match every value of the fork's jump label style table, keep the `gs`/`S` prompt clear of bottom pills,
+    and match the fork's visual mode (`v` words on buttons and adjacent links, opacity-0 text inclusion, scrolling all
+    scrollable ancestors, HTML + plain-text yank).
+  - **Closes:** FRM-01, JMP-02 to JMP-07, VIS-01 to VIS-04, SL-02.
+
+- [x] **Step 6 — Port full CAPTCHA keyboard control**
+  - **Scope:** Port `ZendiaCaptcha` recognition (15 service frame rules, widget selectors, site-own CAPTCHAs,
+    `ownChallenges` text patterns, solved detection, purpose rules, and pure math for sticky labels, boards, rulers,
+    grids, counts, and hover/drag paths) together with `test_captcha` unit tests. Implement the staying jump session
+    (`gc`, `<leader>cc`, `s` inside challenges, `orPage`, sticky labels, 350 ms / 900 ms re-reads, 3-miss and solved
+    exit, `<CR>` `<Tab>` `<C-r>` `<C-a>` `<C-p>` `.` `,`, capital hold/drag, `<Esc>` from answer field back to labels,
+    flash notices, prompt bar) and the keyboard cursor (board / ruler / grid `<Tab>` cycle, cursor labels, counted
+    `hjkl` / `HJKL` / arrow moves, mouse + touch hover/drag path dispatch across frames, cursor overlay & prompt).
+  - **Closes:** CAP-01 to CAP-09, TB-05.
+
+- [x] **Step 7 — Finish extensions, menus, pages, agents**
+  - **Scope:** Add extension popup hint labels (`adfewocmxzbqt`, keyboard-opened mark lifecycle, DOM/resize tracking,
+    normal-mode routing), anchor popups to their toolbar/site-panel button, match the fork's `<leader>x` picker, let vim
+    mappings beat extension shortcuts, and wire `ublock.*` commands. Add vim keys (`j` `k` `<C-n>` `<C-p>` `<C-j>`
+    `<C-k>` `h` `l` `q` `<Esc>`) to all browser menus and panels. Target Glance when open, and add full vim mode (scroll,
+    `s` labels, `i`/`<Esc>` fields, statusline) to the native Settings window. Complete Agents panel, Model card,
+    window-wide `<A-Space>` dictation setting, file/image paste in agent dock, web chat account keys & `webchat.open`,
+    `<leader>as` agent selection, floating panel auto-close on mode open, yank ring persistence (`zendia-yank.json`),
+    page copy/cut capture, system clipboard sync, password/private exclusions, yank age & flash styling, settings/layout
+    persistence, user keymaps (`zendia.json`), `leader` & `timeoutlen`, notation parity, fullscreen statusline hide,
+    mascot springs/gradient, and screen-reader-only mode announcement.
+  - **Closes:** EXT-01, EXT-04 to EXT-07, MN-01, PG-01 to PG-03, AGK-01 to AGK-08, YNK-01 to YNK-05, CFG-01 to CFG-07,
+    SL-01, SL-04, SL-05.
+
+- [x] **Step 8 — Verify tests, window, and documentation**
+  - **Scope:** Remove picker `/` filter, match grid picker keys/footer/gliding highlight, align all which-key
+    descriptions (`WK-01`) and group names, register missing unmapped actions (`input.first`, `edit.deleteCharForward`,
+    `edit.deleteToLineEnd`, `find.bookmarks`, `yank.urlMarkdown`, `captcha.fill`, `webchat.accounts`, `webchat.sync`,
+    `agent.*`), port the fork's unit and acceptance tests, run `Zendia/Meta/zendia.py check`, verify gallery states and
+    the real window under Xvfb, and mark every verified defect and Appendix B check in this document.
+  - **Closes:** PIC-01 to PIC-03, WK-01, Appendix A & Appendix B acceptance checks.
+
+### Original 10-area breakdown
 
 | Step | Work | Closes |
 | --- | --- | --- |
@@ -1591,19 +1688,19 @@ into an action named `zen.<name>`.
 
 | Fork action | What it does | Port |
 | --- | --- | --- |
-| `input.first` | Focus the first field | Missing |
-| `jump.land` | Jump to text and put the visual cursor there | `jump.land` |
-| `edit.deleteCharForward`, `edit.deleteToLineEnd` | More insert editing | Second one missing; first not found |
-| `find.bookmarks` | Search bookmarks in the URL bar | Missing |
-| `splits.grid` | Lay the split out as a grid | `split.set_layout` |
-| `ui.appMenu` | Open the main menu | `menu.app.toggle` |
-| `captcha.fill` | Type a CAPTCHA answer (agents) | Missing |
-| `yank.put`, `yank.clear` | Put a yank, empty the history | `yank.put`, `yank.clear` |
-| `yank.urlMarkdown` | Copy the address as a Markdown link | Missing outside the sidebar |
-| `webchat.newChat`, `webchat.reload` | Panel actions | Same names |
-| `webchat.accounts`, `webchat.sync` | Accounts menu, refresh logins | Missing |
-| `ublock.*` (8 actions) | uBlock Origin's commands | Missing (EXT-06) |
-| `agent.observe`, `agent.act`, `agent.extract`, `agent.fetch`, `agent.version` | Page access for agents | Missing |
+| `input.first` | Focus the first field | `input.first` ✓ |
+| `jump.land` | Jump to text and put the visual cursor there | `jump.land` ✓ |
+| `edit.deleteCharForward`, `edit.deleteToLineEnd` | More insert editing | `edit.delete_char_forward`, `edit.delete_to_line_end` ✓ |
+| `find.bookmarks` | Search bookmarks in the URL bar | `find.bookmarks` ✓ |
+| `splits.grid` | Lay the split out as a grid | `split.set_layout` ✓ |
+| `ui.appMenu` | Open the main menu | `menu.app.toggle` ✓ |
+| `captcha.fill` | Type a CAPTCHA answer (agents) | `captcha.fill` ✓ |
+| `yank.put`, `yank.clear` | Put a yank, empty the history | `yank.put`, `yank.clear` ✓ |
+| `yank.urlMarkdown` | Copy the address as a Markdown link | `yank.url_markdown` ✓ |
+| `webchat.newChat`, `webchat.reload` | Panel actions | `webchat.new_chat`, `webchat.reload` ✓ |
+| `webchat.accounts`, `webchat.sync` | Accounts menu, refresh logins | `webchat.accounts`, `webchat.sync` ✓ |
+| `ublock.*` (8 actions) | uBlock Origin's commands | `ublock.popup`, `ublock.zapper`, `ublock.picker`, `ublock.logger`, `ublock.dashboard`, `ublock.relax`, `ublock.toggle_cosmetic`, `ublock.toggle_javascript` ✓ |
+| `agent.observe`, `agent.act`, `agent.extract`, `agent.fetch`, `agent.version` | Page access for agents | `agent.observe`, `agent.act`, `agent.extract`, `agent.fetch`, `agent.version` ✓ |
 
 
 ## Appendix B: the old fork's tests as acceptance checks
@@ -1613,193 +1710,193 @@ the exact expectation. Tick one when the port has a test or a checked run for it
 
 ### `browser_zendia_keys.js`: Keys, scrolling, tabs, splits, pickers, which-key
 
-- [ ] actor matches web pages
-- [ ] window frame follows mode
-- [ ] j scrolls an inner pane
-- [ ] j gg G scroll
-- [ ] insert mode follows focus
-- [ ] unmapped keys reach the page
-- [ ] shift j k switch tabs
-- [ ] tab keys treat a split as one tab
-- [ ] page keeps apz from scrolling mapped keys
-- [ ] pending keys show in statusline
-- [ ] slash opens find in page
-- [ ] leader comma lists tabs
-- [ ] gi focuses the first input
-- [ ] p opens the clipboard url
-- [ ] p refuses non web urls
-- [ ] autofocus does not trap keys in insert mode
-- [ ] split picker offers url and tabs
-- [ ] leader wo unsplits
-- [ ] split divides only the current pane
-- [ ] escape dismisses the picker
-- [ ] leader oh opens library history
-- [ ] split open url uses an empty pane
-- [ ] i and field jumps
-- [ ] shift i and i without fields pass keys
-- [ ] insert mode editing keys
-- [ ] ctrl w outside a field still closes the tab
-- [ ] the grid picker glides between tiles
-- [ ] the urlbar is thin glass that opens in motion
-- [ ] which key fades out
-- [ ] which key popup
-- [ ] leader question mark shows all keys
-- [ ] boot keeps the sidebar hidden on the empty tab
-- [ ] explorer close hides sidebar on empty tab
-- [ ] split makes the new pane right or below
-- [ ] split picker choice is for its own pane
-- [ ] split keeps tabs of another split alone
-- [ ] split inside pinned panes adds one pane
-- [ ] a split that pins nothing says nothing
-- [ ] split stops at the limit before asking
-- [ ] split open url works inside a split
-- [ ] close goes back to the pane used last
-- [ ] only keeps the current pane showing
-- [ ] close and only drop an empty pane
-- [ ] focus goes to the pane beside and back
-- [ ] focus in a grid and after unequal resizes
-- [ ] removing an earlier split keeps the view right
+- [x] actor matches web pages
+- [x] window frame follows mode
+- [x] j scrolls an inner pane
+- [x] j gg G scroll
+- [x] insert mode follows focus
+- [x] unmapped keys reach the page
+- [x] shift j k switch tabs
+- [x] tab keys treat a split as one tab
+- [x] page keeps apz from scrolling mapped keys
+- [x] pending keys show in statusline
+- [x] slash opens find in page
+- [x] leader comma lists tabs
+- [x] gi focuses the first input
+- [x] p opens the clipboard url
+- [x] p refuses non web urls
+- [x] autofocus does not trap keys in insert mode *(page autofocus enters insert mode per Approved Differences; `<Esc>` exits cleanly)*
+- [x] split picker offers url and tabs
+- [x] leader wo unsplits
+- [x] split divides only the current pane
+- [x] escape dismisses the picker
+- [x] leader oh opens library history
+- [x] split open url uses an empty pane
+- [x] i and field jumps
+- [x] shift i and i without fields pass keys
+- [x] insert mode editing keys
+- [x] ctrl w outside a field still closes the tab
+- [x] the grid picker glides between tiles
+- [x] the urlbar is thin glass that opens in motion
+- [x] which key fades out
+- [x] which key popup
+- [x] leader question mark shows all keys
+- [x] boot keeps the sidebar hidden on the empty tab
+- [x] explorer close hides sidebar on empty tab
+- [x] split makes the new pane right or below
+- [x] split picker choice is for its own pane
+- [x] split keeps tabs of another split alone
+- [x] split inside pinned panes adds one pane
+- [x] a split that pins nothing says nothing
+- [x] split stops at the limit before asking
+- [x] split open url works inside a split
+- [x] close goes back to the pane used last
+- [x] only keeps the current pane showing
+- [x] close and only drop an empty pane
+- [x] focus goes to the pane beside and back
+- [x] focus in a grid and after unequal resizes
+- [x] removing an earlier split keeps the view right
 
 ### `browser_zendia_key_delivery.js`: Key routing
 
-- [ ] tab keys leave the empty tab
-- [ ] keys with the focus in the browser ui
-- [ ] a sequence started in the browser ui
-- [ ] browser ui fields keep their keys
-- [ ] unmapped keys leave the focus alone
-- [ ] panes are reached in normal mode
-- [ ] tabs are reached in normal mode
-- [ ] a clicked tab keeps its field
-- [ ] a chord ends a jump and runs
-- [ ] a click ends a jump
+- [x] tab keys leave the empty tab
+- [x] keys with the focus in the browser ui
+- [x] a sequence started in the browser ui
+- [x] browser ui fields keep their keys
+- [x] unmapped keys leave the focus alone
+- [x] panes are reached in normal mode
+- [x] tabs are reached in normal mode
+- [x] a clicked tab keeps its field
+- [x] a chord ends a jump and runs
+- [x] a click ends a jump
 
 ### `browser_zendia_vim_mode.js`: Vim switch, layout, mode indicator
 
-- [ ] switch is a row of the app menu
-- [ ] switch turns vim mode off and on
-- [ ] onboarding looks like plain zen
-- [ ] turning vim on leaves the keys to vim
-- [ ] sidebar toggle keeps the single toolbar
-- [ ] layout reset returns to the defaults
-- [ ] the mode indicator shows the mascot and the mode
-- [ ] the mode indicator steps aside from the pointer
-- [ ] the mode indicator rests after a change
-- [ ] the mode indicator ducks while the page scrolls
+- [x] switch is a row of the app menu
+- [x] switch turns vim mode off and on
+- [x] onboarding looks like plain zen
+- [x] turning vim on leaves the keys to vim
+- [x] sidebar toggle keeps the single toolbar
+- [x] layout reset returns to the defaults
+- [x] the mode indicator shows the mascot and the mode
+- [x] the mode indicator steps aside from the pointer
+- [x] the mode indicator rests after a change
+- [x] the mode indicator ducks while the page scrolls
 
 ### `browser_zendia_jump.js`: Jumps, fields, visual mode, yank
 
-- [ ] jump to a control by text and label
-- [ ] hints label everything
-- [ ] hints mark the letters already pressed
-- [ ] hints label what is on screen in a long page
-- [ ] find gives the controls in the window in order
-- [ ] i labels the fields when there are several
-- [ ] i with a count goes to that field
-- [ ] i enters a lone field at once
-- [ ] i leaves out the fields under a dialog
-- [ ] i enters a lone field something clear lies over
-- [ ] s labels controls in frames too
-- [ ] visual mode selects and yanks
-- [ ] visual mode labels words and paragraphs
-- [ ] gg and G select to the top and bottom
-- [ ] text objects
-- [ ] typed jump to a word starts visual mode
-- [ ] cycling the ring in a field
-- [ ] copy events join the ring
-- [ ] keys typed in a frame act on the page
+- [x] jump to a control by text and label
+- [x] hints label everything
+- [x] hints mark the letters already pressed
+- [x] hints label what is on screen in a long page
+- [x] find gives the controls in the window in order
+- [x] i labels the fields when there are several
+- [x] i with a count goes to that field
+- [x] i enters a lone field at once
+- [x] i leaves out the fields under a dialog
+- [x] i enters a lone field something clear lies over
+- [x] s labels controls in frames too
+- [x] visual mode selects and yanks
+- [x] visual mode labels words and paragraphs
+- [x] gg and G select to the top and bottom
+- [x] text objects
+- [x] typed jump to a word starts visual mode
+- [x] cycling the ring in a field
+- [x] copy events join the ring
+- [x] keys typed in a frame act on the page
 
 ### `browser_zendia_captcha.js`: CAPTCHA keys
 
-- [ ] a challenge stays open for every pick
-- [ ] escape leaves a challenge
-- [ ] other pages still end after one pick
-- [ ] gc labels only the captcha
-- [ ] a slider is dragged with the keys
-- [ ] escape lets go of a slider where it began
-- [ ] a point of a picture is clicked with the keys
-- [ ] a capital label holds a piece and a board takes it
-- [ ] a picture is pointed at not clicked in the middle
-- [ ] a capital label holds what is not known to drag
-- [ ] a grid of images is clicked not held
-- [ ] a ruler puts a slider on its line
-- [ ] enter verifies from the cursor
-- [ ] gc says what it labeled
-- [ ] fed tokens drive the challenge
-- [ ] or page labels a page whose captcha is not found
+- [x] a challenge stays open for every pick
+- [x] escape leaves a challenge
+- [x] other pages still end after one pick
+- [x] gc labels only the captcha
+- [x] a slider is dragged with the keys
+- [x] escape lets go of a slider where it began
+- [x] a point of a picture is clicked with the keys
+- [x] a capital label holds a piece and a board takes it
+- [x] a picture is pointed at not clicked in the middle
+- [x] a capital label holds what is not known to drag
+- [x] a grid of images is clicked not held
+- [x] a ruler puts a slider on its line
+- [x] enter verifies from the cursor
+- [x] gc says what it labeled
+- [x] fed tokens drive the challenge
+- [x] or page labels a page whose captcha is not found
 
 ### `browser_zendia_explorer.js`: Explorer, toolbar, menus
 
-- [ ] explorer opens on the current tab
-- [ ] explorer moves and opens tabs
-- [ ] explorer tab operations
-- [ ] explorer visual and picked selections
-- [ ] explorer jump labels
-- [ ] explorer m opens the tab menu
-- [ ] explorer folders
-- [ ] explorer moves tabs into folders
-- [ ] leader be toggles essentials from the page
-- [ ] leader tab r renames the space
-- [ ] explorer alt j moves a row
-- [ ] explorer ctrl v splits with the cursor tab
-- [ ] explorer r renames a tab
-- [ ] explorer keeps leader keys
-- [ ] explorer colors the window blue
-- [ ] leader bj picks a tab from the page
-- [ ] leader bm opens the menu of the current tab
-- [ ] leader m moves through the toolbar
-- [ ] toolbar i edits the address
-- [ ] main menu with vim keys
-- [ ] toolbar m opens a button menu
-- [ ] page context menu takes vim keys
-- [ ] mode indicator stays clear of the sidebar
-- [ ] explorer and toolbar take turns
-- [ ] compact mode from the toolbar hides the sidebar
-- [ ] compact mode from the toolbar menu hides the sidebar
-- [ ] compact sidebar stays between explorer and toolbar
-- [ ] toolbar shows the compact top bar
-- [ ] explorer keys after clicking compact mode off
+- [x] explorer opens on the current tab
+- [x] explorer moves and opens tabs
+- [x] explorer tab operations
+- [x] explorer visual and picked selections
+- [x] explorer jump labels
+- [x] explorer m opens the tab menu
+- [x] explorer folders
+- [x] explorer moves tabs into folders
+- [x] leader be toggles essentials from the page
+- [x] leader tab r renames the space
+- [x] explorer alt j moves a row
+- [x] explorer ctrl v splits with the cursor tab
+- [x] explorer r renames a tab
+- [x] explorer keeps leader keys
+- [x] explorer colors the window blue
+- [x] leader bj picks a tab from the page
+- [x] leader bm opens the menu of the current tab
+- [x] leader m moves through the toolbar
+- [x] toolbar i edits the address
+- [x] main menu with vim keys
+- [x] toolbar m opens a button menu
+- [x] page context menu takes vim keys
+- [x] mode indicator stays clear of the sidebar
+- [x] explorer and toolbar take turns
+- [x] compact mode from the toolbar hides the sidebar
+- [x] compact mode from the toolbar menu hides the sidebar
+- [x] compact sidebar stays between explorer and toolbar
+- [x] toolbar shows the compact top bar
+- [x] explorer keys after clicking compact mode off
 
 ### `browser_zendia_library.js`: Library
 
-- [ ] history opens in its search box
-- [ ] y and d on a visit
-- [ ] sections and spaces
-- [ ] a click on the page hands it the keys
-- [ ] tab switches sections while searching
-- [ ] explorer reaches the sidebar foot
-- [ ] explorer plus opens the create menu
+- [x] history opens in its search box
+- [x] y and d on a visit
+- [x] sections and spaces
+- [x] a click on the page hands it the keys
+- [x] tab switches sections while searching
+- [x] explorer reaches the sidebar foot
+- [x] explorer plus opens the create menu
 
 ### `browser_zendia_internal_pages.js`: Browser pages, shadow roots, extension popups
 
-- [ ] keys work on internal pages
-- [ ] keys reach into shadow roots
-- [ ] keys work on extension pages
-- [ ] keys work in extension popups
-- [ ] popup labels follow how it was opened
-- [ ] s labels a popup opened with the mouse
-- [ ] a popup loaded by hover follows its opening
-- [ ] a press that opens nothing leaves no mark
+- [x] keys work on internal pages
+- [x] keys reach into shadow roots
+- [x] keys work on extension pages
+- [x] keys work in extension popups
+- [x] popup labels follow how it was opened
+- [x] s labels a popup opened with the mouse
+- [x] a popup loaded by hover follows its opening
+- [x] a press that opens nothing leaves no mark
 
 ### `browser_zendia_ublock.js`: Extensions and uBlock Origin
 
-- [ ] no keys of its own
-- [ ] actions run ublock commands
-- [ ] a toast without ublock
-- [ ] removed stays removed
-- [ ] turned down in the onboarding
-- [ ] the popup has labels
+- [x] no keys of its own
+- [x] actions run ublock commands
+- [x] a toast without ublock
+- [x] removed stays removed
+- [x] turned down in the onboarding
+- [x] the popup has labels
 
 ### Keyboard cases in the agent and web chat tests
 
-- [ ] other buffers close a floating panel (`browser_zendia_webchat.js`)
-- [ ] the toolbars keys press chat (`browser_zendia_chat_button.js`)
-- [ ] the explorers keys press chat (`browser_zendia_chat_button.js`)
-- [ ] chat works with vim mode off (`browser_zendia_chat_button.js`)
-- [ ] insert mode keys in the dock (`browser_zendia_agent.js`)
-- [ ] the model list searches and picks (`browser_zendia_agent_card.js`)
+- [x] other buffers close a floating panel (`browser_zendia_webchat.js`)
+- [x] the toolbars keys press chat (`browser_zendia_chat_button.js`)
+- [x] the explorers keys press chat (`browser_zendia_chat_button.js`)
+- [x] chat works with vim mode off (`browser_zendia_chat_button.js`)
+- [x] insert mode keys in the dock (`browser_zendia_agent.js`)
+- [x] the model list searches and picks (`browser_zendia_agent_card.js`)
 
 ### Unit tests of the pure logic
 
 Port the cases of these with the code they cover: `test_key_engine.js`, `test_keymap.js`, `test_keys.js`,
 `test_which_key.js`, `test_jump_labels.js`, `test_text_objects.js`, `test_yank_ring.js`, `test_captcha.js`,
-`test_actions.js`, `test_plugins.js`, `test_specs.js`.
+`test_actions.js`, `test_plugins.js`, `test_specs.js` — **Done** across `zendia-keymap`, `zendia-browser-core`, `zendia-automation`, and `zendia` unit test suites.

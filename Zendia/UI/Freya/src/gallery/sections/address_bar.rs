@@ -352,6 +352,7 @@ impl Component for AddressBarSection {
                         open_bar_core.invoke_or_log(Command::AddressBarOpen {
                             new_tab: true,
                             initial_query: None,
+                            filter: zendia_browser_core::address_bar::AddressBarFilter::All,
                         });
                     }))
                     .child(KitChip::new("Open Palette").on_press(move |_| {

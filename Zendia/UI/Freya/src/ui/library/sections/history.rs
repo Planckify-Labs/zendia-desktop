@@ -100,44 +100,6 @@ impl Component for HistorySection {
         };
         let groups = filter_and_group_history(source_entries, &history_query);
 
-        let mut nav_rows = Vec::new();
-        let mut row_offsets: Vec<(String, f32, f32)> = Vec::new();
-        let mut y_cursor = 0.0f32;
-        const ROW_HEIGHT: f32 = 54.0;
-        const GROUP_HEADER_HEIGHT: f32 = 31.0;
-        for group in &groups {
-            if !group.title.is_empty() {
-                y_cursor += GROUP_HEADER_HEIGHT;
-            }
-            for entry in &group.entries {
-                let key = format!("history:{}", entry.id.0);
-                row_offsets.push((key.clone(), y_cursor, ROW_HEIGHT));
-                y_cursor += ROW_HEIGHT + 2.0;
-                nav_rows.push(LibraryNavRow::new(
-                    key,
-                    Some(Command::HistoryOpen {
-                        entry_id: Some(entry.id),
-                        url: None,
-                        new_tab: true,
-                        in_background: false,
-                    }),
-                ));
-            }
-            y_cursor += 2.0;
-        }
-        let content_height = y_cursor + 12.0;
-        let cursor_key = use_library_nav(LibrarySection::History, LibraryNavLayout::List, nav_rows);
-
-        if *last_scrolled_cursor.peek() != cursor_key {
-            last_scrolled_cursor.set(cursor_key.clone());
-            if let Some(target_key) = cursor_key.as_deref()
-                && let Some(&(_, item_top, item_h)) = row_offsets.iter().find(|(k, _, _)| k == target_key)
-            {
-                let vh = *viewport_height.peek();
-                scroll_item_into_view(&mut scroll_controller, item_top, item_h, vh, content_height);
-            }
-        }
-
         let showing_closed = current_source == HistorySource::ClosedTabs;
         if let Some(lib) = library {
             let mut flag = lib.history_showing_closed;
@@ -172,6 +134,49 @@ impl Component for HistorySection {
                     .collect(),
             ),
         ];
+
+        let mut nav_rows = Vec::new();
+        let mut row_offsets: Vec<(String, f32, f32)> = Vec::new();
+        let mut y_cursor = 0.0f32;
+        const ROW_HEIGHT: f32 = 54.0;
+        const GROUP_HEADER_HEIGHT: f32 = 31.0;
+        for group in &groups {
+            if !group.title.is_empty() {
+                y_cursor += GROUP_HEADER_HEIGHT;
+            }
+            for entry in &group.entries {
+                let key = format!("history:{}", entry.id.0);
+                row_offsets.push((key.clone(), y_cursor, ROW_HEIGHT));
+                y_cursor += ROW_HEIGHT + 2.0;
+                nav_rows.push(LibraryNavRow::new(
+                    key,
+                    Some(Command::HistoryOpen {
+                        entry_id: Some(entry.id),
+                        url: None,
+                        new_tab: true,
+                        in_background: false,
+                    }),
+                ));
+            }
+            y_cursor += 2.0;
+        }
+        let content_height = y_cursor + 12.0;
+        let active_nav_rows = if *filters_open.read() {
+            LibrarySearchBar::filter_nav_rows(&filter_groups)
+        } else {
+            nav_rows
+        };
+        let cursor_key = use_library_nav(LibrarySection::History, LibraryNavLayout::List, active_nav_rows);
+
+        if !*filters_open.read() && *last_scrolled_cursor.peek() != cursor_key {
+            last_scrolled_cursor.set(cursor_key.clone());
+            if let Some(target_key) = cursor_key.as_deref()
+                && let Some(&(_, item_top, item_h)) = row_offsets.iter().find(|(k, _, _)| k == target_key)
+            {
+                let vh = *viewport_height.peek();
+                scroll_item_into_view(&mut scroll_controller, item_top, item_h, vh, content_height);
+            }
+        }
 
         let force_search_ring = library.is_some_and(|lib| *lib.force_search_focus_ring.read());
         let search_bar = LibrarySearchBar::new("Search History…", query)
@@ -319,6 +324,11 @@ impl Component for HistorySection {
                         let h = e.area.height();
                         if (*viewport_height.peek() - h).abs() > 1.0 {
                             viewport_height.set(h);
+                        }
+                        if let Some(lib) = library
+                            && h > 1.0
+                        {
+                            lib.nav.set_visible_rows((h / 56.0).floor() as usize);
                         }
                     })
                     .child(
@@ -523,7 +533,9 @@ impl Component for HistoryRow {
             )
             .maybe_child(actions);
 
-        LibraryCursorRing::new(self.focused, row).corner_radius(16.0)
+        LibraryCursorRing::new(self.focused, row)
+            .corner_radius(16.0)
+            .row_key(format!("history:{}", entry_id.0))
     }
 
     fn render_key(&self) -> DiffKey {

@@ -147,12 +147,20 @@ impl App for GalleryApp {
                             .active_tab()
                             .map(|tab| tab.url.clone())
                             .filter(|url| !url.is_empty() && url != "about:blank" && url != "about:newtab");
-                        address_bar_state.open_floating(false, current_url);
+                        address_bar_state.open_floating(
+                            false,
+                            current_url,
+                            zendia_browser_core::address_bar::AddressBarFilter::All,
+                        );
                     }
-                    ViewRequest::AddressBarOpen { new_tab, initial_query } => {
+                    ViewRequest::AddressBarOpen {
+                        new_tab,
+                        initial_query,
+                        filter,
+                    } => {
                         menu_state.close_all();
                         share_state.close();
-                        address_bar_state.open_floating(*new_tab, initial_query.clone());
+                        address_bar_state.open_floating(*new_tab, initial_query.clone(), *filter);
                     }
                     ViewRequest::PaletteOpen { initial_query } => {
                         menu_state.close_all();
@@ -227,6 +235,10 @@ impl App for GalleryApp {
                     | ViewRequest::AgentInstructions => {
                         dock_state.apply_request(request);
                     }
+                    ViewRequest::PanelFocusChanged { panel_id } => {
+                        let mut ds = dock_state;
+                        ds.set_focus(panel_id.clone());
+                    }
                     // The gallery has no Hub, so web chat sites have no views to reload or navigate.
                     ViewRequest::WebChatReload { .. } | ViewRequest::WebChatNavigateHome { .. } => {}
                     ViewRequest::OnboardingOpen => onboarding_state.open(),
@@ -261,6 +273,10 @@ impl App for GalleryApp {
                     ViewRequest::SettingsOpen { .. }
                     | ViewRequest::SettingsClose
                     | ViewRequest::TabMenu { .. }
+                    | ViewRequest::FolderMenu { .. }
+                    | ViewRequest::CreateNewMenu
+                    | ViewRequest::ToolbarItemMenu { .. }
+                    | ViewRequest::SpaceDeleteConfirm { .. }
                     | ViewRequest::UrlPaste { .. }
                     | ViewRequest::PageFind
                     | ViewRequest::WindowMinimize
@@ -268,7 +284,8 @@ impl App for GalleryApp {
                     | ViewRequest::WindowClose
                     | ViewRequest::LibraryVimAction { .. }
                     | ViewRequest::ExtensionPopupOpen { .. }
-                    | ViewRequest::ExtensionPopupClose => {}
+                    | ViewRequest::ExtensionPopupClose
+                    | ViewRequest::WebChatAccountsToggle => {}
                 },
                 _ => {}
             }
@@ -340,7 +357,9 @@ impl App for GalleryApp {
                 {
                     return;
                 }
-                let _ = keymap.handle_global_key_down(&e, &core);
+                if !keymap.handle_global_key_down(&e, &core) {
+                    crate::ui::vim::leave_window_mode_on_unused_key(&e, &core, &keymap);
+                }
             }
         };
 

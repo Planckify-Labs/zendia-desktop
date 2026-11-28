@@ -260,7 +260,12 @@ impl Component for SelectDropdownCard {
             if !capture {
                 return;
             }
-            let Some(mut action) = classify_list_key(&e, ListNavConfig::select()) else {
+            let vim_enabled = core_keys.model().peek().vim_mode_enabled;
+            let Some(mut action) = classify_list_key(&e, ListNavConfig::select().with_vim_keys(vim_enabled)) else {
+                if vim_enabled {
+                    e.stop_propagation();
+                    e.prevent_default();
+                }
                 return;
             };
             if matches!(&e.key, Key::Character(ch) if ch == " ") && typeahead.peek().is_typing(Instant::now()) {

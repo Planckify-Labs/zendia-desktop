@@ -64,6 +64,8 @@ fn add_group(model: &mut BrowserModel, tab_ids: Vec<TabId>, direction: SplitDire
         direction,
         ratios: ratios.unwrap_or_else(|| split::default_ratios(direction, tab_ids.len())),
         tab_ids,
+        tree: None,
+        zoomed_tab: None,
     }];
 }
 

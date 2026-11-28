@@ -22,6 +22,11 @@ command = "tab.close"
 description = "Close tab"
 
 [[bindings]]
+keys = ["<C-S-t>", "<D-S-t>"]
+command = "tab.reopen_closed"
+description = "Reopen closed tab"
+
+[[bindings]]
 keys = ["<C-Tab>", "<C-PageDown>"]
 command = "tab.next"
 description = "Next tab"

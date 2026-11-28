@@ -10,6 +10,68 @@ use crate::commands::{CommandError, CommandResult, MediaAction};
 use crate::model::TabId;
 use crate::vim_keys::FieldEdit;
 
+/// Kind of mouse event emitted by the keyboard cursor (`PointerPad`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerEventKind {
+    Move,
+    Down,
+    Up,
+}
+
+/// Touch gesture stage emitted alongside drag mouse events (`CAP-05`, `CAP-06`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchStage {
+    Start,
+    Move,
+    End,
+}
+
+/// Single step of a hover, click, or drag path dispatched to a tab's viewport (`CAP-05`, `CAP-06`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerStep {
+    pub kind: PointerEventKind,
+    pub x: f64,
+    pub y: f64,
+    pub buttons: u8,
+    pub touch: Option<TouchStage>,
+    pub pause_ms: u64,
+}
+
+impl PointerStep {
+    pub const fn move_to(x: f64, y: f64) -> Self {
+        Self {
+            kind: PointerEventKind::Move,
+            x,
+            y,
+            buttons: 0,
+            touch: None,
+            pause_ms: 0,
+        }
+    }
+
+    pub const fn press(x: f64, y: f64) -> Self {
+        Self {
+            kind: PointerEventKind::Down,
+            x,
+            y,
+            buttons: 1,
+            touch: None,
+            pause_ms: 0,
+        }
+    }
+
+    pub const fn release(x: f64, y: f64) -> Self {
+        Self {
+            kind: PointerEventKind::Up,
+            x,
+            y,
+            buttons: 0,
+            touch: None,
+            pause_ms: 0,
+        }
+    }
+}
+
 /// Receives tab and navigation commands from the core and forwards them to the engine.
 pub trait TabSource: Send + Sync {
     fn new_tab(&self, url: Option<&str>, after: Option<TabId>, activate: bool) -> CommandResult;
@@ -17,13 +79,42 @@ pub trait TabSource: Send + Sync {
     fn activate_tab(&self, tab_id: TabId) -> CommandResult;
     fn navigate_back(&self, tab_id: TabId) -> CommandResult;
     fn navigate_forward(&self, tab_id: TabId) -> CommandResult;
+    fn navigate_history(&self, tab_id: TabId, delta: i32) -> CommandResult {
+        if delta < 0 {
+            for _ in 0..delta.unsigned_abs() {
+                self.navigate_back(tab_id)?;
+            }
+        } else if delta > 0 {
+            for _ in 0..delta {
+                self.navigate_forward(tab_id)?;
+            }
+        }
+        Ok(())
+    }
+    fn navigate_history_to_step(&self, _tab_id: TabId, _step: i32) -> CommandResult {
+        Ok(())
+    }
     fn reload(&self, tab_id: TabId, bypass_cache: bool) -> CommandResult;
     fn stop_loading(&self, tab_id: TabId) -> CommandResult;
     fn load_url(&self, tab_id: TabId, input: &str) -> CommandResult;
+    fn set_tab_muted(&self, _tab_id: TabId, _muted: bool) -> CommandResult {
+        Ok(())
+    }
+    fn unload_tab(&self, _tab_id: TabId) -> CommandResult {
+        Ok(())
+    }
 
     /// Clicks the page at a point of its viewport, in CSS pixels, as the user's mouse would: a jump label's pick.
     fn click_at(&self, _tab_id: TabId, _x: f64, _y: f64) -> CommandResult {
         Err(CommandError::BackendUnavailable("click_at".to_string()))
+    }
+    /// Clicks the page at `(x, y)` in CSS pixels, holding `Ctrl` when `ctrl` is `true` (`JMP-03`).
+    fn click_at_with_modifiers(&self, tab_id: TabId, x: f64, y: f64, _ctrl: bool) -> CommandResult {
+        self.click_at(tab_id, x, y)
+    }
+    /// Dispatches a sequence of hover, press, drag, or release steps from the keyboard cursor (`CAP-05`, `CAP-06`).
+    fn dispatch_pointer_steps(&self, _tab_id: TabId, _steps: &[PointerStep]) -> CommandResult {
+        Ok(())
     }
     /// Edits the page's focused field for an insert mode key (`<C-w>`, `<C-u>`, `<C-h>`).
     fn edit_field(&self, _tab_id: TabId, _edit: FieldEdit) -> CommandResult {
@@ -36,6 +127,17 @@ pub trait TabSource: Send + Sync {
     /// Starts or updates find-in-page on `tab_id`.
     fn find_in_page(&self, _tab_id: TabId, _query: &str) -> CommandResult {
         Ok(())
+    }
+    /// Starts or updates find-in-page with case-sensitivity and highlight-all options (`NAV-09`).
+    fn find_in_page_with_options(
+        &self,
+        tab_id: TabId,
+        query: &str,
+        _case_sensitive: bool,
+        _highlight_all: bool,
+        _whole_words: bool,
+    ) -> CommandResult {
+        self.find_in_page(tab_id, query)
     }
     /// Steps to the next or previous find-in-page match (`n` / `N`).
     fn find_in_page_step(&self, _tab_id: TabId, _backwards: bool) -> CommandResult {

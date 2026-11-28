@@ -134,12 +134,16 @@ pub fn focus_mode_captures_keys(model: &BrowserModel) -> bool {
 }
 
 /// Whether the browser keeps a key from the focused page whatever the key engine makes of it: hint labels take every
-/// key, and the explorer, the toolbar and the library are the browser's own. In window mode a key the mode has no use
-/// for ends it and reaches the page, as in the old fork.
+/// key (except while a staying CAPTCHA jump yields to an answer field, `CAP-08`), and the explorer, the toolbar and
+/// the library are the browser's own.
 pub fn surface_keeps_keys(model: &BrowserModel) -> bool {
+    let hints_keep_keys = model
+        .page_hints
+        .as_ref()
+        .is_some_and(|hints| !(hints.staying && model.page_editing));
     model.vim_mode_enabled
         && (model.focus.hints.is_some()
-            || model.page_hints.is_some()
+            || hints_keep_keys
             || matches!(
                 model.input_mode,
                 InputMode::Explorer | InputMode::Toolbar | InputMode::Library
@@ -157,9 +161,13 @@ pub fn handle_focus_key_down(e: &KeyboardEventData, core: &CoreView) -> bool {
 
     let (vim_enabled, has_page_hints, has_focus_hints) = {
         let model = core.model().peek();
+        let active_page_hints = model
+            .page_hints
+            .as_ref()
+            .is_some_and(|hints| !(hints.staying && model.page_editing));
         (
             model.vim_mode_enabled,
-            model.page_hints.is_some(),
+            active_page_hints,
             focus_mode_captures_keys(&model) && model.focus.hints.is_some(),
         )
     };
@@ -173,22 +181,33 @@ pub fn handle_focus_key_down(e: &KeyboardEventData, core: &CoreView) -> bool {
         let Some(stroke) = crate::input::key_stroke_from_event(&e.key, e.code, e.modifiers) else {
             return true;
         };
+        let notation = stroke.to_string();
         let key = if chord {
-            HintKey::Chord
+            HintKey::Chord(notation)
         } else {
-            hint_key_from_notation(&stroke.to_string())
+            hint_key_from_notation(&notation)
         };
-        // Labels are letters: a key with Ctrl, Alt or Super ends the jump and goes on to the keymap.
-        let passes = key == HintKey::Chord;
+        let passes = core
+            .model()
+            .peek()
+            .page_hints
+            .as_ref()
+            .is_some_and(|session| session.key_passes_to_keymap(&key));
         core.invoke_or_log(Command::Page(PageAction::PageHintInput { key }));
         return !passes;
     }
 
-    if chord {
+    if !has_focus_hints {
         return false;
     }
 
-    if !has_focus_hints {
+    // Bare modifier keys never cancel active focus hints (`EXP-19`).
+    if crate::input::key_stroke_from_event(&e.key, e.code, e.modifiers).is_none() {
+        return true;
+    }
+
+    if chord {
+        core.invoke_or_log(Command::FocusHintCancel);
         return false;
     }
 
@@ -208,8 +227,12 @@ pub fn handle_focus_key_down(e: &KeyboardEventData, core: &CoreView) -> bool {
     true
 }
 
-/// A key that window mode had no use for ends it, and the key does its usual job. A bare modifier is no key.
-pub fn leave_window_mode_on_unused_key(e: &KeyboardEventData, core: &CoreView) {
+/// A key that window mode had no use for ends it and runs in normal mode instead (`WIN-21`). A bare modifier is no key.
+pub fn leave_window_mode_on_unused_key(
+    e: &KeyboardEventData,
+    core: &CoreView,
+    keymap: &crate::ui::page::KeymapController,
+) {
     if crate::input::key_stroke_from_event(&e.key, e.code, e.modifiers).is_none() {
         return;
     }
@@ -219,6 +242,7 @@ pub fn leave_window_mode_on_unused_key(e: &KeyboardEventData, core: &CoreView) {
     };
     if in_window_mode {
         core.invoke_or_log(Command::WindowModeClose);
+        let _ = keymap.handle_global_key_down(e, core);
     }
 }
 

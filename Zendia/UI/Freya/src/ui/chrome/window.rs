@@ -33,7 +33,6 @@ use crate::ui::panels::{
 use crate::ui::spaces::{SpaceSwipeMode, SpaceTextureOverlay, try_use_space_editing_state};
 use crate::ui::theme::{CHROME_OVERLAY_LEVEL, ResolvedScheme, Rgba, ThemeRole, motion, use_theme};
 use crate::ui::vim::statusline::try_use_vim_statusline_state;
-use crate::ui::vim::vim_mode_backdrop_endpoints;
 use crate::ui::webchat::WebChatPanel;
 use freya::animation::*;
 use freya::prelude::*;
@@ -134,6 +133,7 @@ impl Component for WindowShell {
         let mut top_controls_revealed = use_state(|| false);
         let mut top_controls_seq = use_state(|| 0u64);
 
+        let library_inserting = crate::ui::vim::statusline::current_library_inserting();
         let (
             layout,
             settings,
@@ -147,6 +147,7 @@ impl Component for WindowShell {
             toolbar_items,
             vim_mode_enabled,
             raw_input_mode,
+            toolbar_from_sidebar,
             input_mode,
             resolved_panels,
             slide_handle_els,
@@ -194,9 +195,11 @@ impl Component for WindowShell {
                 model.contributions.toolbar_items.clone(),
                 model.vim_mode_enabled,
                 model.input_mode,
-                crate::ui::vim::statusline::effective_statusline_mode(
+                model.focus.toolbar_from_sidebar,
+                crate::ui::vim::statusline::effective_statusline_mode_with_library(
                     model.input_mode,
                     model.focus.selection.is_empty(),
+                    library_inserting,
                 ),
                 resolved_panels,
                 slide_handle_els,
@@ -275,9 +278,17 @@ impl Component for WindowShell {
 
         let draft_appearance = space_editing.and_then(|se| se.active_draft_appearance());
         let effective_appearance = draft_appearance.as_ref().or(active_appearance.as_ref());
+        let space_opacity = effective_appearance
+            .map(|a| a.opacity)
+            .or_else(|| active_space.as_ref().map(|s| s.gradient.opacity))
+            .unwrap_or(zendia_browser_core::space_appearance::DEFAULT_GRADIENT_OPACITY);
 
         let base_target_endpoints = if vim_mode_enabled {
-            vim_mode_backdrop_endpoints(input_mode, theme.scheme, &theme)
+            crate::ui::vim::statusline::vim_mode_backdrop_endpoints_with_opacity(
+                input_mode,
+                theme.scheme,
+                space_opacity,
+            )
         } else {
             window_backdrop_endpoints_for_appearance(active_space.as_ref(), effective_appearance, theme.scheme)
         };
@@ -353,10 +364,12 @@ impl Component for WindowShell {
         let site_panel_open = address_bar_state.is_some_and(|a| *a.site_panel_open.read());
         let extension_popup_open =
             crate::ui::extensions::try_use_extension_popup_state().is_some_and(|p| p.open.read().is_some());
-        let space_editor_open =
-            space_editing.is_some_and(|se| *se.create_form_open.read() || *se.theme_picker_open.read());
-        let sidebar_renaming =
-            sidebar_state.is_some_and(|s| s.renaming_tab.read().is_some() || s.renaming_folder.read().is_some());
+        let space_editor_open = space_editing.is_some_and(|se| {
+            *se.create_form_open.read() || *se.theme_picker_open.read() || se.live_icon_picker_space.read().is_some()
+        });
+        let sidebar_renaming = sidebar_state.is_some_and(|s| {
+            s.renaming_tab.read().is_some() || s.renaming_folder.read().is_some() || s.renaming_space.read().is_some()
+        });
         let sidebar_dragging = sidebar_state.is_some_and(|s| s.drag_state.read().is_some());
 
         // Anchored sidebar/toolbar popups, renames, and drags force the surface open; context menus only keep an
@@ -377,7 +390,9 @@ impl Component for WindowShell {
         // Auto-reveal compact sidebar/toolbar while Explorer or Toolbar focus mode is active (`VIM-EX-05`, `VIM-TB-02`).
         let focus_reveals_sidebar = vim_mode_enabled
             && (raw_input_mode == InputMode::Explorer
-                || (raw_input_mode == InputMode::Toolbar && !layout.has_top_toolbar()));
+                || (raw_input_mode == InputMode::Toolbar
+                    && !layout.has_top_toolbar()
+                    && (!compact_single_top_bar || toolbar_from_sidebar)));
         let focus_reveals_toolbar = vim_mode_enabled && raw_input_mode == InputMode::Toolbar;
         let sidebar_out = compact_sidebar
             && !library_open
@@ -687,7 +702,7 @@ impl Component for WindowShell {
                     if vim_on {
                         match active_mode {
                             InputMode::Explorer => {
-                                page_click_core.invoke_or_log(Command::ExplorerOpen);
+                                page_click_core.invoke_or_log(Command::ExplorerClose);
                             }
                             InputMode::Toolbar => {
                                 page_click_core.invoke_or_log(Command::ToolbarFocusClose);

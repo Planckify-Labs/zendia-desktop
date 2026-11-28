@@ -146,6 +146,7 @@ public:
     ErrorOr<WebView::DebuggerObjectProperties> console_object_properties(u64 object_id);
     void run_javascript(StringView js_source);
     void deliver_embedder_message(u64 request_id, String world, String script_source);
+    GC::Ref<Web::Internals::ExtensionWorld> ensure_embedder_world(Web::HTML::Window&, String const& world_name);
     void did_output_js_console_message(WebView::ConsoleOutput);
 
     Vector<Web::CSS::StyleSheetIdentifier> list_style_sheets() const;
@@ -541,6 +542,7 @@ private:
     RefPtr<Core::Timer> m_accessibility_focus_timer;
     Optional<i64> m_pending_accessibility_focus;
     Optional<i64> m_reported_focused_area_id;
+    Optional<bool> m_reported_editable_focus;
 
     bool m_has_devtools_client { false };
     NonnullRefPtr<Web::Fetch::Engine::NetworkActivityObservers> m_network_activity_observers;
@@ -551,8 +553,8 @@ private:
     // asks, so it sees what the page output before.
     WebView::ConsoleOutputBuffer m_console_output_buffer;
 
-    // Cached isolated worlds for Zendia's generic embedder channel (e.g. "zendia-automation").
-    HashMap<String, GC::Ptr<Web::Internals::ExtensionWorld>> m_embedder_worlds;
+    // Cached isolated worlds per window for Zendia's generic embedder channel (e.g. "zendia-automation").
+    HashMap<String, Vector<GC::Ptr<Web::Internals::ExtensionWorld>>> m_embedder_worlds;
 };
 
 }

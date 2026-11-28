@@ -5488,6 +5488,8 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "regex",
+ "serde",
+ "serde_json",
  "zendia-automation",
  "zendia-keymap",
  "zendia-module-api",
@@ -5518,6 +5520,7 @@ name = "zendia-keymap"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "toml 0.9.12+spec-1.1.0",
 ]
 

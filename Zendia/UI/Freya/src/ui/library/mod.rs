@@ -76,14 +76,38 @@ pub struct LibraryViewState {
 
 impl LibraryViewState {
     pub fn open(&self, section: Option<LibrarySection>) {
+        let target = section.unwrap_or_else(|| *self.section.peek());
         if let Some(section) = section {
             let mut current = self.section;
             current.set_if_modified(section);
         }
+        let mut stay = self.nav.stay_in_list;
+        stay.set_if_modified(false);
+        let mut ins = self.nav.inserting;
+        ins.set_if_modified(matches!(
+            target,
+            LibrarySection::History | LibrarySection::Downloads | LibrarySection::Media
+        ));
         let mut open = self.open;
         open.set_if_modified(true);
         let mut focused = self.nav.keyboard_focused;
         focused.set_if_modified(true);
+        self.nav.reset_pending();
+    }
+
+    /// Switches to `section` from a list-mode command (`<Tab>`, `<S-Tab>`, `gh/gd/gs/gm/gr`) keeping focus in the list (`LIB-07`).
+    pub fn open_keeping_list_focus(&self, section: Option<LibrarySection>) {
+        if let Some(section) = section {
+            let mut current = self.section;
+            current.set_if_modified(section);
+        }
+        let mut stay = self.nav.stay_in_list;
+        stay.set_if_modified(true);
+        let mut open = self.open;
+        open.set_if_modified(true);
+        let mut focused = self.nav.keyboard_focused;
+        focused.set_if_modified(true);
+        self.nav.focus_list();
         self.nav.reset_pending();
     }
 
@@ -94,6 +118,10 @@ impl LibraryViewState {
         customizing.set_if_modified(false);
         let mut focused = self.nav.keyboard_focused;
         focused.set_if_modified(false);
+        let mut ins = self.nav.inserting;
+        ins.set_if_modified(false);
+        let mut stay = self.nav.stay_in_list;
+        stay.set_if_modified(false);
         self.nav.reset_pending();
     }
 
@@ -456,6 +484,15 @@ impl Component for Library {
             .height(Size::fill())
             .overflow(Overflow::Clip)
             .opacity(body_opacity)
+            .on_sized(move |e: Event<SizedEventData>| {
+                if let Some(lib) = state {
+                    let next = (e.area.min_x(), e.area.min_y(), e.area.width(), e.area.height());
+                    let mut vp = lib.nav.viewport_area;
+                    if *vp.peek() != next {
+                        vp.set(next);
+                    }
+                }
+            })
             .child(body_section);
 
         let click_core = core.clone();

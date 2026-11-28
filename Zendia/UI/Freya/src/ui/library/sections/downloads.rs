@@ -70,6 +70,7 @@ impl Component for DownloadsSection {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();
+        let library = crate::ui::library::try_use_library_state();
         let provided = try_consume_context::<DownloadsViewState>();
         let local_query = use_state(String::new);
         let local_filters_open = use_state(|| false);
@@ -114,6 +115,30 @@ impl Component for DownloadsSection {
         };
         let day_groups = group_downloads_by_day(&downloads, &filter, now_unix);
 
+        let current_groups = selected_groups.read().clone();
+        let current_when = *selected_when.read();
+        let active_filter_count = filter.active_filter_count();
+        let has_finished = downloads.iter().any(is_finished);
+
+        let filter_groups = vec![
+            LibraryFilterGroup::new(
+                "type",
+                "File type",
+                DownloadFileGroup::ALL
+                    .into_iter()
+                    .map(|g| LibraryFilterChip::new(g.id(), g.label(), current_groups.contains(&g)))
+                    .collect(),
+            ),
+            LibraryFilterGroup::new(
+                "when",
+                "When was it downloaded?",
+                DownloadWhenFilter::ALL
+                    .into_iter()
+                    .map(|w| LibraryFilterChip::new(w.id(), w.label(), current_when == Some(w)))
+                    .collect(),
+            ),
+        ];
+
         let mut nav_rows = Vec::new();
         let mut row_offsets: Vec<(String, f32, f32)> = Vec::new();
         let mut y_cursor = 0.0f32;
@@ -148,9 +173,14 @@ impl Component for DownloadsSection {
         }
         let content_height = y_cursor + 12.0;
 
-        let focused_key = use_library_nav(LibrarySection::Downloads, LibraryNavLayout::List, nav_rows);
+        let active_nav_rows = if *filters_open.read() {
+            LibrarySearchBar::filter_nav_rows(&filter_groups)
+        } else {
+            nav_rows
+        };
+        let focused_key = use_library_nav(LibrarySection::Downloads, LibraryNavLayout::List, active_nav_rows);
 
-        if *last_scrolled_cursor.peek() != focused_key {
+        if !*filters_open.read() && *last_scrolled_cursor.peek() != focused_key {
             last_scrolled_cursor.set(focused_key.clone());
             if let Some(target_key) = focused_key.as_deref()
                 && let Some(&(_, item_top, item_h)) = row_offsets.iter().find(|(k, _, _)| k == target_key)
@@ -160,34 +190,11 @@ impl Component for DownloadsSection {
             }
         }
 
-        let current_groups = selected_groups.read().clone();
-        let current_when = *selected_when.read();
-        let active_filter_count = filter.active_filter_count();
-        let has_finished = downloads.iter().any(is_finished);
-
-        let filter_groups = vec![
-            LibraryFilterGroup::new(
-                "type",
-                "File type",
-                DownloadFileGroup::ALL
-                    .into_iter()
-                    .map(|g| LibraryFilterChip::new(g.id(), g.label(), current_groups.contains(&g)))
-                    .collect(),
-            ),
-            LibraryFilterGroup::new(
-                "when",
-                "When was it downloaded?",
-                DownloadWhenFilter::ALL
-                    .into_iter()
-                    .map(|w| LibraryFilterChip::new(w.id(), w.label(), current_when == Some(w)))
-                    .collect(),
-            ),
-        ];
-
         let top_bar = LibrarySearchBar::new("Search Downloads…", query)
             .filter_title("Filter Downloads…")
             .filter_groups(filter_groups)
             .filters_open(filters_open)
+            .auto_focus(!*filters_open.read())
             .active_filter_count(active_filter_count)
             .on_toggle_filter(move |(group_id, option_id): (String, String)| match group_id.as_str() {
                 "type" => {
@@ -335,6 +342,11 @@ impl Component for DownloadsSection {
                     let h = e.area.height();
                     if (*viewport_height.peek() - h).abs() > 1.0 {
                         viewport_height.set(h);
+                    }
+                    if let Some(lib) = library
+                        && h > 1.0
+                    {
+                        lib.nav.set_visible_rows((h / 58.0).floor() as usize);
                     }
                 })
                 .child(
@@ -490,7 +502,9 @@ impl Component for DownloadRow {
             )
             .maybe_child(actions);
 
-        LibraryCursorRing::new(self.focused, content).corner_radius(16.0)
+        LibraryCursorRing::new(self.focused, content)
+            .corner_radius(16.0)
+            .row_key(format!("download:{}", download_id.0))
     }
 
     fn render_key(&self) -> DiffKey {

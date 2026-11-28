@@ -45,6 +45,7 @@ pub mod messages {
     pub const YANK_EMPTY: &str = "Nothing yanked yet.";
     pub const BACKGROUND_TAB_OPENED: &str = "New background tab opened!";
     pub const SPLIT_VIEW_LIMIT: &str = "Can't add more panels to the split view!";
+    pub const SPLIT_PINNED: &str = "Tab pinned to join this split.";
     pub const TABS_CLOSED: &str = "Tabs Closed!";
     pub const DOWNLOAD_STARTED: &str = "Download started";
 }

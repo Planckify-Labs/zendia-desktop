@@ -81,9 +81,21 @@ pub struct MenuViewState {
     pub context_menu: State<Option<OpenContextMenu>>,
     pub select_dropdown: State<Option<OpenSelectDropdown>>,
     pub select_seq: State<u64>,
+    pub toolbar_item_anchors: State<std::collections::HashMap<String, AnchorRect>>,
 }
 
 impl MenuViewState {
+    pub fn set_toolbar_item_anchor(&self, item_id: &str, rect: AnchorRect) {
+        let mut anchors = self.toolbar_item_anchors;
+        let same = anchors.peek().get(item_id).copied() == Some(rect);
+        if !same {
+            anchors.write().insert(item_id.to_string(), rect);
+        }
+    }
+
+    pub fn toolbar_item_anchor(&self, item_id: &str) -> Option<AnchorRect> {
+        self.toolbar_item_anchors.peek().get(item_id).copied()
+    }
     /// Toggles the application menu, updating its anchor rectangle when provided.
     pub fn toggle_app_menu(&self, anchor: Option<AnchorRect>) {
         let mut open = self.app_menu_open;
@@ -259,6 +271,7 @@ pub fn use_provide_menu_state() -> MenuViewState {
     let context_menu = use_state(|| None::<OpenContextMenu>);
     let select_dropdown = use_state(|| None::<OpenSelectDropdown>);
     let select_seq = use_state(|| 0u64);
+    let toolbar_item_anchors = use_state(std::collections::HashMap::<String, AnchorRect>::new);
 
     use_provide_context(|| MenuViewState {
         app_menu_open,
@@ -271,6 +284,7 @@ pub fn use_provide_menu_state() -> MenuViewState {
         context_menu,
         select_dropdown,
         select_seq,
+        toolbar_item_anchors,
     })
 }
 
@@ -290,7 +304,19 @@ pub fn invoke_menu_command(core: &CoreView, command: &str, args: &[(String, Stri
         return false;
     }
     match Command::from_name_and_args(command, args) {
-        Ok(parsed) => core.invoke_or_log(parsed),
+        Ok(parsed) => {
+            let was_toolbar_mode = core.model().peek().input_mode == zendia_browser_core::model::InputMode::Toolbar;
+            let ok = core.invoke_or_log(parsed);
+            // Picking a menu item opened from Toolbar mode exits Toolbar mode, whereas `<Esc>` leaves it active (`TB-03`).
+            if ok
+                && was_toolbar_mode
+                && !matches!(command, "zoom.in" | "zoom.out" | "zoom.reset")
+                && core.model().peek().input_mode == zendia_browser_core::model::InputMode::Toolbar
+            {
+                core.invoke_or_log(Command::ToolbarFocusClose);
+            }
+            ok
+        }
         Err(error) => {
             eprintln!("zendia: menu command `{command}` failed to parse: {error}");
             false

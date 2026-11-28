@@ -12,8 +12,8 @@ pub mod prompt;
 
 pub use icon::ExtensionIconView;
 pub use popup::{
-    ExtensionPopupOverlay, ExtensionPopupState, OpenExtensionPopup, try_use_extension_popup_state,
-    use_extension_popup_state, use_provide_extension_popup_state,
+    ExtensionPopupOverlay, ExtensionPopupState, OpenExtensionPopup, assign_popup_hint_labels, popup_hints_will_consume,
+    try_use_extension_popup_state, use_extension_popup_state, use_provide_extension_popup_state,
 };
 pub use prompt::ExtensionPromptOverlay;
 

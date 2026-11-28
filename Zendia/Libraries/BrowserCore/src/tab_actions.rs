@@ -29,6 +29,8 @@ pub enum TabAction {
     TabReopenClosed,
     /// Open the tab picker (`<leader>bj`).
     TabPick,
+    /// Open the Move to Folder picker for the active tab (`<leader>bf`).
+    TabMoveToFolderPick,
     /// Open the active tab's context menu (`<leader>bm`).
     TabMenu,
     /// Switch to the first space (`<leader><Tab>f`).
@@ -48,17 +50,25 @@ pub enum TabAction {
     /// Navigate up one URL path segment (`-`).
     UrlUp,
     /// Open clipboard URL or search in the current tab (`p`) or a new tab (`P`).
-    UrlPaste { new_tab: bool },
+    UrlPaste { new_tab: bool, text: Option<String> },
     /// Open the address bar filtered to open tabs (`<leader>,`, `<leader>fb`).
     FindTabs,
     /// Open the address bar filtered to recent history (`<leader>fr`).
     FindRecent,
+    /// Open the address bar filtered to bookmarks (`find.bookmarks`).
+    FindBookmarks,
     /// Open the address bar in web search mode (`<leader>/`).
     SearchWeb,
     /// Open find in page (`/`).
     PageFind,
     /// The find bar's text changed: the page highlights its matches and goes to the first.
     PageFindQuery { query: String },
+    /// Update find-in-page options (`Highlight All`, `Match Case`, `Whole Words`, `NAV-09`).
+    PageFindSetOptions {
+        highlight_all: Option<bool>,
+        match_case: Option<bool>,
+        whole_words: Option<bool>,
+    },
     /// The find bar closed: the page's highlights go.
     PageFindClose,
     /// Jump to the next find-in-page match (`n`).
@@ -81,6 +91,16 @@ pub enum TabAction {
     WindowToggleMaximize,
     /// Close the current browser window (`<leader>qw`).
     WindowClose,
+    /// Open a new browser window (`<C-n>`).
+    WindowNew,
+    /// Open a new blank browser window (`<C-S-n>`).
+    WindowNewBlank,
+    /// Open a new private browser window (`<C-S-p>`).
+    WindowNewPrivate,
+    /// Print the current page (`<C-p>`).
+    PagePrint,
+    /// Save the current page (`<C-S-A-s>`).
+    PageSave,
 }
 
 impl TabAction {
@@ -95,6 +115,7 @@ impl TabAction {
             Self::TabMovePrev => "tab.move_prev",
             Self::TabReopenClosed => "tab.reopen_closed",
             Self::TabPick => "tab.pick",
+            Self::TabMoveToFolderPick => "tab.move_to_folder_pick",
             Self::TabMenu => "tab.menu",
             Self::SpaceFirst => "space.first",
             Self::SpaceLast => "space.last",
@@ -104,13 +125,15 @@ impl TabAction {
             Self::SpaceThemeActive => "space.theme",
             Self::SpaceUnloadActive => "space.unload",
             Self::UrlUp => "url.up",
-            Self::UrlPaste { new_tab: false } => "url.paste",
-            Self::UrlPaste { new_tab: true } => "url.paste_new_tab",
+            Self::UrlPaste { new_tab: false, .. } => "url.paste",
+            Self::UrlPaste { new_tab: true, .. } => "url.paste_new_tab",
             Self::FindTabs => "find.tabs",
             Self::FindRecent => "find.recent",
+            Self::FindBookmarks => "find.bookmarks",
             Self::SearchWeb => "search.web",
             Self::PageFind => "page.find",
             Self::PageFindQuery { .. } => "page.find_query",
+            Self::PageFindSetOptions { .. } => "page.find_set_options",
             Self::PageFindClose => "page.find_close",
             Self::SearchNext => "search.next",
             Self::SearchPrev => "search.prev",
@@ -122,6 +145,11 @@ impl TabAction {
             Self::WindowMinimize => "window.minimize",
             Self::WindowToggleMaximize => "window.toggle_maximize",
             Self::WindowClose => "window.close",
+            Self::WindowNew => "window.new",
+            Self::WindowNewBlank => "window.new_blank",
+            Self::WindowNewPrivate => "window.new_private",
+            Self::PagePrint => "page.print",
+            Self::PageSave => "page.save",
         }
     }
 }
@@ -165,14 +193,28 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
         "tab.move_prev" => TabAction::TabMovePrev,
         "tab.reopen_closed" => TabAction::TabReopenClosed,
         "tab.pick" => TabAction::TabPick,
+        "tab.move_to_folder_pick" => TabAction::TabMoveToFolderPick,
         "tab.menu" => TabAction::TabMenu,
         "space.first" => TabAction::SpaceFirst,
         "space.last" => TabAction::SpaceLast,
         "url.up" => TabAction::UrlUp,
-        "url.paste" => TabAction::UrlPaste { new_tab: false },
-        "url.paste_new_tab" => TabAction::UrlPaste { new_tab: true },
+        "url.paste" => TabAction::UrlPaste {
+            new_tab: false,
+            text: args
+                .iter()
+                .find(|(key, _)| key == "text")
+                .map(|(_, value)| value.clone()),
+        },
+        "url.paste_new_tab" => TabAction::UrlPaste {
+            new_tab: true,
+            text: args
+                .iter()
+                .find(|(key, _)| key == "text")
+                .map(|(_, value)| value.clone()),
+        },
         "find.tabs" => TabAction::FindTabs,
         "find.recent" => TabAction::FindRecent,
+        "find.bookmarks" => TabAction::FindBookmarks,
         "search.web" => TabAction::SearchWeb,
         "page.find" => TabAction::PageFind,
         "page.find_query" => TabAction::PageFindQuery {
@@ -182,6 +224,24 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
                 .map(|(_, value)| value.clone())
                 .unwrap_or_default(),
         },
+        "page.find_set_options" => {
+            let parse_opt = |key: &str| -> Result<Option<bool>, CommandError> {
+                match args.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()) {
+                    None => Ok(None),
+                    Some("true") => Ok(Some(true)),
+                    Some("false") => Ok(Some(false)),
+                    Some(other) => Err(CommandError::InvalidArgument {
+                        command: name.to_string(),
+                        message: format!("expected boolean `{key}`, got `{other}`"),
+                    }),
+                }
+            };
+            TabAction::PageFindSetOptions {
+                highlight_all: parse_opt("highlight_all")?,
+                match_case: parse_opt("match_case")?,
+                whole_words: parse_opt("whole_words")?,
+            }
+        }
         "page.find_close" => TabAction::PageFindClose,
         "search.next" => TabAction::SearchNext,
         "search.prev" => TabAction::SearchPrev,
@@ -193,6 +253,11 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
         "window.minimize" => TabAction::WindowMinimize,
         "window.toggle_maximize" => TabAction::WindowToggleMaximize,
         "window.close" => TabAction::WindowClose,
+        "window.new" => TabAction::WindowNew,
+        "window.new_blank" => TabAction::WindowNewBlank,
+        "window.new_private" => TabAction::WindowNewPrivate,
+        "page.print" => TabAction::PagePrint,
+        "page.save" => TabAction::PageSave,
         _ => return Ok(None),
     };
     Ok(Some(Command::Tabs(action)))
@@ -242,6 +307,11 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             "Reopen the most recently closed tab",
         ),
         ("tab.pick", "Pick Tab", "Open the keyboard tab picker"),
+        (
+            "tab.move_to_folder_pick",
+            "Move Tab to Folder…",
+            "Open the folder picker to move the active tab into a folder",
+        ),
         ("tab.menu", "Tab Menu", "Open the context menu for the active tab"),
         ("space.first", "First Space", "Switch to the first workspace"),
         ("space.last", "Last Space", "Switch to the last workspace"),
@@ -267,6 +337,11 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             "Open the address bar filtered to recent history",
         ),
         (
+            "find.bookmarks",
+            "Bookmarks",
+            "Open the address bar filtered to bookmarks",
+        ),
+        (
             "search.web",
             "Search the Web",
             "Open the address bar in web search mode",
@@ -276,6 +351,11 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             "page.find_query",
             "Find Text in Page",
             "Highlight a text's matches in the page",
+        ),
+        (
+            "page.find_set_options",
+            "Set Find-in-Page Options",
+            "Update Highlight All, Match Case, or Whole Words options for find in page",
         ),
         (
             "page.find_close",
@@ -324,6 +404,19 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             "Toggle maximize or restore on the current window",
         ),
         ("window.close", "Close Window", "Close the current browser window"),
+        ("window.new", "New Window", "Open a new browser window"),
+        (
+            "window.new_blank",
+            "New Blank Window",
+            "Open a new blank browser window",
+        ),
+        (
+            "window.new_private",
+            "New Private Window",
+            "Open a new private browsing window",
+        ),
+        ("page.print", "Print Page", "Print the current page"),
+        ("page.save", "Save Page As", "Save the current page to disk"),
     ];
     items
         .iter()

@@ -511,14 +511,26 @@ impl Component for AgentsPanel {
                 Key::Named(NamedKey::Home) => {
                     if count > 0 {
                         cursor.set(0);
-                        e.stop_propagation();
                     }
+                    e.stop_propagation();
+                }
+                Key::Character(ch) if ch == "g" => {
+                    if count > 0 {
+                        cursor.set(0);
+                    }
+                    e.stop_propagation();
                 }
                 Key::Named(NamedKey::End) => {
                     if count > 0 {
                         cursor.set(count - 1);
-                        e.stop_propagation();
                     }
+                    e.stop_propagation();
+                }
+                Key::Character(ch) if ch == "G" => {
+                    if count > 0 {
+                        cursor.set(count - 1);
+                    }
+                    e.stop_propagation();
                 }
                 Key::Named(NamedKey::Enter) => {
                     if let Some((conv_id, tab_id, _, _)) = key_rows.get((*cursor.peek()).min(count.saturating_sub(1))) {
@@ -532,8 +544,23 @@ impl Component for AgentsPanel {
                             panel_id: SidePanelId::new(AGENT_PANEL_ID),
                             focus: true,
                         });
-                        e.stop_propagation();
                     }
+                    e.stop_propagation();
+                }
+                Key::Character(ch) if ch == "o" => {
+                    if let Some((conv_id, tab_id, _, _)) = key_rows.get((*cursor.peek()).min(count.saturating_sub(1))) {
+                        if let Some(tid) = tab_id {
+                            core_keys.invoke_or_log(Command::TabActivate { tab_id: *tid });
+                        }
+                        core_keys.invoke_or_log(Command::AgentSwitchConversation {
+                            conversation_id: *conv_id,
+                        });
+                        core_keys.invoke_or_log(Command::PanelOpen {
+                            panel_id: SidePanelId::new(AGENT_PANEL_ID),
+                            focus: true,
+                        });
+                    }
+                    e.stop_propagation();
                 }
                 Key::Character(ch) if ch == " " => {
                     if let Some((conv_id, _, _, _)) = key_rows.get((*cursor.peek()).min(count.saturating_sub(1))) {
@@ -542,8 +569,8 @@ impl Component for AgentsPanel {
                             set.insert(conv_id.0);
                         }
                         peeked.set(set);
-                        e.stop_propagation();
                     }
+                    e.stop_propagation();
                 }
                 Key::Named(NamedKey::ArrowRight) => {
                     if let Some((conv_id, _, _, _)) = key_rows.get((*cursor.peek()).min(count.saturating_sub(1))) {
@@ -551,8 +578,17 @@ impl Component for AgentsPanel {
                         if set.insert(conv_id.0) {
                             peeked.set(set);
                         }
-                        e.stop_propagation();
                     }
+                    e.stop_propagation();
+                }
+                Key::Character(ch) if ch == "l" => {
+                    if let Some((conv_id, _, _, _)) = key_rows.get((*cursor.peek()).min(count.saturating_sub(1))) {
+                        let mut set = peeked.peek().clone();
+                        if set.insert(conv_id.0) {
+                            peeked.set(set);
+                        }
+                    }
+                    e.stop_propagation();
                 }
                 Key::Named(NamedKey::ArrowLeft) => {
                     if let Some((conv_id, _, _, _)) = key_rows.get((*cursor.peek()).min(count.saturating_sub(1))) {
@@ -560,8 +596,17 @@ impl Component for AgentsPanel {
                         if set.remove(&conv_id.0) {
                             peeked.set(set);
                         }
-                        e.stop_propagation();
                     }
+                    e.stop_propagation();
+                }
+                Key::Character(ch) if ch == "h" => {
+                    if let Some((conv_id, _, _, _)) = key_rows.get((*cursor.peek()).min(count.saturating_sub(1))) {
+                        let mut set = peeked.peek().clone();
+                        if set.remove(&conv_id.0) {
+                            peeked.set(set);
+                        }
+                    }
+                    e.stop_propagation();
                 }
                 Key::Character(ch) if ch == "x" => {
                     if let Some((conv_id, _, ConversationStatus::Working, _)) =
@@ -606,7 +651,15 @@ impl Component for AgentsPanel {
                     });
                     e.stop_propagation();
                 }
-                _ => {}
+                Key::Character(ch) if ch == "q" => {
+                    core_keys.invoke_or_log(Command::PanelClose {
+                        panel_id: SidePanelId::new(AGENTS_PANEL_ID),
+                    });
+                    e.stop_propagation();
+                }
+                _ => {
+                    e.stop_propagation();
+                }
             }
         };
 

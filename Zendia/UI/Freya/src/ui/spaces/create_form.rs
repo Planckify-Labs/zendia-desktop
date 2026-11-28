@@ -956,3 +956,357 @@ impl Component for DraftIconTile {
         self.key.clone().or(self.default_key())
     }
 }
+
+/// Window-root overlay rendering the searchable Emoji + SVG icon picker for an existing space (`<leader><Tab>i`, `NAV-19`).
+#[derive(Clone, PartialEq)]
+pub struct SpaceIconPickerOverlay;
+
+impl Component for SpaceIconPickerOverlay {
+    fn render(&self) -> impl IntoElement {
+        let Some(editing) = crate::ui::spaces::state::try_use_space_editing_state() else {
+            return rect().into_element();
+        };
+        let Some(space_id) = *editing.live_icon_picker_space.read() else {
+            return rect().into_element();
+        };
+        let core = use_core();
+        let theme = use_theme();
+        let palette = ChromePalette::for_scheme(theme.scheme);
+        let current_icon = core
+            .model()
+            .read()
+            .space(space_id)
+            .map(|s| s.icon.clone())
+            .unwrap_or_default();
+        let anchor = *editing.live_icon_picker_anchor.read();
+        let mut active_tab_svg = use_state(|| false);
+        let search_query = use_state(String::new);
+        let search_a11y = use_hook(AccessibilityId::new_unique);
+
+        let panel_bg = match theme.scheme {
+            ResolvedScheme::Dark => Rgba::from_rgb_alpha(26, 28, 38, 0.98).to_color(),
+            ResolvedScheme::Light => Rgba::from_rgb_alpha(252, 252, 255, 0.98).to_color(),
+        };
+        let input_bg = match theme.scheme {
+            ResolvedScheme::Dark => Rgba::from_rgb_alpha(255, 255, 255, 0.06).to_color(),
+            ResolvedScheme::Light => Rgba::from_rgb_alpha(0, 0, 0, 0.05).to_color(),
+        };
+
+        let clear_core = core.clone();
+        let clear_button = rect()
+            .a11y_role(AccessibilityRole::Button)
+            .a11y_alt("Clear space icon")
+            .padding(Gaps::new(4.0, 9.0, 4.0, 9.0))
+            .corner_radius(CornerRadius::new_all(6.0))
+            .background(palette.surface_pill)
+            .cursor(CursorIcon::Pointer)
+            .on_press(move |e: Event<PressEventData>| {
+                e.stop_propagation();
+                clear_core.invoke_or_log(Command::SpaceSetIcon {
+                    space_id,
+                    icon: String::new(),
+                });
+            })
+            .child(
+                label()
+                    .text("None")
+                    .font_size(11.0)
+                    .font_weight(FontWeight::MEDIUM)
+                    .color(palette.text_muted),
+            );
+
+        let is_svg = active_tab_svg();
+        let tab_pill = |label_text: &'static str, selected: bool, target_svg: bool| {
+            rect()
+                .a11y_role(AccessibilityRole::Tab)
+                .a11y_alt(label_text)
+                .width(Size::flex(1.0))
+                .height(Size::px(26.0))
+                .corner_radius(CornerRadius::new_all(6.0))
+                .background(if selected {
+                    palette.surface_pill_hover
+                } else {
+                    Color::TRANSPARENT
+                })
+                .center()
+                .cursor(CursorIcon::Pointer)
+                .on_press(move |e: Event<PressEventData>| {
+                    e.stop_propagation();
+                    active_tab_svg.set_if_modified(target_svg);
+                })
+                .child(
+                    label()
+                        .text(label_text)
+                        .font_size(11.5)
+                        .font_weight(if selected {
+                            FontWeight::SEMI_BOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .color(if selected { palette.text } else { palette.text_muted }),
+                )
+        };
+
+        let query_str = search_query.read().clone();
+        let mut rows: Vec<Element> = Vec::new();
+        let make_tile = |val: String, is_emoji: bool| {
+            let selected = current_icon == val;
+            let pick_core = core.clone();
+            let pick_val = val.clone();
+            let glyph: Element = if is_emoji {
+                label()
+                    .text(val.clone())
+                    .font_size(15.5)
+                    .color(palette.text)
+                    .into_element()
+            } else {
+                Icon::new(val.clone())
+                    .size(15.5)
+                    .role(if selected {
+                        ThemeRole::Text
+                    } else {
+                        ThemeRole::TextMuted
+                    })
+                    .into_element()
+            };
+            rect()
+                .key(val.clone())
+                .a11y_role(AccessibilityRole::Button)
+                .a11y_alt(format!("Icon {val}"))
+                .width(Size::px(30.0))
+                .height(Size::px(30.0))
+                .corner_radius(CornerRadius::new_all(7.0))
+                .background(if selected {
+                    theme.color(ThemeRole::Accent).with_a(48)
+                } else {
+                    Color::TRANSPARENT
+                })
+                .maybe(selected, |r| {
+                    r.border(
+                        Border::new()
+                            .width(1.0)
+                            .alignment(BorderAlignment::Inner)
+                            .fill(theme.color(ThemeRole::Accent)),
+                    )
+                })
+                .center()
+                .cursor(CursorIcon::Pointer)
+                .on_press(move |e: Event<PressEventData>| {
+                    e.stop_propagation();
+                    pick_core.invoke_or_log(Command::SpaceSetIcon {
+                        space_id,
+                        icon: pick_val.clone(),
+                    });
+                })
+                .child(glyph)
+                .into_element()
+        };
+
+        if is_svg {
+            let filtered = filter_svg_icons(&query_str);
+            for (r_idx, chunk) in filtered.chunks(7).enumerate() {
+                rows.push(
+                    rect()
+                        .key(format!("live-svg-{r_idx}"))
+                        .direction(Direction::Horizontal)
+                        .spacing(4.0)
+                        .children(chunk.iter().map(|entry| make_tile(entry.icon_name.to_string(), false)))
+                        .into_element(),
+                );
+            }
+        } else {
+            let filtered = filter_emojis(&query_str);
+            for (r_idx, chunk) in filtered.chunks(7).enumerate() {
+                rows.push(
+                    rect()
+                        .key(format!("live-emoji-{r_idx}"))
+                        .direction(Direction::Horizontal)
+                        .spacing(4.0)
+                        .children(chunk.iter().map(|entry| make_tile(entry.glyph.to_string(), true)))
+                        .into_element(),
+                );
+            }
+        }
+
+        let picker_w = 264.0;
+        let picker_h = 310.0;
+        let root_size = *Platform::get().current_window().root_size.read();
+        let x = anchor.0.clamp(8.0, (root_size.width - picker_w - 8.0).max(8.0));
+        let y = anchor.1.clamp(8.0, (root_size.height - picker_h - 8.0).max(8.0));
+
+        rect()
+            .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
+            .position(Position::new_global().left(0.0).top(0.0))
+            .width(Size::window_percent(100.0))
+            .height(Size::window_percent(100.0))
+            .on_global_key_down(move |e: Event<KeyboardEventData>| {
+                if matches!(e.key, Key::Named(NamedKey::Escape)) {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    editing.close_live_icon_picker();
+                }
+            })
+            .child(
+                rect()
+                    .position(Position::new_global().left(0.0).top(0.0))
+                    .width(Size::window_percent(100.0))
+                    .height(Size::window_percent(100.0))
+                    .on_mouse_down(move |_| editing.close_live_icon_picker()),
+            )
+            .child(
+                rect()
+                    .position(Position::new_global().left(x).top(y))
+                    .width(Size::px(picker_w))
+                    .padding(Gaps::new_all(10.0))
+                    .spacing(8.0)
+                    .corner_radius(CornerRadius::new_all(12.0))
+                    .background(panel_bg)
+                    .border(
+                        Border::new()
+                            .width(1.0)
+                            .alignment(BorderAlignment::Inner)
+                            .fill(theme.color(ThemeRole::BorderSubtle)),
+                    )
+                    .shadow(Shadow::new().y(10.0).blur(24.0).color(Color::from_argb(95, 0, 0, 0)))
+                    .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
+                    .child(
+                        rect()
+                            .width(Size::fill())
+                            .direction(Direction::Horizontal)
+                            .content(Content::Flex)
+                            .cross_align(Alignment::center())
+                            .spacing(6.0)
+                            .child(
+                                rect()
+                                    .width(Size::flex(1.0))
+                                    .padding(Gaps::new_all(2.0))
+                                    .direction(Direction::Horizontal)
+                                    .content(Content::Flex)
+                                    .corner_radius(CornerRadius::new_all(7.0))
+                                    .background(input_bg)
+                                    .child(tab_pill("Emoji", !is_svg, false))
+                                    .child(tab_pill("Icons", is_svg, true)),
+                            )
+                            .child(clear_button),
+                    )
+                    .child(
+                        rect()
+                            .width(Size::fill())
+                            .height(Size::px(30.0))
+                            .padding(Gaps::new(0.0, 8.0, 0.0, 8.0))
+                            .spacing(6.0)
+                            .direction(Direction::Horizontal)
+                            .content(Content::Flex)
+                            .cross_align(Alignment::center())
+                            .corner_radius(CornerRadius::new_all(7.0))
+                            .background(input_bg)
+                            .child(Icon::new("search").size(12.5).role(ThemeRole::TextMuted))
+                            .child(
+                                TextField::new(search_query)
+                                    .a11y_id(search_a11y)
+                                    .auto_focus(true)
+                                    .placeholder(if is_svg { "Search icons..." } else { "Search emojis..." })
+                                    .width(Size::flex(1.0))
+                                    .color(palette.text)
+                                    .placeholder_color(palette.text_muted)
+                                    .on_pre_key_down(move |e: Event<KeyboardEventData>| {
+                                        if matches!(e.key, Key::Named(NamedKey::Escape)) {
+                                            e.stop_propagation();
+                                            e.prevent_default();
+                                            editing.close_live_icon_picker();
+                                            false
+                                        } else {
+                                            true
+                                        }
+                                    }),
+                            ),
+                    )
+                    .child(
+                        ScrollView::new()
+                            .width(Size::fill())
+                            .height(Size::px(210.0))
+                            .child(rect().spacing(4.0).children(rows)),
+                    ),
+            )
+            .into_element()
+    }
+}
+
+/// Modal confirmation dialog shown before deleting a non-empty space (`<leader><Tab>d`, `NAV-13`).
+#[derive(Clone, PartialEq)]
+pub struct SpaceDeleteConfirmOverlay;
+
+impl Component for SpaceDeleteConfirmOverlay {
+    fn render(&self) -> impl IntoElement {
+        let Some(editing) = crate::ui::spaces::state::try_use_space_editing_state() else {
+            return rect().into_element();
+        };
+        let Some((space_id, space_name, tab_count)) = editing.delete_confirm_space.read().clone() else {
+            return rect().into_element();
+        };
+        let core = use_core();
+        let theme = use_theme();
+        let confirm_core = core.clone();
+        let key_core = core;
+        let plural = if tab_count == 1 { "tab" } else { "tabs" };
+        let body = format!("This will close {tab_count} open {plural} in \"{space_name}\" and delete the space.");
+
+        rect()
+            .layer(Layer::OverlayLevel(POPUP_OVERLAY_LEVEL))
+            .position(Position::new_global().left(0.0).top(0.0))
+            .width(Size::window_percent(100.0))
+            .height(Size::window_percent(100.0))
+            .background(Color::from_argb(120, 0, 0, 0))
+            .main_align(Alignment::center())
+            .cross_align(Alignment::center())
+            .on_mouse_down(move |_| editing.close_delete_confirm())
+            .on_global_key_down(move |e: Event<KeyboardEventData>| match &e.key {
+                Key::Named(NamedKey::Escape) => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    editing.close_delete_confirm();
+                }
+                Key::Named(NamedKey::Enter) => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    editing.close_delete_confirm();
+                    key_core.invoke_or_log(Command::SpaceDelete { space_id });
+                }
+                Key::Character(ch) if ch.eq_ignore_ascii_case("y") => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    editing.close_delete_confirm();
+                    key_core.invoke_or_log(Command::SpaceDelete { space_id });
+                }
+                Key::Character(ch) if ch.eq_ignore_ascii_case("n") || ch == "q" => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    editing.close_delete_confirm();
+                }
+                _ => {
+                    e.stop_propagation();
+                }
+            })
+            .child(
+                rect()
+                    .width(Size::px(380.0))
+                    .padding(Gaps::new_all(6.0))
+                    .corner_radius(CornerRadius::new_all(14.0))
+                    .background(theme.color(ThemeRole::SurfaceRaised))
+                    .shadow(Shadow::new().y(12.0).blur(32.0).color(Color::from_argb(110, 0, 0, 0)))
+                    .on_mouse_down(|e: Event<MouseEventData>| e.stop_propagation())
+                    .child(
+                        crate::ui::kit::ConfirmationCard::new(format!("Delete \"{space_name}\"?"), body)
+                            .confirm_label("Delete Space")
+                            .cancel_label("Cancel")
+                            .danger(true)
+                            .on_confirm(move |_| {
+                                editing.close_delete_confirm();
+                                confirm_core.invoke_or_log(Command::SpaceDelete { space_id });
+                            })
+                            .on_cancel(move |_| editing.close_delete_confirm()),
+                    ),
+            )
+            .into_element()
+    }
+}

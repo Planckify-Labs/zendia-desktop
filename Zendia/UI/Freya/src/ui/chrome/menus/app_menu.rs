@@ -261,7 +261,12 @@ impl Component for AppMenuInteractive {
             if !capture_keys {
                 return;
             }
-            let Some(action) = classify_list_key(&e, ListNavConfig::menu()) else {
+            let vim_enabled = core_for_keys.model().peek().vim_mode_enabled;
+            let Some(action) = classify_list_key(&e, ListNavConfig::menu().with_vim_keys(vim_enabled)) else {
+                if vim_enabled {
+                    e.stop_propagation();
+                    e.prevent_default();
+                }
                 return;
             };
             e.stop_propagation();

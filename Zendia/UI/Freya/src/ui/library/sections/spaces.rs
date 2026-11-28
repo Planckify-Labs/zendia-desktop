@@ -194,6 +194,7 @@ impl Component for SpacesSection {
     fn render(&self) -> impl IntoElement {
         let core = use_core();
         let theme = use_theme();
+        let library = crate::ui::library::try_use_library_state();
         let provided_state = try_use_spaces_view_state();
         let fallback_renaming = use_state(|| None);
         let fallback_draft = use_state(String::new);
@@ -220,6 +221,8 @@ impl Component for SpacesSection {
         let mut last_scroll_req = use_state(|| 0u64);
         let mut container_area = use_state(|| (0.0f32, 0.0f32, WIDTH, 640.0f32));
         let mut last_scrolled_cursor = use_state(|| None::<String>);
+        let mut handled_activate_seq = use_state(|| library.map(|l| *l.nav.activate_seq.peek()).unwrap_or(0));
+        let mut last_open_focus = use_state(|| false);
 
         let req = *spaces_state.scroll_to_end_request.read();
         if req != *last_scroll_req.peek() {
@@ -242,6 +245,8 @@ impl Component for SpacesSection {
             )
         };
 
+        let collapsed_map = spaces_state.collapsed_folders.read().clone();
+
         // Register rows in drawn order for the keyboard layer (one column per card + the `+` button).
         let mut nav_rows = Vec::new();
         for space in &spaces {
@@ -249,7 +254,30 @@ impl Component for SpacesSection {
                 format!("space:{}", space.id.0),
                 Some(Command::SpaceSwitch { space_id: space.id }),
             ));
-            for tab in tabs_for_space_card(&tabs, &pinned_tabs, &folders, space.id) {
+            for tab in pinned_tabs_for_space(&tabs, &pinned_tabs, space.id) {
+                nav_rows.push(LibraryNavRow::new(
+                    format!("tab:{}", tab.id.0),
+                    Some(Command::SpaceOpenTab { tab_id: tab.id }),
+                ));
+            }
+            for folder in folders.iter().filter(|f| f.space_id == space.id) {
+                nav_rows.push(LibraryNavRow::new(format!("folder:{}", folder.id.0), None));
+                let is_collapsed = collapsed_map.get(&folder.id).copied().unwrap_or(folder.collapsed);
+                if !is_collapsed {
+                    for tab_id in &folder.tab_ids {
+                        if let Some(tab) = tabs.iter().find(|t| t.id == *tab_id) {
+                            nav_rows.push(LibraryNavRow::new(
+                                format!("tab:{}", tab.id.0),
+                                Some(Command::SpaceOpenTab { tab_id: tab.id }),
+                            ));
+                        }
+                    }
+                }
+            }
+            for tab in tabs
+                .iter()
+                .filter(|t| t.kind == TabKind::Normal && t.space_id == Some(space.id) && t.folder_id.is_none())
+            {
                 nav_rows.push(LibraryNavRow::new(
                     format!("tab:{}", tab.id.0),
                     Some(Command::SpaceOpenTab { tab_id: tab.id }),
@@ -262,6 +290,34 @@ impl Component for SpacesSection {
         ));
         let cursor_key = use_library_nav(LibrarySection::Spaces, LibraryNavLayout::Columns, nav_rows);
 
+        if let Some(lib) = library {
+            let is_open = *lib.open.read();
+            if *last_open_focus.peek() != is_open {
+                last_open_focus.set(is_open);
+                if is_open && *lib.nav.keyboard_focused.peek() && !spaces_state.is_renaming() {
+                    let mut stay = lib.nav.stay_in_list;
+                    stay.set_if_modified(false);
+                    lib.nav.focus_list();
+                }
+            }
+            lib.nav.sync_inserting(spaces_state.is_renaming());
+
+            let act_seq = *lib.nav.activate_seq.read();
+            if act_seq != *handled_activate_seq.peek() {
+                handled_activate_seq.set(act_seq);
+                if let Some(key) = lib.nav.activated_key.peek().clone()
+                    && let Some(fid_raw) = key.strip_prefix("folder:")
+                    && let Ok(fid_num) = fid_raw.parse::<u64>()
+                {
+                    let fid = FolderId(fid_num);
+                    let default_collapsed = folders.iter().find(|f| f.id == fid).is_some_and(|f| f.collapsed);
+                    let mut map = spaces_state.collapsed_folders;
+                    let cur = map.peek().get(&fid).copied().unwrap_or(default_collapsed);
+                    map.write().insert(fid, !cur);
+                }
+            }
+        }
+
         if *last_scrolled_cursor.peek() != cursor_key {
             last_scrolled_cursor.set(cursor_key.clone());
             if let Some(target_key) = cursor_key.as_deref() {
@@ -272,6 +328,13 @@ impl Component for SpacesSection {
                         .parse::<u64>()
                         .ok()
                         .and_then(|id| spaces.iter().position(|s| s.id.0 == id))
+                } else if let Some(fid_str) = target_key.strip_prefix("folder:") {
+                    fid_str.parse::<u64>().ok().and_then(|fid| {
+                        folders
+                            .iter()
+                            .find(|f| f.id.0 == fid)
+                            .and_then(|f| spaces.iter().position(|s| s.id == f.space_id))
+                    })
                 } else if let Some(tid_str) = target_key.strip_prefix("tab:") {
                     tid_str.parse::<u64>().ok().and_then(|tid| {
                         spaces.iter().position(|s| {
@@ -408,7 +471,14 @@ impl Component for SpacesSection {
             .height(Size::fill())
             .overflow(Overflow::Clip)
             .on_sized(move |e: Event<SizedEventData>| {
-                container_area.set_if_modified((e.area.min_x(), e.area.min_y(), e.area.width(), e.area.height()));
+                let h = e.area.height();
+                container_area.set_if_modified((e.area.min_x(), e.area.min_y(), e.area.width(), h));
+                if let Some(lib) = library
+                    && h > 96.0
+                {
+                    lib.nav
+                        .set_visible_rows(((h - 92.0) / (TAB_ROW_HEIGHT + 2.0)).floor().max(1.0) as usize);
+                }
             })
             .child(
                 ScrollView::new_controlled(scroll_controller)
@@ -895,7 +965,8 @@ impl Component for SpaceCardHeader {
             .child(
                 LibraryCursorRing::new(self.focused, inner)
                     .corner_radius(8.0)
-                    .fill(false),
+                    .fill(false)
+                    .row_key(format!("space:{}", space_id.0)),
             )
     }
 
@@ -1033,42 +1104,48 @@ impl Component for SpaceFolderGroup {
             Color::TRANSPARENT
         };
 
+        let folder_row_key = format!("folder:{}", folder_id.0);
+        let folder_focused = self.cursor_key.as_deref() == Some(folder_row_key.as_str());
+        let folder_header = rect()
+            .a11y_role(AccessibilityRole::Button)
+            .a11y_alt(format!("Folder {}", self.folder.name))
+            .width(Size::fill())
+            .height(Size::px(TAB_ROW_HEIGHT))
+            .padding(Gaps::new(0.0, 8.0, 0.0, 8.0))
+            .spacing(8.0)
+            .direction(Direction::Horizontal)
+            .content(Content::Flex)
+            .cross_align(Alignment::center())
+            .corner_radius(CornerRadius::new_all(TAB_ROW_RADIUS))
+            .background(header_bg)
+            .cursor(CursorIcon::Pointer)
+            .on_pointer_enter(on_enter)
+            .on_pointer_leave(move |_| hovered.set_if_modified(false))
+            .on_press(on_toggle)
+            .child(Icon::new("folder").size(15.0).role(ThemeRole::TextMuted))
+            .child(
+                label()
+                    .text(self.folder.name.clone())
+                    .width(Size::flex(1.0))
+                    .font_size(12.5)
+                    .font_weight(FontWeight::MEDIUM)
+                    .color(palette.text)
+                    .max_lines(1)
+                    .text_overflow(TextOverflow::Ellipsis),
+            )
+            .child(
+                Icon::new(if collapsed { "arrow-right" } else { "arrow-down" })
+                    .size(11.0)
+                    .role(ThemeRole::TextMuted),
+            );
+
         rect()
             .width(Size::fill())
             .spacing(2.0)
             .child(
-                rect()
-                    .a11y_role(AccessibilityRole::Button)
-                    .a11y_alt(format!("Folder {}", self.folder.name))
-                    .width(Size::fill())
-                    .height(Size::px(TAB_ROW_HEIGHT))
-                    .padding(Gaps::new(0.0, 8.0, 0.0, 8.0))
-                    .spacing(8.0)
-                    .direction(Direction::Horizontal)
-                    .content(Content::Flex)
-                    .cross_align(Alignment::center())
-                    .corner_radius(CornerRadius::new_all(TAB_ROW_RADIUS))
-                    .background(header_bg)
-                    .cursor(CursorIcon::Pointer)
-                    .on_pointer_enter(on_enter)
-                    .on_pointer_leave(move |_| hovered.set_if_modified(false))
-                    .on_press(on_toggle)
-                    .child(Icon::new("folder").size(15.0).role(ThemeRole::TextMuted))
-                    .child(
-                        label()
-                            .text(self.folder.name.clone())
-                            .width(Size::flex(1.0))
-                            .font_size(12.5)
-                            .font_weight(FontWeight::MEDIUM)
-                            .color(palette.text)
-                            .max_lines(1)
-                            .text_overflow(TextOverflow::Ellipsis),
-                    )
-                    .child(
-                        Icon::new(if collapsed { "arrow-right" } else { "arrow-down" })
-                            .size(11.0)
-                            .role(ThemeRole::TextMuted),
-                    ),
+                LibraryCursorRing::new(folder_focused, folder_header)
+                    .corner_radius(TAB_ROW_RADIUS)
+                    .row_key(folder_row_key),
             )
             .maybe_child((!collapsed).then(|| {
                 rect()
@@ -1337,7 +1414,11 @@ impl Component for SpaceTabRow {
             .width(Size::fill())
             .padding(Gaps::new(0.0, 0.0, 0.0, self.indent))
             .maybe_child(is_drop_before.then_some(DropIndicatorBar { indent: 0.0 }))
-            .child(LibraryCursorRing::new(self.focused, row).corner_radius(TAB_ROW_RADIUS))
+            .child(
+                LibraryCursorRing::new(self.focused, row)
+                    .corner_radius(TAB_ROW_RADIUS)
+                    .row_key(format!("tab:{}", tab_id.0)),
+            )
     }
 
     fn render_key(&self) -> DiffKey {
@@ -1610,7 +1691,11 @@ impl Component for AddSpaceButton {
             .height(Size::fill())
             .main_align(Alignment::Center)
             .cross_align(Alignment::Center)
-            .child(LibraryCursorRing::new(self.focused, badge).corner_radius(999.0))
+            .child(
+                LibraryCursorRing::new(self.focused, badge)
+                    .corner_radius(999.0)
+                    .row_key("space:add"),
+            )
     }
 }
 

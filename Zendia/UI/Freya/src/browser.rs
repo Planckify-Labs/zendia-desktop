@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2026-present, the Zendia developers.
- * Copyright (c) 2026-present, the Zendia developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -34,7 +33,9 @@ use crate::ui::page::{
 use crate::ui::panels::use_provide_dock_state;
 use crate::ui::settings::use_provide_settings_host;
 use crate::ui::share::{ShareConfirmOverlay, use_provide_share_state};
-use crate::ui::spaces::{GradientGeneratorOverlay, use_provide_space_editing_state};
+use crate::ui::spaces::{
+    GradientGeneratorOverlay, SpaceDeleteConfirmOverlay, SpaceIconPickerOverlay, use_provide_space_editing_state,
+};
 use crate::ui::theme::{ThemeRole, use_provide_theme, use_theme};
 use crate::ui::vim::use_provide_vim_statusline_state;
 use crate::ui::vim::{VimPickerOverlay, use_provide_region_picker_state, use_provide_vim_picker_state};
@@ -43,7 +44,13 @@ use freya::prelude::*;
 use hub_protocol::ipc_types::hub_client::messages as client;
 use hub_protocol::ipc_types::hub_server::messages as server;
 use hub_protocol::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Most recent rich clipboard item (`text/html` + `text/plain`) inserted by a page copy or visual yank (`VIS-02`).
+fn cached_rich_clipboard() -> &'static Mutex<Option<Web_Clipboard_SystemClipboardItem>> {
+    static RICH_CLIPBOARD: OnceLock<Mutex<Option<Web_Clipboard_SystemClipboardItem>>> = OnceLock::new();
+    RICH_CLIPBOARD.get_or_init(|| Mutex::new(None))
+}
 use zendia_browser_core::BrowserCore;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::events::{Event as CoreEvent, ViewRequest};
@@ -171,7 +178,12 @@ fn handle_message(
             adapter.note_auxiliary_loading(view_id, is_loading);
             adapter.on_loading_state_changed(view_id, is_loading);
         }
-        HubMessage::ViewLoadStart(_) | HubMessage::ViewLoadFinish(_) => {}
+        HubMessage::ViewLoadStart(start) => {
+            adapter.on_load_start(start.view_id);
+        }
+        HubMessage::ViewLoadFinish(finish) => {
+            adapter.on_load_finish(finish.view_id);
+        }
         HubMessage::ViewPageBackgroundColorChange(client::ViewPageBackgroundColorChange { view_id, color }) => {
             surfaces
                 .write()
@@ -264,6 +276,9 @@ fn handle_message(
         }
         HubMessage::AppSetClipboardText(client::AppSetClipboardText { text, .. }) => {
             if let Ok(text) = text.into_string() {
+                *cached_rich_clipboard()
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = None;
                 let _ = freya::clipboard::Clipboard::set(text);
             }
         }
@@ -274,21 +289,35 @@ fn handle_message(
                 text: libipc_rust::wire::Utf16String::from(text.as_str()),
             });
         }
-        // A paste asks for the clipboard as an item of all its forms; the system clipboard gives its text.
+        // A paste asks for the clipboard as an item of all its forms (`text/html`, `text/plain`, etc.); preserve rich
+        // representations from the last page copy/yank when the system clipboard text still matches (`VIS-02`).
         HubMessage::AppReadClipboardItem(client::AppReadClipboardItem { request_id }) => {
             let text = freya::clipboard::Clipboard::get().unwrap_or_default();
-            let item = if text.is_empty() {
-                Web_Clipboard_SystemClipboardItem::default()
-            } else {
-                Web_Clipboard_SystemClipboardItem::plain_text(&text)
-            };
+            let rich = cached_rich_clipboard()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .filter(|saved| !text.is_empty() && saved.plain_text_of().as_deref() == Some(text.as_str()))
+                .map(Web_Clipboard_SystemClipboardItem::clone_bytes_only);
+            let item = rich.unwrap_or_else(|| {
+                if text.is_empty() {
+                    Web_Clipboard_SystemClipboardItem::default()
+                } else {
+                    Web_Clipboard_SystemClipboardItem::plain_text(&text)
+                }
+            });
             hub.post_or_log(server::AnswerClipboardItem { request_id, item });
         }
-        // What a page puts on the clipboard (a copy it handles itself, navigator.clipboard.write): its text.
+        // What a page puts on the clipboard (a copy or visual yank, `navigator.clipboard.write`): keep all MIME forms
+        // (`text/html` + `text/plain`) for rich pastes and sync plain text to the system clipboard (`VIS-02`).
         HubMessage::AppInsertClipboardItem(client::AppInsertClipboardItem { item }) => {
-            if let Some(text) = item.plain_text_of() {
+            let cloned = item.clone_bytes_only();
+            if let Some(text) = cloned.plain_text_of() {
                 let _ = freya::clipboard::Clipboard::set(text);
             }
+            *cached_rich_clipboard()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(cloned);
         }
         HubMessage::AppQuitForSignal(_) => Platform::get().exit(),
         HubMessage::ViewRequestContextMenu(client::ViewRequestContextMenu { view_id, request }) => {
@@ -400,12 +429,35 @@ pub fn app() -> impl IntoElement {
         if let Err(err) = ext.start() {
             eprintln!("zendia: ExtensionServer failed to start: {err}");
         }
+        stub.attach_clipboard_reader(Arc::new(|| freya::clipboard::Clipboard::get().ok()));
+        if let Some(path) = zendia_browser_core::yank_webchat_actions::yank_ring_profile_path()
+            && let Some(ring) = zendia_browser_core::yank_webchat_actions::load_yank_ring_from(&path)
+        {
+            stub.set_yank_ring(ring);
+        }
         let onboarding_profile = zendia_browser_core::onboarding::onboarding_profile_path()
             .and_then(|path| zendia_browser_core::onboarding::load_profile_record_from(&path));
         stub.apply_onboarding_profile(onboarding_profile);
         let shell_profile = zendia_browser_core::shell_layout::shell_layout_profile_path()
             .and_then(|path| zendia_browser_core::shell_layout::load_shell_layout_from(&path));
         stub.apply_shell_layout_profile(shell_profile);
+        let user_json_meta =
+            zendia_browser_core::settings::load_user_keymap_json().map(|(_, raw)| stub.set_user_keymap_json(Some(raw)));
+        let vim_cfg = zendia_browser_core::settings::vim_config_profile_path()
+            .and_then(|path| zendia_browser_core::settings::load_vim_config_from(&path));
+        stub.apply_vim_config_profile(vim_cfg);
+        if let Some(meta) = user_json_meta
+            && let Some(err) = meta.error
+        {
+            let _ = stub.invoke(Command::ToastShow {
+                message: format!("Invalid zendia.json keymap config: {err}"),
+                action_label: None,
+                action_command: None,
+                timeout_ms: Some(5000),
+            });
+        }
+        let prev_session = zendia_browser_core::session::rotate_session_on_startup();
+        stub.set_last_session(prev_session);
         (stub, adapter, ext)
     });
 
@@ -422,6 +474,15 @@ pub fn app() -> impl IntoElement {
 
     let page_ctx = use_provide_page_surfaces();
     let keymap = use_provide_keymap();
+    use_hook({
+        let stub_core = Arc::clone(&stub_core);
+        let page_ctx = page_ctx.clone();
+        let keymap = keymap.clone();
+        move || {
+            page_ctx.set_core(Arc::clone(&stub_core) as Arc<dyn BrowserCore>);
+            keymap.reload_vim_profile(stub_core.model().settings.vim_timeoutlen);
+        }
+    });
     let text_focus = use_provide_text_focus();
     let menu_state = use_provide_menu_state();
     let sidebar_state = use_provide_sidebar_state();
@@ -440,14 +501,63 @@ pub fn app() -> impl IntoElement {
     let share_state = use_provide_share_state();
     let extension_popup_state = use_provide_extension_popup_state();
     use_hook({
+        let stub_core = Arc::clone(&stub_core);
         let hub_adapter = Arc::clone(&hub_adapter);
         let ext_adapter = Arc::clone(&ext_adapter);
         let page_ctx = page_ctx.clone();
+        let keymap = keymap.clone();
         move || {
+            let close_core = Arc::clone(&stub_core);
+            let close_hub = Arc::clone(&hub_adapter);
+            let close_ext = Arc::clone(&ext_adapter);
+            let close_ctx = page_ctx.clone();
+            let close_km = keymap.clone();
             extension_popup_state.set_close_callback(move |view_id| {
-                ext_adapter.set_popup_view(view_id, false);
-                page_ctx.remove_closed_view(view_id);
-                hub_adapter.destroy_auxiliary_view(view_id);
+                close_core.clear_extension_popup_keyboard_mark();
+                close_ext.set_popup_view(view_id, false);
+                close_km.remove_page(TabId(view_id));
+                close_ctx.remove_closed_view(view_id);
+                close_hub.destroy_auxiliary_view(view_id);
+                close_ctx.focus_effective_model_surface(&close_core.model());
+            });
+            let scan_hub = Arc::clone(&hub_adapter);
+            extension_popup_state.set_scan_callback(move |view_id| {
+                scan_hub.post_automation_request(
+                    view_id,
+                    zendia_automation::AutomationRequest::JumpScan {
+                        jump: zendia_automation::JumpKind::Hints,
+                        pattern: String::new(),
+                        top_only: true,
+                        include_fields: true,
+                        watch_mutations: true,
+                    },
+                );
+            });
+            let act_hub = Arc::clone(&hub_adapter);
+            extension_popup_state.set_activate_callback(move |view_id, target| {
+                if target.kind == "field" {
+                    act_hub.post_automation_request(
+                        view_id,
+                        zendia_automation::AutomationRequest::JumpPick {
+                            id: target.id.clone(),
+                            new_tab: false,
+                            extend: false,
+                        },
+                    );
+                } else {
+                    use zendia_browser_core::tab_source::PointerStep;
+                    let cx = f64::from(target.x + target.width * 0.5);
+                    let cy = f64::from(target.y + target.height * 0.5);
+                    let source: Arc<dyn TabSource> = Arc::clone(&act_hub) as Arc<dyn TabSource>;
+                    let _ = source.dispatch_pointer_steps(
+                        TabId(view_id),
+                        &[
+                            PointerStep::move_to(cx, cy),
+                            PointerStep::press(cx, cy),
+                            PointerStep::release(cx, cy),
+                        ],
+                    );
+                }
             });
         }
     });
@@ -463,28 +573,63 @@ pub fn app() -> impl IntoElement {
         }
     });
     let settings_host = use_provide_settings_host();
+    let core_slot: std::rc::Rc<std::cell::RefCell<Option<crate::ui::core_view::CoreView>>> =
+        use_hook(|| std::rc::Rc::new(std::cell::RefCell::new(None)));
 
+    let yank_save_seq = use_hook(|| Arc::new(std::sync::atomic::AtomicU64::new(0)));
     let core = use_provide_core_with_observer(Arc::clone(&stub_core) as Arc<dyn BrowserCore>, {
         let stub_core = Arc::clone(&stub_core);
         let hub_adapter = Arc::clone(&hub_adapter);
         let ext_adapter = Arc::clone(&ext_adapter);
         let page_ctx = page_ctx.clone();
         let keymap = keymap.clone();
+        let core_slot = std::rc::Rc::clone(&core_slot);
+        let yank_save_seq = Arc::clone(&yank_save_seq);
+        let save_live_session = |stub: &StubBackend| {
+            if let Some((session_path, _)) = zendia_browser_core::session::session_profile_paths() {
+                let snap = zendia_browser_core::session::snapshot_from_model(&stub.model());
+                let _ = zendia_browser_core::session::save_session_to(&session_path, &snap);
+            }
+        };
+        let save_vim_cfg = |stub: &StubBackend| {
+            if let Some(path) = zendia_browser_core::settings::vim_config_profile_path() {
+                let _ = zendia_browser_core::settings::save_vim_config_to(&path, &stub.vim_config_record());
+            }
+        };
         move |event| match event {
-            CoreEvent::TabOpened { .. } | CoreEvent::TabUpdated { .. } | CoreEvent::ZoomChanged { .. } => {
+            CoreEvent::TabOpened { .. } | CoreEvent::TabUpdated { .. } => {
+                ext_adapter.push_browser_state();
+                save_live_session(&stub_core);
+            }
+            CoreEvent::ZoomChanged { .. } => {
                 ext_adapter.push_browser_state();
             }
+            CoreEvent::SpaceSwitched { .. }
+            | CoreEvent::SpacesUpdated { .. }
+            | CoreEvent::TabsReordered { .. }
+            | CoreEvent::PinnedTabsChanged { .. }
+            | CoreEvent::TabPinnedUrlsChanged { .. }
+            | CoreEvent::TabUnloadedChanged { .. }
+            | CoreEvent::EssentialsChanged { .. }
+            | CoreEvent::FolderCreated { .. }
+            | CoreEvent::FolderUpdated { .. }
+            | CoreEvent::FolderDeleted { .. }
+            | CoreEvent::FolderHierarchyChanged { .. } => {
+                save_live_session(&stub_core);
+            }
             CoreEvent::TabClosed { tab_id } => {
+                keymap.remove_page(*tab_id);
                 page_ctx.remove_closed_view(tab_id.0);
                 ext_adapter.push_browser_state();
-                if stub_core.model().tabs.is_empty() {
-                    Platform::get().exit();
-                }
+                save_live_session(&stub_core);
             }
             CoreEvent::QuitRequested => {
                 Platform::get().exit();
             }
             CoreEvent::ClipboardCopyRequested { text } if !text.is_empty() => {
+                *cached_rich_clipboard()
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = None;
                 let _ = freya::clipboard::Clipboard::set(text.clone());
             }
             CoreEvent::DownloadStarted { .. } => {
@@ -494,9 +639,52 @@ pub fn app() -> impl IntoElement {
                 download_arc.launch(start, (24.0, size.height - 24.0));
             }
             CoreEvent::TabActivated { .. } => {
-                // NB: The vim mode follows whether a field of the newly active tab has the focus.
+                // NB: The vim mode follows whether a field of the newly active tab has the focus, and keyboard focus
+                //     moves to the newly active page surface (`INS-04`).
                 let _ = stub_core.invoke(Command::Vim(VimCommand::SyncPageMode));
+                page_ctx.focus_effective_model_surface(&stub_core.model());
                 ext_adapter.push_browser_state();
+                save_live_session(&stub_core);
+            }
+            CoreEvent::GlanceChanged { .. } => {
+                page_ctx.focus_effective_model_surface(&stub_core.model());
+            }
+            CoreEvent::FocusChanged { focus } => {
+                if focus.surface.is_none() {
+                    page_ctx.focus_effective_model_surface(&stub_core.model());
+                }
+            }
+            CoreEvent::PageMoved { tab_id, scrolled } => {
+                if *scrolled {
+                    vim_statusline_state.notify_page_scroll();
+                }
+                extension_popup_state.on_view_updated(tab_id.0);
+            }
+            CoreEvent::PopupTargetsUpdated { tab_id, targets } => {
+                extension_popup_state.set_targets(tab_id.0, targets.clone());
+            }
+            CoreEvent::YankRingChanged => {
+                let seq = yank_save_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let seq_ref = Arc::clone(&yank_save_seq);
+                let stub_save = Arc::clone(&stub_core);
+                spawn(async move {
+                    timer(std::time::Duration::from_millis(2000)).await;
+                    if seq_ref.load(std::sync::atomic::Ordering::Relaxed) == seq
+                        && let Some(path) = zendia_browser_core::yank_webchat_actions::yank_ring_profile_path()
+                    {
+                        let ring = stub_save.yank_ring_snapshot();
+                        let _ = zendia_browser_core::yank_webchat_actions::save_yank_ring_to(&path, &ring);
+                    }
+                });
+            }
+            CoreEvent::VimPageStateChanged {
+                mode_transition_pending: false,
+                ..
+            } => {
+                let maybe_cv = core_slot.borrow().clone();
+                if let Some(cv) = maybe_cv {
+                    keymap.replay_held_keys(&cv, &page_ctx);
+                }
             }
             CoreEvent::RegionCaptured { .. } => {
                 region_picker_state.stop();
@@ -506,14 +694,27 @@ pub fn app() -> impl IntoElement {
                 vim_statusline_state.close_all_keymaps();
                 vim_picker_state.close();
                 region_picker_state.stop();
+                save_vim_cfg(&stub_core);
             }
-            CoreEvent::ModeChanged { .. } | CoreEvent::WhichKeyChanged { .. } | CoreEvent::VimModeChanged { .. } => {
+            CoreEvent::VimModeChanged { enabled: true } => {
                 vim_statusline_state.close_all_keymaps();
+                save_vim_cfg(&stub_core);
+            }
+            CoreEvent::ModeChanged { .. } | CoreEvent::WhichKeyChanged { .. } => {
+                vim_statusline_state.close_all_keymaps();
+            }
+            CoreEvent::StatuslineSettingsChanged { .. } | CoreEvent::ShieldChanged { .. } => {
+                save_vim_cfg(&stub_core);
+            }
+            CoreEvent::BrowserSettingsChanged { settings } => {
+                keymap.reload_vim_profile(settings.vim_timeoutlen);
+                save_vim_cfg(&stub_core);
             }
             CoreEvent::OnboardingChanged { state } => {
                 if let Some(path) = zendia_browser_core::onboarding::onboarding_profile_path() {
                     let _ = zendia_browser_core::onboarding::save_profile_record_to(&path, &state.to_profile_record());
                 }
+                save_vim_cfg(&stub_core);
             }
             CoreEvent::LayoutSettingsChanged { .. } | CoreEvent::PanelPrefsChanged { .. } => {
                 if let Some(path) = zendia_browser_core::shell_layout::shell_layout_profile_path() {
@@ -521,6 +722,7 @@ pub fn app() -> impl IntoElement {
                     let record = zendia_browser_core::shell_layout::ShellLayoutRecord {
                         layout: model.layout,
                         panel_prefs: model.side_panel_prefs,
+                        user_customized_compact: stub_core.user_customized_compact(),
                     };
                     let _ = zendia_browser_core::shell_layout::save_shell_layout_to(&path, &record);
                 }
@@ -538,17 +740,42 @@ pub fn app() -> impl IntoElement {
                 ViewRequest::ExtensionPopupOpen {
                     extension_id,
                     popup_url,
+                    from_keyboard,
                 } => {
                     menu_state.close_all();
                     address_bar_state.close();
                     address_bar_state.close_site_panel();
                     share_state.close();
                     extension_popup_state.request_close();
+                    let ext_btn_id = format!("ext.{}", extension_id.0);
+                    let anchor = menu_state
+                        .toolbar_item_anchor(&ext_btn_id)
+                        .map(|a| (a.x + a.width * 0.5, a.y + a.height))
+                        .or_else(|| {
+                            menu_state
+                                .toolbar_item_anchor("builtin.extensions")
+                                .or_else(|| menu_state.toolbar_item_anchor("builtin.url_bar"))
+                                .map(|a| (a.x + a.width - 18.0, a.y + a.height))
+                        })
+                        .or_else(|| {
+                            let a = *address_bar_state.site_panel_anchor.peek();
+                            (a.width > 0.0).then_some((a.x + a.width * 0.5, a.y + a.height))
+                        })
+                        .or_else(|| *last_click_pos.peek());
                     let ext_ref = Arc::clone(&ext_adapter);
                     if let Some(view_id) = hub_adapter.create_extension_popup_view(popup_url, move |vid| {
                         ext_ref.set_popup_view(vid, true);
                     }) {
-                        extension_popup_state.open_popup(extension_id.clone(), view_id, *last_click_pos.peek());
+                        extension_popup_state.open_popup_with_hints(
+                            extension_id.clone(),
+                            view_id,
+                            anchor,
+                            *from_keyboard,
+                        );
+                        let _ = stub_core.invoke(Command::Vim(VimCommand::KeyedPageChanged {
+                            tab_id: Some(TabId(view_id)),
+                        }));
+                        page_ctx.focus_view(view_id);
                     }
                 }
                 ViewRequest::ExtensionPopupClose => {
@@ -556,17 +783,39 @@ pub fn app() -> impl IntoElement {
                 }
                 ViewRequest::LibraryToggle { .. } | ViewRequest::LibraryOpen { .. } | ViewRequest::LibraryClose => {
                     library_state.handle_view_request(request);
-                    let _ = stub_core.invoke(zendia_browser_core::commands::Command::LibraryFocusSet {
-                        focused: *library_state.open.peek(),
-                    });
+                    let is_open = *library_state.open.peek();
+                    let _ =
+                        stub_core.invoke(zendia_browser_core::commands::Command::LibraryFocusSet { focused: is_open });
+                    if !is_open {
+                        page_ctx.focus_effective_model_surface(&stub_core.model());
+                    }
                 }
                 ViewRequest::SpaceRename { space_id } => {
                     if let Some(space) = stub_core.model().space(*space_id) {
-                        library_spaces_state.start_rename(*space_id, space.name.clone());
+                        if library_state.is_open() {
+                            library_spaces_state.start_rename(*space_id, space.name.clone());
+                        } else {
+                            sidebar_state.start_space_rename(*space_id, space.name.clone());
+                        }
                     }
                 }
                 ViewRequest::SpaceIconPicker { space_id } => {
-                    library_spaces_state.open_icon_picker(*space_id, None);
+                    if library_state.is_open() {
+                        library_spaces_state.open_icon_picker(*space_id, None);
+                    } else {
+                        let sidebar_w = stub_core.model().layout.effective_sidebar_width();
+                        space_editing_state.open_live_icon_picker(*space_id, Some((sidebar_w + 10.0, 86.0)));
+                    }
+                }
+                ViewRequest::SpaceDeleteConfirm {
+                    space_id,
+                    space_name,
+                    tab_count,
+                } => {
+                    menu_state.close_all();
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    space_editing_state.open_delete_confirm(*space_id, space_name.clone(), *tab_count);
                 }
                 ViewRequest::SpaceRoutingEdit { rule_id } => {
                     if let Some(rule) = stub_core.model().space_routing.rules.iter().find(|r| r.id == *rule_id) {
@@ -587,12 +836,20 @@ pub fn app() -> impl IntoElement {
                         .active_tab()
                         .map(|tab| tab.url.clone())
                         .filter(|url| !url.is_empty() && url != "about:blank" && url != "about:newtab");
-                    address_bar_state.open_floating(false, current_url);
+                    address_bar_state.open_floating(
+                        false,
+                        current_url,
+                        zendia_browser_core::address_bar::AddressBarFilter::All,
+                    );
                 }
-                ViewRequest::AddressBarOpen { new_tab, initial_query } => {
+                ViewRequest::AddressBarOpen {
+                    new_tab,
+                    initial_query,
+                    filter,
+                } => {
                     menu_state.close_all();
                     share_state.close();
-                    address_bar_state.open_floating(*new_tab, initial_query.clone());
+                    address_bar_state.open_floating(*new_tab, initial_query.clone(), *filter);
                 }
                 ViewRequest::PaletteOpen { initial_query } => {
                     menu_state.close_all();
@@ -646,6 +903,7 @@ pub fn app() -> impl IntoElement {
                 }
                 ViewRequest::PickerClosed { .. } => {
                     vim_picker_state.close();
+                    page_ctx.focus_effective_model_surface(&stub_core.model());
                 }
                 ViewRequest::RegionPick { tab_id } => {
                     if stub_core.model().vim_mode_enabled {
@@ -666,9 +924,27 @@ pub fn app() -> impl IntoElement {
                 | ViewRequest::PanelClose { .. }
                 | ViewRequest::PanelToggle { .. }
                 | ViewRequest::AgentModelCard
-                | ViewRequest::AgentInstructions => {
+                | ViewRequest::AgentInstructions
+                | ViewRequest::WebChatAccountsToggle => {
                     if dock_state.apply_request(request) {
                         page_ctx.request_focus_active_surface();
+                    }
+                }
+                ViewRequest::PanelFocusChanged { panel_id } => {
+                    let mut ds = dock_state;
+                    ds.set_focus(panel_id.clone());
+                    if panel_id.is_none() {
+                        page_ctx.request_focus_active_surface();
+                    } else if panel_id
+                        .as_ref()
+                        .is_some_and(|p| p.0 == zendia_browser_core::webchat::WEBCHAT_PANEL_ID)
+                    {
+                        let model = stub_core.model();
+                        if let Some(site) = model.active_chat_site()
+                            && let Some(vid) = webchat_views.view_for_site(&site.id)
+                        {
+                            page_ctx.focus_view(vid);
+                        }
                     }
                 }
                 ViewRequest::WebChatReload { site_id } => {
@@ -731,30 +1007,132 @@ pub fn app() -> impl IntoElement {
                     address_bar_state.close();
                     address_bar_state.close_site_panel();
                     share_state.close();
-                    crate::ui::chrome::menus::open_tab_context_menu(
+                    let pos = sidebar_state
+                        .tab_anchor(*tab_id)
+                        .map(|a| (a.x + a.width.min(180.0) * 0.5, a.y + a.height))
+                        .unwrap_or((240.0, 96.0));
+                    crate::ui::chrome::menus::open_tab_context_menu(&menu_state, &stub_core.model(), *tab_id, pos);
+                }
+                ViewRequest::FolderMenu { folder_id } => {
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    share_state.close();
+                    let pos = sidebar_state
+                        .folder_anchor(*folder_id)
+                        .map(|a| (a.x + a.width.min(180.0) * 0.5, a.y + a.height))
+                        .unwrap_or((240.0, 96.0));
+                    crate::ui::chrome::menus::open_folder_context_menu(
                         &menu_state,
                         &stub_core.model(),
-                        *tab_id,
-                        (240.0, 96.0),
+                        *folder_id,
+                        pos,
                     );
+                }
+                ViewRequest::CreateNewMenu => {
+                    address_bar_state.close();
+                    address_bar_state.close_site_panel();
+                    share_state.close();
+                    menu_state.toggle_create_new(None);
+                }
+                ViewRequest::ToolbarItemMenu { item_id } => {
+                    let anchor = menu_state.toolbar_item_anchor(item_id.as_str());
+                    let pos = anchor.map(|a| (a.x, a.y + a.height + 4.0)).unwrap_or((240.0, 48.0));
+                    match item_id.as_str() {
+                        "builtin.app_menu" => {
+                            address_bar_state.close();
+                            address_bar_state.close_site_panel();
+                            share_state.close();
+                            menu_state.toggle_app_menu(anchor);
+                        }
+                        "builtin.new_tab" => {
+                            address_bar_state.close();
+                            address_bar_state.close_site_panel();
+                            share_state.close();
+                            menu_state.toggle_create_new(anchor);
+                        }
+                        "builtin.extensions" | "builtin.url_bar" => {
+                            menu_state.close_all();
+                            share_state.close();
+                            address_bar_state.toggle_site_panel(anchor);
+                        }
+                        "builtin.back" | "builtin.forward" => {
+                            address_bar_state.close();
+                            address_bar_state.close_site_panel();
+                            share_state.close();
+                            let direction = if item_id.as_str() == "builtin.back" { -1 } else { 1 };
+                            let model = stub_core.model();
+                            let history_entries = model
+                                .active_tab
+                                .map(|tid| hub_adapter.session_history_items(tid, direction))
+                                .unwrap_or_default();
+                            let items: Vec<zendia_browser_core::menus::ResolvedMenuItem> = if history_entries.is_empty()
+                            {
+                                vec![
+                                    zendia_browser_core::menus::ResolvedMenuItem::action(
+                                        "history.empty",
+                                        "No history entries",
+                                        "",
+                                    )
+                                    .with_enabled(false),
+                                ]
+                            } else {
+                                history_entries
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(idx, (step, url))| {
+                                        let mut entry = zendia_browser_core::menus::ResolvedMenuItem::action(
+                                            format!("history.step.{idx}"),
+                                            url,
+                                            "navigation.history_step",
+                                        );
+                                        entry.command_args = vec![("step".to_string(), step.to_string())];
+                                        entry
+                                    })
+                                    .collect()
+                            };
+                            menu_state.open_context_menu(crate::ui::chrome::menus::OpenContextMenu {
+                                position: pos,
+                                items,
+                                tab_id: model.active_tab,
+                                open_submenu: None,
+                            });
+                        }
+                        _ => {
+                            address_bar_state.close();
+                            address_bar_state.close_site_panel();
+                            share_state.close();
+                            let model = stub_core.model();
+                            let ext_id = model
+                                .contributions
+                                .toolbar_items
+                                .iter()
+                                .find(|it| it.id == *item_id)
+                                .and_then(|it| match &it.source {
+                                    zendia_browser_core::contributions::ContributionSource::Extension {
+                                        extension_id,
+                                    } => Some(extension_id.clone()),
+                                    _ => None,
+                                });
+                            if let Some(extension_id) = ext_id {
+                                crate::ui::chrome::menus::open_extension_context_menu(
+                                    &menu_state,
+                                    &model,
+                                    &extension_id,
+                                    pos,
+                                );
+                            } else {
+                                crate::ui::chrome::menus::open_sidebar_context_menu(&menu_state, &model, pos);
+                            }
+                        }
+                    }
                 }
                 ViewRequest::UrlPaste { new_tab } => {
                     if let Ok(raw) = freya::clipboard::Clipboard::get() {
-                        let text = raw.trim();
-                        if !text.is_empty() && !text.contains('\n') {
-                            if *new_tab {
-                                let _ = stub_core.invoke(Command::TabNew {
-                                    url: Some(text.to_string()),
-                                    after: None,
-                                    activate: true,
-                                });
-                            } else {
-                                let _ = stub_core.invoke(Command::NavigationLoadUrl {
-                                    tab_id: None,
-                                    input: text.to_string(),
-                                });
-                            }
-                        }
+                        let _ =
+                            stub_core.invoke(Command::Tabs(zendia_browser_core::tab_actions::TabAction::UrlPaste {
+                                new_tab: *new_tab,
+                                text: Some(raw),
+                            }));
                     }
                 }
                 ViewRequest::PageFind => {
@@ -771,46 +1149,350 @@ pub fn app() -> impl IntoElement {
                     });
                 }
                 ViewRequest::WindowClose => {
-                    Platform::get().exit();
+                    Platform::get().close_window(Platform::window_id());
                 }
-                ViewRequest::LibraryVimAction { action } => {
+                ViewRequest::LibraryVimAction { action, count } => {
                     use crate::ui::library::nav::NavMove;
                     use zendia_browser_core::chrome_actions::LibraryVimAction;
                     use zendia_browser_core::library::LibrarySection;
+                    use zendia_browser_core::model::{DownloadId, FolderId, HistoryEntryId, LibraryMediaId, SpaceId};
+                    use zendia_browser_core::space_routing::SpaceRouteId;
+
+                    if !*library_state.open.peek() {
+                        return;
+                    }
+                    let steps = (*count).max(1) as usize;
+                    let active_section = *library_state.section.peek();
+                    let cursor_key = library_state.nav.cursor.peek().clone();
+
+                    let resolve_cursor_space = |model: &zendia_browser_core::model::BrowserModel| -> Option<SpaceId> {
+                        if active_section != LibrarySection::Spaces {
+                            return None;
+                        }
+                        let key = cursor_key.as_deref()?;
+                        if let Some(sid) = key.strip_prefix("space:").and_then(|s| s.parse::<u64>().ok()) {
+                            return Some(SpaceId(sid));
+                        }
+                        if let Some(fid) = key.strip_prefix("folder:").and_then(|s| s.parse::<u64>().ok()) {
+                            return model.folder(FolderId(fid)).map(|f| f.space_id);
+                        }
+                        if let Some(tid) = key.strip_prefix("tab:").and_then(|s| s.parse::<u64>().ok()) {
+                            let tab_id = TabId(tid);
+                            return model.tab(tab_id).and_then(|t| t.space_id).or_else(|| {
+                                model
+                                    .pinned_tabs
+                                    .iter()
+                                    .find(|p| p.tab_id == tab_id)
+                                    .map(|p| p.space_id)
+                            });
+                        }
+                        None
+                    };
+
                     match action {
-                        LibraryVimAction::Down => library_state.nav.move_cursor(NavMove::Down),
-                        LibraryVimAction::Up => library_state.nav.move_cursor(NavMove::Up),
-                        LibraryVimAction::Left => library_state.nav.move_cursor(NavMove::Left),
-                        LibraryVimAction::Right => library_state.nav.move_cursor(NavMove::Right),
-                        LibraryVimAction::First => library_state.nav.move_cursor(NavMove::First),
-                        LibraryVimAction::Last => library_state.nav.move_cursor(NavMove::Last),
-                        LibraryVimAction::HalfPageDown => library_state.nav.move_cursor(NavMove::HalfPageDown),
-                        LibraryVimAction::HalfPageUp => library_state.nav.move_cursor(NavMove::HalfPageUp),
+                        LibraryVimAction::Down => library_state.nav.move_cursor_by(NavMove::Down, steps),
+                        LibraryVimAction::Up => library_state.nav.move_cursor_by(NavMove::Up, steps),
+                        LibraryVimAction::Left => library_state.nav.move_cursor_by(NavMove::Left, steps),
+                        LibraryVimAction::Right => library_state.nav.move_cursor_by(NavMove::Right, steps),
+                        LibraryVimAction::First => library_state.nav.move_cursor_by(NavMove::First, 1),
+                        LibraryVimAction::Last => library_state.nav.move_cursor_by(NavMove::Last, 1),
+                        LibraryVimAction::HalfPageDown => {
+                            library_state.nav.move_cursor_by(NavMove::HalfPageDown, steps)
+                        }
+                        LibraryVimAction::HalfPageUp => library_state.nav.move_cursor_by(NavMove::HalfPageUp, steps),
+                        LibraryVimAction::Activate => {
+                            let maybe_cv = core_slot.borrow().clone();
+                            if let Some(cv) = maybe_cv {
+                                let _ = library_state.nav.activate_cursor(&cv);
+                            }
+                        }
+                        LibraryVimAction::Quit => {
+                            if library_spaces_state.icon_picker_space.peek().is_some() {
+                                library_spaces_state.close_icon_picker();
+                            } else if !library_state.nav.close_subview_if_open()
+                                && !library_state.nav.close_filter_panel_if_open()
+                            {
+                                let _ = stub_core.invoke(Command::LibraryClose);
+                            }
+                        }
+                        LibraryVimAction::Jump => {
+                            let _ = library_state.nav.start_jump_hints();
+                        }
                         LibraryVimAction::Search => {
                             let _ = library_state.nav.focus_search();
                         }
                         LibraryVimAction::Filter => {
                             let _ = library_state.nav.open_filter_panel();
                         }
-                        LibraryVimAction::NextSection | LibraryVimAction::PrevSection => {
-                            let sections = LibrarySection::ALL;
-                            let current = *library_state.section.peek();
-                            let idx = sections.iter().position(|s| *s == current).unwrap_or(0);
-                            let delta: isize = if matches!(action, LibraryVimAction::NextSection) {
-                                1
-                            } else {
-                                -1
+                        LibraryVimAction::Menu => {
+                            let Some(ref key) = cursor_key else {
+                                return;
                             };
-                            let next = sections[(idx as isize + delta).rem_euclid(sections.len() as isize) as usize];
-                            library_state.handle_view_request(&ViewRequest::LibraryOpen { section: Some(next) });
+                            let pos = library_state.nav.menu_position_for(key);
+                            let model = stub_core.model();
+                            if let Some(id) = key.strip_prefix("history:").and_then(|s| s.parse::<u64>().ok()) {
+                                if let Some(entry) = model
+                                    .history
+                                    .iter()
+                                    .chain(model.closed_tabs.iter())
+                                    .find(|e| e.id == HistoryEntryId(id))
+                                {
+                                    menu_state.open_context_menu(crate::ui::chrome::menus::OpenContextMenu {
+                                        position: pos,
+                                        items: zendia_browser_core::history::build_history_row_context_menu(entry),
+                                        tab_id: None,
+                                        open_submenu: None,
+                                    });
+                                }
+                            } else if let Some(id) = key.strip_prefix("download:").and_then(|s| s.parse::<u64>().ok()) {
+                                if let Some(dl) = model.downloads.iter().find(|d| d.id == DownloadId(id)) {
+                                    menu_state.open_context_menu(crate::ui::chrome::menus::OpenContextMenu {
+                                        position: pos,
+                                        items: zendia_browser_core::downloads::build_download_context_menu(dl),
+                                        tab_id: None,
+                                        open_submenu: None,
+                                    });
+                                }
+                            } else if let Some(id) = key.strip_prefix("media:").and_then(|s| s.parse::<u64>().ok()) {
+                                if let Some(item) = model.library_media.iter().find(|m| m.id == LibraryMediaId(id)) {
+                                    menu_state.open_context_menu(crate::ui::chrome::menus::OpenContextMenu {
+                                        position: pos,
+                                        items: zendia_browser_core::library_media::build_media_context_menu(item),
+                                        tab_id: None,
+                                        open_submenu: None,
+                                    });
+                                }
+                            } else if let Some(id) = key.strip_prefix("space:").and_then(|s| s.parse::<u64>().ok()) {
+                                let key_table = zendia_keymap::KeyTable::standard();
+                                let items = zendia_browser_core::space_routing::build_library_space_menu(
+                                    &model,
+                                    SpaceId(id),
+                                    Some(&key_table),
+                                );
+                                menu_state.open_context_menu(crate::ui::chrome::menus::OpenContextMenu {
+                                    position: pos,
+                                    items,
+                                    tab_id: None,
+                                    open_submenu: None,
+                                });
+                            } else if let Some(id) = key.strip_prefix("tab:").and_then(|s| s.parse::<u64>().ok()) {
+                                crate::ui::chrome::menus::open_tab_context_menu(&menu_state, &model, TabId(id), pos);
+                            } else if let Some(id) = key.strip_prefix("folder:").and_then(|s| s.parse::<u64>().ok()) {
+                                crate::ui::chrome::menus::open_folder_context_menu(
+                                    &menu_state,
+                                    &model,
+                                    FolderId(id),
+                                    pos,
+                                );
+                            } else if let Some(id) = key.strip_prefix("rule:").and_then(|s| s.parse::<u64>().ok())
+                                && let Some((idx, rule)) = model
+                                    .space_routing
+                                    .rules
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, r)| r.id == SpaceRouteId(id))
+                            {
+                                use zendia_browser_core::menus::ResolvedMenuItem;
+                                let mut edit =
+                                    ResolvedMenuItem::action("route.edit", "Edit Route", "space_routing.start_edit");
+                                edit.command_args = vec![("rule_id".to_string(), rule.id.0.to_string())];
+                                let mut copy = ResolvedMenuItem::action("route.copy", "Copy Link", "page.copy_link");
+                                copy.command_args = vec![("url".to_string(), rule.pattern.clone())];
+                                let mut items = vec![edit, copy];
+                                if idx > 0 {
+                                    let mut up =
+                                        ResolvedMenuItem::action("route.up", "Move Up", "space_routing.reorder");
+                                    up.command_args = vec![
+                                        ("rule_id".to_string(), rule.id.0.to_string()),
+                                        ("index".to_string(), (idx - 1).to_string()),
+                                    ];
+                                    items.push(up);
+                                }
+                                if idx + 1 < model.space_routing.rules.len() {
+                                    let mut down =
+                                        ResolvedMenuItem::action("route.down", "Move Down", "space_routing.reorder");
+                                    down.command_args = vec![
+                                        ("rule_id".to_string(), rule.id.0.to_string()),
+                                        ("index".to_string(), (idx + 1).to_string()),
+                                    ];
+                                    items.push(down);
+                                }
+                                items.push(ResolvedMenuItem::separator("route.sep"));
+                                let mut del =
+                                    ResolvedMenuItem::action("route.delete", "Delete Route", "space_routing.delete");
+                                del.command_args = vec![("rule_id".to_string(), rule.id.0.to_string())];
+                                items.push(del);
+                                menu_state.open_context_menu(crate::ui::chrome::menus::OpenContextMenu {
+                                    position: pos,
+                                    items,
+                                    tab_id: None,
+                                    open_submenu: None,
+                                });
+                            }
                         }
-                        _ => {}
+                        LibraryVimAction::Delete => {
+                            let Some(ref key) = cursor_key else {
+                                return;
+                            };
+                            match active_section {
+                                LibrarySection::History => {
+                                    if let Some(id) = key.strip_prefix("history:").and_then(|s| s.parse::<u64>().ok()) {
+                                        let _ = stub_core.invoke(Command::HistoryDelete {
+                                            entry_id: HistoryEntryId(id),
+                                        });
+                                    }
+                                }
+                                LibrarySection::Downloads => {
+                                    if let Some(id) = key.strip_prefix("download:").and_then(|s| s.parse::<u64>().ok())
+                                    {
+                                        let _ = stub_core.invoke(Command::DownloadRemove {
+                                            download_id: DownloadId(id),
+                                        });
+                                    }
+                                }
+                                LibrarySection::Spaces => {
+                                    if let Some(id) = key.strip_prefix("tab:").and_then(|s| s.parse::<u64>().ok()) {
+                                        let _ = stub_core.invoke(Command::TabClose {
+                                            tab_id: Some(TabId(id)),
+                                            force: false,
+                                        });
+                                    }
+                                }
+                                LibrarySection::SpaceRouting => {
+                                    if let Some(id) = key.strip_prefix("rule:").and_then(|s| s.parse::<u64>().ok()) {
+                                        let _ = stub_core.invoke(Command::SpaceRoutingDelete {
+                                            rule_id: SpaceRouteId(id),
+                                        });
+                                    }
+                                }
+                                LibrarySection::Media => {}
+                            }
+                        }
+                        LibraryVimAction::Yank => {
+                            let Some(ref key) = cursor_key else {
+                                return;
+                            };
+                            match active_section {
+                                LibrarySection::History => {
+                                    if let Some(id) = key.strip_prefix("history:").and_then(|s| s.parse::<u64>().ok()) {
+                                        let _ = stub_core.invoke(Command::HistoryCopyUrl {
+                                            entry_id: HistoryEntryId(id),
+                                        });
+                                    }
+                                }
+                                LibrarySection::Downloads => {
+                                    if let Some(id) = key.strip_prefix("download:").and_then(|s| s.parse::<u64>().ok())
+                                    {
+                                        let _ = stub_core.invoke(Command::DownloadCopyLink {
+                                            download_id: DownloadId(id),
+                                        });
+                                    }
+                                }
+                                LibrarySection::Media => {
+                                    if let Some(id) = key.strip_prefix("media:").and_then(|s| s.parse::<u64>().ok()) {
+                                        let _ = stub_core.invoke(Command::LibraryMediaCopy {
+                                            media_id: LibraryMediaId(id),
+                                        });
+                                    }
+                                }
+                                LibrarySection::SpaceRouting => {
+                                    if let Some(id) = key.strip_prefix("rule:").and_then(|s| s.parse::<u64>().ok())
+                                        && let Some(rule) = stub_core
+                                            .model()
+                                            .space_routing
+                                            .rules
+                                            .iter()
+                                            .find(|r| r.id == SpaceRouteId(id))
+                                    {
+                                        let text = rule.pattern.trim().to_string();
+                                        if !text.is_empty() {
+                                            let _ = stub_core.invoke(Command::PageCopyLink { url: text });
+                                        }
+                                    }
+                                }
+                                LibrarySection::Spaces => {}
+                            }
+                        }
+                        LibraryVimAction::Add => match active_section {
+                            LibrarySection::Spaces => {
+                                let _ = stub_core.invoke(Command::SpaceCreate { name: None, icon: None });
+                            }
+                            LibrarySection::SpaceRouting => {
+                                library_routing_state.start_new();
+                            }
+                            _ => {}
+                        },
+                        LibraryVimAction::RenameSpace => {
+                            let model = stub_core.model();
+                            if let Some(space_id) = resolve_cursor_space(&model)
+                                && let Some(space) = model.space(space_id)
+                            {
+                                library_spaces_state.start_rename(space_id, space.name.clone());
+                            }
+                        }
+                        LibraryVimAction::SpaceTheme => {
+                            let model = stub_core.model();
+                            if let Some(space_id) = resolve_cursor_space(&model) {
+                                let _ = stub_core.invoke(Command::SpaceOpenThemePicker { space_id });
+                            }
+                        }
+                        LibraryVimAction::SpaceIcon => {
+                            let model = stub_core.model();
+                            if let Some(space_id) = resolve_cursor_space(&model) {
+                                let anchor = library_spaces_state
+                                    .card_areas
+                                    .peek()
+                                    .get(&space_id)
+                                    .map(|&(x, y, _, _)| (x + 12.0, y + 48.0));
+                                library_spaces_state.open_icon_picker(space_id, anchor);
+                            }
+                        }
+                        LibraryVimAction::MoveSpaceLeft | LibraryVimAction::MoveSpaceRight => {
+                            let model = stub_core.model();
+                            if let Some(space_id) = resolve_cursor_space(&model)
+                                && let Some(pos) = model.spaces.iter().position(|s| s.id == space_id)
+                            {
+                                let delta: isize = if matches!(action, LibraryVimAction::MoveSpaceRight) {
+                                    steps as isize
+                                } else {
+                                    -(steps as isize)
+                                };
+                                let target = (pos as isize + delta)
+                                    .clamp(0, model.spaces.len().saturating_sub(1) as isize)
+                                    as usize;
+                                if target != pos
+                                    && stub_core
+                                        .invoke(Command::SpaceReorder {
+                                            space_id,
+                                            index: target,
+                                        })
+                                        .is_ok()
+                                {
+                                    let mut cursor = library_state.nav.cursor;
+                                    cursor.set_if_modified(Some(format!("space:{}", space_id.0)));
+                                }
+                            }
+                        }
+                        LibraryVimAction::NextSection | LibraryVimAction::PrevSection => {
+                            let delta: isize = if matches!(action, LibraryVimAction::NextSection) {
+                                steps as isize
+                            } else {
+                                -(steps as isize)
+                            };
+                            if let Some(next) = library_state.adjacent_visible_section(delta) {
+                                library_state.open_keeping_list_focus(Some(next));
+                            }
+                        }
+                        LibraryVimAction::GotoSection(section) => {
+                            library_state.open_keeping_list_focus(Some(*section));
+                        }
                     }
                 }
             },
             _ => {}
         }
     });
+    *core_slot.borrow_mut() = Some(core.clone());
     let _theme = use_provide_theme(&core);
     let theme = use_theme();
 
@@ -939,8 +1621,44 @@ pub fn app() -> impl IntoElement {
                 .set_modifiers(input::key_modifiers(modifiers));
         }
     };
+    let mut window_dictation_held = use_state(|| false);
     let track_modifiers_on_up = track_modifiers.clone();
-    let on_global_key_up = move |e: Event<KeyboardEventData>| track_modifiers_on_up(false, &e);
+    let on_global_key_up = move |e: Event<KeyboardEventData>| {
+        track_modifiers_on_up(false, &e);
+        if *window_dictation_held.peek() {
+            window_dictation_held.set(false);
+            if *dock_state.dictation.peek() == crate::ui::panels::DictationState::Listening {
+                let mut ds = dock_state;
+                ds.dictation.set(crate::ui::panels::DictationState::Processing);
+                spawn(async move {
+                    timer(std::time::Duration::from_millis(450)).await;
+                    if *ds.dictation.peek() == crate::ui::panels::DictationState::Processing {
+                        let mut ct = ds.composer_text;
+                        let prev = ct.peek().clone();
+                        let next = if prev.trim().is_empty() {
+                            "Summarize the key takeaways on this page".to_string()
+                        } else {
+                            format!("{prev} and highlight action items")
+                        };
+                        ct.set(next);
+                        ds.dictation.set(crate::ui::panels::DictationState::Idle);
+                    }
+                });
+            }
+        }
+    };
+
+    // Keep core's panel-row focus state in sync with pointer clicks inside panels or on the page (`WIN-06`).
+    let mut last_synced_panel = use_state(|| None::<zendia_browser_core::contributions::SidePanelId>);
+    let current_focused_panel = dock_state.focused_panel.read().clone();
+    if *last_synced_panel.peek() != current_focused_panel {
+        last_synced_panel.set(current_focused_panel.clone());
+        core.invoke_or_log(Command::Vim(
+            zendia_browser_core::vim_keys::VimCommand::PanelFocusChanged {
+                panel_id: current_focused_panel,
+            },
+        ));
+    }
 
     let on_global_key_down = {
         let core = core.clone();
@@ -949,6 +1667,25 @@ pub fn app() -> impl IntoElement {
             track_modifiers(true, &e);
             if onboarding_state.is_open() {
                 let _ = handle_onboarding_key_down(&e, &core, &onboarding_state);
+                return;
+            }
+            // AGK-03: Window-wide configurable dictation hold key (`zendia.dictation.hold-key`), taken before vim keys.
+            let dictation_hold_spec = core.model().peek().settings.dictation_hold_key.clone();
+            if crate::ui::agent::panel::matches_dictation_hold_key(&e, &dictation_hold_spec) {
+                e.stop_propagation();
+                e.prevent_default();
+                keymap.consume_key_up(e.code);
+                if !dock_state.is_agent_open() {
+                    core.invoke_or_log(Command::PanelOpen {
+                        panel_id: zendia_browser_core::contributions::SidePanelId::new(
+                            zendia_browser_core::agent::AGENT_PANEL_ID,
+                        ),
+                        focus: true,
+                    });
+                    window_dictation_held.set(true);
+                    let mut ds = dock_state;
+                    ds.dictation.set(crate::ui::panels::DictationState::Listening);
+                }
                 return;
             }
             // While the floating address bar is open, let Ctrl+N / Ctrl+P navigate its list instead of triggering
@@ -963,25 +1700,37 @@ pub fn app() -> impl IntoElement {
                 || region_picker_state.is_active()
                 || media_preview_state.is_open()
                 || share_state.is_open()
-                || extension_popup_state.is_open()
+                || space_editing_state.has_modal_open()
                 || core.model().peek().pending_extension_prompt.is_some()
             {
                 return;
             }
-            if !text_focus.is_any_focused() && !address_bar_state.is_open() && !menu_state.has_open_overlay() {
+            let (vim_enabled, mode_transition_pending) = {
+                let model = core.model().peek();
+                (model.vim_mode_enabled, model.mode_transition_pending)
+            };
+            let try_extension_shortcut = |e: &Event<KeyboardEventData>| -> bool {
+                if text_focus.is_any_focused() || address_bar_state.is_open() || menu_state.has_open_overlay() {
+                    return false;
+                }
                 let matched_ext_cmd = {
                     let model = core.model().peek();
-                    match_extension_shortcut(&e, &model.extension_commands)
+                    match_extension_shortcut(e, &model.extension_commands)
                         .map(|c| (c.extension_id.clone(), c.name.clone()))
                 };
                 if let Some((extension_id, name)) = matched_ext_cmd {
                     e.stop_propagation();
                     e.prevent_default();
                     core.invoke_or_log(Command::ExtensionInvokeCommand { extension_id, name });
-                    return;
+                    return true;
                 }
+                false
+            };
+            // With vim off, extension shortcuts run before standard shortcuts; with vim on, vim mappings win (`EXT-07`).
+            if !vim_enabled && try_extension_shortcut(&e) {
+                return;
             }
-            if text_focus.is_any_focused() && is_text_editing_key(&e) {
+            if text_focus.is_any_focused() && is_text_editing_key(&e, vim_enabled) {
                 return;
             }
             if (dock_state.captures_text_input() || space_editing_state.captures_text_input())
@@ -991,9 +1740,10 @@ pub fn app() -> impl IntoElement {
             {
                 return;
             }
+            let library_space_renaming = library_state.is_open() && library_spaces_state.is_renaming();
             if !address_bar_state.is_open()
                 && !sidebar_state.is_renaming()
-                && !library_spaces_state.is_renaming()
+                && !library_space_renaming
                 && !menu_state.has_open_overlay()
                 && crate::ui::library::nav::handle_library_key_down(&e, &core, &library_state)
             {
@@ -1001,10 +1751,14 @@ pub fn app() -> impl IntoElement {
             }
             if !address_bar_state.is_open()
                 && !sidebar_state.is_renaming()
-                && !library_spaces_state.is_renaming()
+                && !library_space_renaming
                 && !dock_state.captures_text_input()
                 && crate::ui::vim::handle_focus_key_down(&e, &core)
             {
+                return;
+            }
+            if mode_transition_pending && !address_bar_state.is_open() && !menu_state.has_open_overlay() {
+                keymap.hold_key_down(e.data().clone());
                 return;
             }
             // XCM-03: Block compact-mode keyboard toggles while Library is open (`ZenCompactMode.mjs:167-169`).
@@ -1014,8 +1768,46 @@ pub fn app() -> impl IntoElement {
             {
                 return;
             }
+            let library_field_focused = library_state.is_open()
+                && (library_state.nav.is_search_focused() || library_state.nav.is_form_input_focused());
+            if library_field_focused
+                && !e.modifiers.intersects(Modifiers::ALT | Modifiers::META)
+                && !(e.modifiers.contains(Modifiers::CONTROL) && e.modifiers.contains(Modifiers::SHIFT))
+            {
+                return;
+            }
+            if address_bar_state.is_open()
+                || find_bar.is_open()
+                || sidebar_state.is_renaming()
+                || library_space_renaming
+                || menu_state.has_open_overlay()
+                || space_editing_state.captures_text_input()
+            {
+                return;
+            }
+            if extension_popup_state.is_open() {
+                let consumed = {
+                    let model = core.model().peek();
+                    extension_popup_state.handle_key_down(&e, &model)
+                };
+                if consumed {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    keymap.consume_key_up(e.code);
+                    return;
+                }
+            }
             if !keymap.handle_global_key_down(&e, &core) {
-                crate::ui::vim::leave_window_mode_on_unused_key(&e, &core);
+                crate::ui::vim::leave_window_mode_on_unused_key(&e, &core, &keymap);
+                if extension_popup_state.is_open() && e.code == Code::Escape {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    extension_popup_state.request_close();
+                    return;
+                }
+                if vim_enabled {
+                    let _ = try_extension_shortcut(&e);
+                }
             }
         }
     };
@@ -1029,6 +1821,9 @@ pub fn app() -> impl IntoElement {
             if adapter.set_default_viewport((width, height), dpr) && width > 0 && height > 0 {
                 viewport_known.set_if_modified(true);
             }
+            Platform::get().with_window(Platform::window_id(), move |window| {
+                vim_statusline_state.set_fullscreen(window.fullscreen().is_some());
+            });
         }
     };
 
@@ -1071,6 +1866,8 @@ pub fn app() -> impl IntoElement {
         .child(VimPickerOverlay)
         .child(MediaPreviewOverlay)
         .child(GradientGeneratorOverlay)
+        .child(SpaceIconPickerOverlay)
+        .child(SpaceDeleteConfirmOverlay)
         .child(ShareConfirmOverlay)
         .child(ExtensionPopupOverlay)
         .child(ExtensionPromptOverlay)

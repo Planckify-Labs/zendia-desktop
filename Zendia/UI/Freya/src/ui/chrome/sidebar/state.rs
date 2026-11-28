@@ -9,8 +9,10 @@
 //! Only transient UI state lives here. Tabs, spaces, essentials, pinned tabs, folders, and notifications live in
 //! [`zendia_browser_core`].
 
+use crate::ui::chrome::menus::AnchorRect;
 use crate::ui::theme::{ResolvedScheme, ResolvedTheme, Rgba, motion};
 use freya::prelude::*;
+use std::collections::HashMap;
 use zendia_browser_core::model::{FolderId, SpaceId, TabId, TabMoveTarget};
 use zendia_browser_core::split::DropZone;
 
@@ -89,9 +91,34 @@ pub struct SidebarViewState {
     pub compact_hide_seq: State<u64>,
     /// Sequence counter cancelling stale tab-switch flash timers.
     pub compact_flash_seq: State<u64>,
+    /// Measured bounds of sidebar tab rows for anchoring `m` context menus (`EXP-11`).
+    pub tab_anchors: State<HashMap<TabId, AnchorRect>>,
+    /// Measured bounds of sidebar folder headers for anchoring `m` context menus (`EXP-11`).
+    pub folder_anchors: State<HashMap<FolderId, AnchorRect>>,
 }
 
 impl SidebarViewState {
+    pub fn set_tab_anchor(&self, tab_id: TabId, rect: AnchorRect) {
+        let mut anchors = self.tab_anchors;
+        if anchors.peek().get(&tab_id).copied() != Some(rect) {
+            anchors.write().insert(tab_id, rect);
+        }
+    }
+
+    pub fn tab_anchor(&self, tab_id: TabId) -> Option<AnchorRect> {
+        self.tab_anchors.peek().get(&tab_id).copied()
+    }
+
+    pub fn set_folder_anchor(&self, folder_id: FolderId, rect: AnchorRect) {
+        let mut anchors = self.folder_anchors;
+        if anchors.peek().get(&folder_id).copied() != Some(rect) {
+            anchors.write().insert(folder_id, rect);
+        }
+    }
+
+    pub fn folder_anchor(&self, folder_id: FolderId) -> Option<AnchorRect> {
+        self.folder_anchors.peek().get(&folder_id).copied()
+    }
     /// Begins inline renaming for `tab_id` seeded with its current display title.
     pub fn start_tab_rename(&self, tab_id: TabId, initial_title: String) {
         let mut folder = self.renaming_folder;
@@ -332,6 +359,8 @@ pub fn use_provide_sidebar_state() -> SidebarViewState {
     let compact_ignore_next_hover = use_state(|| false);
     let compact_hide_seq = use_state(|| 0u64);
     let compact_flash_seq = use_state(|| 0u64);
+    let tab_anchors = use_state(HashMap::<TabId, AnchorRect>::new);
+    let folder_anchors = use_state(HashMap::<FolderId, AnchorRect>::new);
 
     use_provide_context(|| SidebarViewState {
         renaming_tab,
@@ -362,6 +391,8 @@ pub fn use_provide_sidebar_state() -> SidebarViewState {
         compact_ignore_next_hover,
         compact_hide_seq,
         compact_flash_seq,
+        tab_anchors,
+        folder_anchors,
     })
 }
 

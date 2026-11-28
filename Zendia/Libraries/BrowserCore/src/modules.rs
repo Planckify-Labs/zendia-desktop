@@ -151,6 +151,10 @@ pub struct ExtensionInfo {
     pub badge_fg: Option<[u8; 4]>,
     pub options_url: Option<String>,
     pub popup_url: Option<String>,
+    /// Whether this extension declares a browser/toolbar action (`EXT-05`).
+    pub has_action: bool,
+    /// Whether this extension is built-in/system or hidden (`EXT-05`).
+    pub is_system: bool,
     pub toolbar_item_id: ContributionId,
     pub command: String,
 }
@@ -412,6 +416,8 @@ pub fn sample_extensions() -> Vec<ExtensionInfo> {
         badge_fg: None,
         options_url: None,
         popup_url: None,
+        has_action: true,
+        is_system: false,
         toolbar_item_id: ContributionId::new(SAMPLE_EXTENSION_TOOLBAR_ID),
         command: "extension.invoke_action".to_string(),
     }]

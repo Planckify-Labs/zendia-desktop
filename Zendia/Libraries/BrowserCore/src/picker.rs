@@ -14,17 +14,17 @@ use crate::address_bar::display_url_for_result;
 use crate::model::{BrowserModel, Tab, TabId};
 use std::collections::BTreeSet;
 
-/// Key labels assigned automatically in list layout (`j` and `k` stay free for vertical movement).
+/// Key labels assigned automatically in list and grid layouts (`j` and `k` stay free for movement; `ZendiaPicker.sys.mjs:8`).
 pub const LIST_KEY_LABELS: &str = "asdfghlqweruiopzxcvbnmty";
 
-/// Key labels assigned automatically in grid layout (`h`, `j`, `k`, and `l` stay free for 2D movement).
-pub const GRID_KEY_LABELS: &str = "asdfgqweruiopzxcvbnmty";
+/// Key labels assigned automatically in grid layout (identical to [`LIST_KEY_LABELS`] in the fork, `PIC-01`).
+pub const GRID_KEY_LABELS: &str = LIST_KEY_LABELS;
 
-/// Default footer hint shown in list-layout pickers.
+/// Default footer hint shown in list-layout pickers (`ZendiaPicker.sys.mjs:176`).
 pub const DEFAULT_LIST_HINT: &str = "j/k move · Enter pick · label picks · Esc cancel";
 
-/// Default footer hint shown in grid-layout pickers.
-pub const DEFAULT_GRID_HINT: &str = "h/j/k/l move · Enter pick · label picks · Esc cancel";
+/// Default footer hint shown in grid-layout pickers (identical to [`DEFAULT_LIST_HINT`] in the fork, `PIC-01`).
+pub const DEFAULT_GRID_HINT: &str = DEFAULT_LIST_HINT;
 
 /// Default number of columns in a grid-layout picker (matching Zendia's 3-column grid).
 pub const DEFAULT_GRID_COLUMNS: usize = 3;
@@ -81,6 +81,8 @@ pub struct PickerItem {
     pub detail: Option<String>,
     /// Optional icon name from `ICON_TABLE` or a known brand emblem id (e.g. `agent-claude`).
     pub icon: Option<String>,
+    /// Optional rich WebExtension icon payload (`EXT-05`).
+    pub icon_data: Option<crate::modules::ExtensionIcon>,
     /// Optional favicon/brand badge RGB tint for list-row icon badges.
     pub icon_badge_rgb: Option<(u8, u8, u8)>,
     /// Optional per-item accent color used for the glow on a selected grid tile.
@@ -110,6 +112,7 @@ impl PickerItem {
             title: title.into(),
             detail: None,
             icon: None,
+            icon_data: None,
             icon_badge_rgb: None,
             accent_rgb: None,
             icon_fill: false,
@@ -130,6 +133,11 @@ impl PickerItem {
 
     pub fn icon(mut self, icon: impl Into<String>) -> Self {
         self.icon = Some(icon.into());
+        self
+    }
+
+    pub fn icon_data(mut self, icon_data: Option<crate::modules::ExtensionIcon>) -> Self {
+        self.icon_data = icon_data;
         self
     }
 
@@ -213,7 +221,7 @@ impl PickerRequest {
             items,
             initial_selected: 0,
             hint,
-            filterable: true,
+            filterable: false,
         }
     }
 
@@ -324,28 +332,20 @@ pub fn filter_picker_items(request: &PickerRequest, query: &str) -> Vec<PickerIt
         .collect()
 }
 
-/// Finds the index of the first item matching a single-key jump badge (case-sensitive, falling back to ASCII lowercase).
+/// Finds the index of the first item matching a single-key jump badge (case-sensitive, matching `ZendiaPicker.sys.mjs:218`).
 pub fn find_item_by_key_badge(items: &[PickerItem], pressed: &str) -> Option<usize> {
     if pressed.is_empty() {
         return None;
     }
-    items
-        .iter()
-        .position(|item| item.key.as_deref() == Some(pressed))
-        .or_else(|| {
-            let lower = pressed.to_ascii_lowercase();
-            items
-                .iter()
-                .position(|item| item.key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&lower)))
-        })
+    items.iter().position(|item| item.key.as_deref() == Some(pressed))
 }
 
-/// Steps the cursor inside a list or grid picker by `(dx, dy)` with clean wrapping.
+/// Steps the cursor inside a list or grid picker with clean wrapping (`ZendiaPicker.sys.mjs:204-216`, `PIC-01`).
 pub fn step_picker_cursor(
     current: usize,
     count: usize,
-    layout: PickerLayout,
-    columns: usize,
+    _layout: PickerLayout,
+    _columns: usize,
     dx: isize,
     dy: isize,
 ) -> Option<usize> {
@@ -353,33 +353,9 @@ pub fn step_picker_cursor(
         return None;
     }
     let idx = current.min(count - 1);
-    match layout {
-        PickerLayout::List => {
-            let delta = if dy != 0 { dy } else { dx };
-            let next = (idx as isize + delta).rem_euclid(count as isize) as usize;
-            Some(next)
-        }
-        PickerLayout::Grid => {
-            let cols = columns.max(1);
-            if dx != 0 {
-                let next = (idx as isize + dx).rem_euclid(count as isize) as usize;
-                return Some(next);
-            }
-            if dy != 0 {
-                let rows = count.div_ceil(cols);
-                let col = idx % cols;
-                let mut row = idx / cols;
-                for _ in 0..rows {
-                    row = (row as isize + dy).rem_euclid(rows as isize) as usize;
-                    let candidate = row * cols + col;
-                    if candidate < count {
-                        return Some(candidate);
-                    }
-                }
-            }
-            Some(idx)
-        }
-    }
+    let delta = if dy != 0 { dy } else { dx };
+    let next = (idx as isize + delta).rem_euclid(count as isize) as usize;
+    Some(next)
 }
 
 fn tab_picker_detail(tab: &Tab, active_tab: Option<TabId>, suffix: Option<&str>) -> String {
@@ -561,14 +537,14 @@ pub fn build_agents_picker(model: &BrowserModel) -> PickerRequest {
                 "Not installed".to_string()
             };
 
-            let mut item = PickerItem::new(format!("agent.{}", spec.id), spec.name, "panel.toggle")
+            let mut item = PickerItem::new(format!("agent.{}", spec.id), spec.name, "agent.select_and_open")
                 .detail(detail)
                 .icon(spec.icon)
                 .accent_rgb(spec.accent_rgb)
                 .icon_fill(spec.icon_fill)
                 .enabled(installed)
                 .dimmed(!installed)
-                .arg("panel_id", "zendia.agent");
+                .arg("agent_id", spec.id);
 
             if !installed {
                 item = item.tooltip(spec.install_hint);
@@ -606,13 +582,15 @@ mod tests {
         assert_eq!(list_items[1].key.as_deref(), Some("a"));
         assert_eq!(list_items[2].key.as_deref(), Some("d"));
 
-        let mut grid_items: Vec<PickerItem> = (0..6)
+        let mut grid_items: Vec<PickerItem> = (0..8)
             .map(|i| PickerItem::new(format!("g{i}"), format!("Item {i}"), "noop"))
             .collect();
         assign_key_badges(&mut grid_items, PickerLayout::Grid);
         let keys: Vec<&str> = grid_items.iter().filter_map(|i| i.key.as_deref()).collect();
-        assert_eq!(keys, vec!["a", "s", "d", "f", "g", "q"]);
-        assert!(!keys.contains(&"h") && !keys.contains(&"j") && !keys.contains(&"k") && !keys.contains(&"l"));
+        assert_eq!(keys, vec!["a", "s", "d", "f", "g", "h", "l", "q"]);
+        assert!(!keys.contains(&"j") && !keys.contains(&"k"));
+        assert_eq!(find_item_by_key_badge(&grid_items, "h"), Some(5));
+        assert_eq!(find_item_by_key_badge(&grid_items, "H"), None);
     }
 
     #[test]
@@ -660,15 +638,11 @@ mod tests {
         assert_eq!(step_picker_cursor(3, 4, PickerLayout::List, 1, 0, 1), Some(0));
         assert_eq!(step_picker_cursor(0, 0, PickerLayout::List, 1, 0, 1), None);
 
-        // 3x2 grid (6 items): h/l move horizontally, j/k move across rows in same column.
-        assert_eq!(step_picker_cursor(0, 6, PickerLayout::Grid, 3, 1, 0), Some(1));
-        assert_eq!(step_picker_cursor(0, 6, PickerLayout::Grid, 3, -1, 0), Some(5));
-        assert_eq!(step_picker_cursor(1, 6, PickerLayout::Grid, 3, 0, 1), Some(4));
-        assert_eq!(step_picker_cursor(4, 6, PickerLayout::Grid, 3, 0, 1), Some(1));
-
-        // Partial last row (5 items in 3 columns): column 2 only has row 0 (index 2).
-        assert_eq!(step_picker_cursor(2, 5, PickerLayout::Grid, 3, 0, 1), Some(2));
-        assert_eq!(step_picker_cursor(1, 5, PickerLayout::Grid, 3, 0, 1), Some(4));
+        // Grid also steps linearly through tiles in reading order with wrapping (`PIC-01`, `ZendiaPicker.sys.mjs:204-216`).
+        assert_eq!(step_picker_cursor(0, 6, PickerLayout::Grid, 3, 0, 1), Some(1));
+        assert_eq!(step_picker_cursor(0, 6, PickerLayout::Grid, 3, 0, -1), Some(5));
+        assert_eq!(step_picker_cursor(2, 6, PickerLayout::Grid, 3, 0, 1), Some(3));
+        assert_eq!(step_picker_cursor(5, 6, PickerLayout::Grid, 3, 0, 1), Some(0));
     }
 
     #[test]

@@ -414,9 +414,43 @@ impl Component for AgentModelCard {
             let plain = !e
                 .modifiers
                 .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META);
+            let ctrl_only = e.modifiers == Modifiers::CONTROL;
+            let is_ctrl_cancel = ctrl_only
+                && (matches!(e.code, Code::KeyC | Code::BracketLeft)
+                    || matches!(&e.key, Key::Character(c) if c.eq_ignore_ascii_case("c") || c == "["));
+            let is_ctrl_next = ctrl_only
+                && (e.code == Code::KeyN || matches!(&e.key, Key::Character(c) if c.eq_ignore_ascii_case("n")));
+            let is_ctrl_prev = ctrl_only
+                && (e.code == Code::KeyP || matches!(&e.key, Key::Character(c) if c.eq_ignore_ascii_case("p")));
+
             if *submenu_open.peek() && !is_list_view {
                 let count = contexts_for_keys.len();
                 if count == 0 {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    return;
+                }
+                if is_ctrl_cancel {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    submenu_open.set(false);
+                    if let Some(mut ds) = dock_state {
+                        ds.model_card_open.set_if_modified(true);
+                    }
+                    return;
+                }
+                if is_ctrl_next {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    let next = (*sub_active.peek() + 1) % count;
+                    sub_active.set(next);
+                    return;
+                }
+                if is_ctrl_prev {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    let cur = *sub_active.peek();
+                    sub_active.set((cur + count - 1) % count);
                     return;
                 }
                 match &e.key {
@@ -429,13 +463,33 @@ impl Component for AgentModelCard {
                             ds.model_card_open.set_if_modified(true);
                         }
                     }
+                    Key::Character(ch) if plain && ch == "h" => {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        submenu_open.set(false);
+                        if let Some(mut ds) = dock_state {
+                            ds.model_card_open.set_if_modified(true);
+                        }
+                    }
                     Key::Named(NamedKey::ArrowDown) => {
                         e.stop_propagation();
                         e.prevent_default();
                         let next = (*sub_active.peek() + 1) % count;
                         sub_active.set(next);
                     }
+                    Key::Character(ch) if plain && ch == "j" => {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        let next = (*sub_active.peek() + 1) % count;
+                        sub_active.set(next);
+                    }
                     Key::Named(NamedKey::ArrowUp) => {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        let cur = *sub_active.peek();
+                        sub_active.set((cur + count - 1) % count);
+                    }
+                    Key::Character(ch) if plain && ch == "k" => {
                         e.stop_propagation();
                         e.prevent_default();
                         let cur = *sub_active.peek();
@@ -473,13 +527,56 @@ impl Component for AgentModelCard {
                         }
                         submenu_open.set(false);
                     }
-                    _ => {}
+                    _ => {
+                        e.stop_propagation();
+                        e.prevent_default();
+                    }
                 }
                 return;
             }
 
             if is_list_view {
                 let count = entries_for_keys.len();
+                if is_ctrl_cancel {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    if let Some(mut ds) = dock_state {
+                        ds.model_card_list_view.set(false);
+                        ds.model_card_open.set_if_modified(true);
+                    }
+                    return;
+                }
+                if is_ctrl_next && count > 0 {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    let next = (*list_active.peek() + 1) % count;
+                    list_active.set(next);
+                    let content_h = count as f32 * (LIST_ROW_HEIGHT + 2.0) + 32.0;
+                    scroll_item_into_view(
+                        &mut list_scroll,
+                        next as f32 * (LIST_ROW_HEIGHT + 2.0),
+                        LIST_ROW_HEIGHT,
+                        list_max_h,
+                        content_h,
+                    );
+                    return;
+                }
+                if is_ctrl_prev && count > 0 {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    let cur = *list_active.peek();
+                    let next = (cur + count - 1) % count;
+                    list_active.set(next);
+                    let content_h = count as f32 * (LIST_ROW_HEIGHT + 2.0) + 32.0;
+                    scroll_item_into_view(
+                        &mut list_scroll,
+                        next as f32 * (LIST_ROW_HEIGHT + 2.0),
+                        LIST_ROW_HEIGHT,
+                        list_max_h,
+                        content_h,
+                    );
+                    return;
+                }
                 match &e.key {
                     Key::Named(NamedKey::Escape) => {
                         e.stop_propagation();
@@ -553,12 +650,24 @@ impl Component for AgentModelCard {
                             }
                         }
                     }
-                    _ => {}
+                    _ => {
+                        e.stop_propagation();
+                    }
                 }
                 return;
             }
 
-            // Main view keys (standard keys only).
+            // Main view keys (`AGK-02`).
+            if is_ctrl_cancel {
+                e.stop_propagation();
+                e.prevent_default();
+                if let Some(mut ds) = dock_state {
+                    ds.model_card_open.set(false);
+                    ds.model_card_list_view.set(false);
+                }
+                composer_id.request_focus();
+                return;
+            }
             let stepping = efforts_for_keys.len() > 1;
             let cur_idx = efforts_for_keys
                 .iter()
@@ -586,7 +695,31 @@ impl Component for AgentModelCard {
                         });
                     }
                 }
+                Key::Character(ch) if plain && ch == "h" && stepping => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    effort_kbd_focus.set_if_modified(true);
+                    let next = cur_idx.saturating_sub(1);
+                    if let Some(&effort) = efforts_for_keys.get(next) {
+                        core_keys.invoke_or_log(Command::AgentSetEffort {
+                            agent_id: Some(agent_for_keys.clone()),
+                            effort: Some(effort),
+                        });
+                    }
+                }
                 Key::Named(NamedKey::ArrowRight) if stepping => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    effort_kbd_focus.set_if_modified(true);
+                    let next = (cur_idx + 1).min(efforts_for_keys.len() - 1);
+                    if let Some(&effort) = efforts_for_keys.get(next) {
+                        core_keys.invoke_or_log(Command::AgentSetEffort {
+                            agent_id: Some(agent_for_keys.clone()),
+                            effort: Some(effort),
+                        });
+                    }
+                }
+                Key::Character(ch) if plain && ch == "l" && stepping => {
                     e.stop_propagation();
                     e.prevent_default();
                     effort_kbd_focus.set_if_modified(true);
@@ -609,7 +742,29 @@ impl Component for AgentModelCard {
                         });
                     }
                 }
+                Key::Character(ch) if plain && ch == "0" && stepping => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    effort_kbd_focus.set_if_modified(true);
+                    if let Some(&effort) = efforts_for_keys.first() {
+                        core_keys.invoke_or_log(Command::AgentSetEffort {
+                            agent_id: Some(agent_for_keys.clone()),
+                            effort: Some(effort),
+                        });
+                    }
+                }
                 Key::Named(NamedKey::End) if stepping => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    effort_kbd_focus.set_if_modified(true);
+                    if let Some(&effort) = efforts_for_keys.last() {
+                        core_keys.invoke_or_log(Command::AgentSetEffort {
+                            agent_id: Some(agent_for_keys.clone()),
+                            effort: Some(effort),
+                        });
+                    }
+                }
+                Key::Character(ch) if plain && ch == "$" && stepping => {
                     e.stop_propagation();
                     e.prevent_default();
                     effort_kbd_focus.set_if_modified(true);
@@ -632,14 +787,17 @@ impl Component for AgentModelCard {
                         ds.model_card_list_view.set(true);
                     }
                 }
-                Key::Character(ch) if plain && ch == " " => {
+                Key::Character(ch) if plain && matches!(ch.as_str(), " " | "j" | "k") => {
                     e.stop_propagation();
                     e.prevent_default();
                     if let Some(mut ds) = dock_state {
                         ds.model_card_list_view.set(true);
                     }
                 }
-                _ => {}
+                _ => {
+                    e.stop_propagation();
+                    e.prevent_default();
+                }
             }
         };
 

@@ -1534,8 +1534,12 @@ fn format_command_detail(command: &Command) -> String {
         Command::TabClose { tab_id, force } => format!("tab={tab_id:?} force={force}"),
         Command::TabActivate { tab_id } => format!("tab={}", tab_id.0),
         Command::NavigationLoadUrl { input, .. } => input.clone(),
-        Command::AddressBarOpen { new_tab, initial_query } => {
-            format!("new_tab={new_tab} query={initial_query:?}")
+        Command::AddressBarOpen {
+            new_tab,
+            initial_query,
+            filter,
+        } => {
+            format!("new_tab={new_tab} query={initial_query:?} filter={filter:?}")
         }
         Command::AddressBarSubmit { input, new_tab } => format!("\"{input}\" new_tab={new_tab}"),
         Command::AddressBarSwitchToTab { tab_id } => format!("tab={}", tab_id.0),
@@ -1591,8 +1595,8 @@ fn format_command_detail(command: &Command) -> String {
         Command::SidebarSetSide { side } => format!("side={side:?}"),
         Command::SidebarSetWidth { width } => format!("width={width:.0}"),
         Command::VimSetEnabled { enabled } => format!("enabled={enabled}"),
-        Command::ExplorerMove { direction } | Command::ToolbarFocusMove { direction } => {
-            format!("direction={}", direction.as_str())
+        Command::ExplorerMove { direction, count } | Command::ToolbarFocusMove { direction, count } => {
+            format!("direction={} count={}", direction.as_str(), count.unwrap_or(1))
         }
         Command::ExplorerSelect { range } => format!("range={range}"),
         Command::FocusHintInput { key } => format!("key={key:?}"),

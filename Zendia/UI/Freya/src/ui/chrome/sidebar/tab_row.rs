@@ -500,6 +500,11 @@ impl Component for VerticalTabRow {
                 .scale(row_scale)
                 .center()
                 .cursor(CursorIcon::Pointer)
+                .on_sized(move |e: Event<SizedEventData>| {
+                    if let Some(state) = sidebar_state {
+                        state.set_tab_anchor(tab_id, crate::ui::chrome::menus::AnchorRect::from_area(e.area));
+                    }
+                })
                 .on_pointer_enter(move |e| {
                     hovered.set_if_modified(true);
                     fb_enter(e);
@@ -767,6 +772,9 @@ impl Component for VerticalTabRow {
             })
             .on_sized(move |e: Event<SizedEventData>| {
                 row_bounds.set_if_modified((e.area.min_y(), e.area.height().max(1.0)));
+                if let Some(state) = sidebar_state {
+                    state.set_tab_anchor(tab_id, crate::ui::chrome::menus::AnchorRect::from_area(e.area));
+                }
             })
             .on_pointer_enter(move |e| {
                 hovered.set_if_modified(true);

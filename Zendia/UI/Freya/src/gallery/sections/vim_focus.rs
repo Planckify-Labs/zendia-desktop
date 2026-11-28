@@ -71,6 +71,8 @@ fn add_grid_group(model: &mut BrowserModel) {
         direction: SplitDirection::Grid,
         ratios: split::default_ratios(SplitDirection::Grid, tab_ids.len()),
         tab_ids,
+        tree: None,
+        zoomed_tab: None,
     }];
 }
 
@@ -96,8 +98,7 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
                     FocusTarget::Tab(DOCS),
                 ],
                 visual_anchor: Some(FocusTarget::Tab(RELEASES)),
-                hints: None,
-                window_carry: None,
+                ..FocusState::default()
             };
         }
         "explorer-folder" => {
@@ -105,10 +106,7 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
             model.focus = FocusState {
                 surface: Some(FocusSurface::Explorer),
                 cursor: Some(FocusTarget::Folder(FOLDER_UI)),
-                selection: Vec::new(),
-                visual_anchor: None,
-                hints: None,
-                window_carry: None,
+                ..FocusState::default()
             };
         }
         "explorer-split-group" => {
@@ -117,10 +115,7 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
             model.focus = FocusState {
                 surface: Some(FocusSurface::Explorer),
                 cursor: Some(FocusTarget::SplitGroup(SPLIT_GROUP)),
-                selection: Vec::new(),
-                visual_anchor: None,
-                hints: None,
-                window_carry: None,
+                ..FocusState::default()
             };
         }
         "hints-sidebar" => {
@@ -129,10 +124,8 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
             model.focus = FocusState {
                 surface: Some(FocusSurface::Explorer),
                 cursor: Some(FocusTarget::Tab(DOCS)),
-                selection: Vec::new(),
-                visual_anchor: None,
                 hints: Some(HintSession::new(FocusSurface::Explorer, targets)),
-                window_carry: None,
+                ..FocusState::default()
             };
         }
         "hints-narrowed" => {
@@ -151,10 +144,8 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
             model.focus = FocusState {
                 surface: Some(FocusSurface::Explorer),
                 cursor: Some(FocusTarget::Tab(DOCS)),
-                selection: Vec::new(),
-                visual_anchor: None,
                 hints: Some(session),
-                window_carry: None,
+                ..FocusState::default()
             };
         }
         "toolbar-button" => {
@@ -162,10 +153,7 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
             model.focus = FocusState {
                 surface: Some(FocusSurface::Toolbar),
                 cursor: Some(FocusTarget::ToolbarItem(ContributionId::new("builtin.reload"))),
-                selection: Vec::new(),
-                visual_anchor: None,
-                hints: None,
-                window_carry: None,
+                ..FocusState::default()
             };
         }
         "toolbar-urlbar" => {
@@ -173,10 +161,7 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
             model.focus = FocusState {
                 surface: Some(FocusSurface::Toolbar),
                 cursor: Some(FocusTarget::ToolbarItem(ContributionId::new("builtin.url_bar"))),
-                selection: Vec::new(),
-                visual_anchor: None,
-                hints: None,
-                window_carry: None,
+                ..FocusState::default()
             };
         }
         "window-grid" => {
@@ -185,10 +170,7 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
             model.focus = FocusState {
                 surface: Some(FocusSurface::Window),
                 cursor: Some(FocusTarget::Pane(DOCS)),
-                selection: Vec::new(),
-                visual_anchor: None,
-                hints: None,
-                window_carry: None,
+                ..FocusState::default()
             };
         }
         "window-landing" => {
@@ -210,14 +192,13 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
             model.focus = FocusState {
                 surface: Some(FocusSurface::Window),
                 cursor: Some(FocusTarget::Pane(DOCS)),
-                selection: Vec::new(),
-                visual_anchor: None,
-                hints: None,
                 window_carry: Some(WindowCarryState {
                     carried_tab: DOCS,
+                    adding: false,
                     targets,
                     selected,
                 }),
+                ..FocusState::default()
             };
         }
         _ => {
@@ -226,10 +207,7 @@ fn configure_fixture(state_id: &str, gallery_core: &GalleryCore, sidebar_state: 
             model.focus = FocusState {
                 surface: Some(FocusSurface::Explorer),
                 cursor: Some(FocusTarget::Tab(DOCS)),
-                selection: Vec::new(),
-                visual_anchor: None,
-                hints: None,
-                window_carry: None,
+                ..FocusState::default()
             };
         }
     }
@@ -322,12 +300,14 @@ impl Component for VimFocusSection {
                     "Prev",
                     Command::ToolbarFocusMove {
                         direction: FocusDirection::Previous,
+                        count: Some(1),
                     },
                 ),
                 chip(
                     "Next",
                     Command::ToolbarFocusMove {
                         direction: FocusDirection::Next,
+                        count: Some(1),
                     },
                 ),
                 chip("Activate", Command::ToolbarFocusActivate),
@@ -351,12 +331,14 @@ impl Component for VimFocusSection {
                     "Up",
                     Command::ExplorerMove {
                         direction: FocusDirection::Previous,
+                        count: Some(1),
                     },
                 ),
                 chip(
                     "Down",
                     Command::ExplorerMove {
                         direction: FocusDirection::Next,
+                        count: Some(1),
                     },
                 ),
                 chip("Select", Command::ExplorerSelect { range: false }),

@@ -24,6 +24,7 @@ use hub_protocol::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Measured layout rectangle of a [`PageSurface`](crate::ui::page::PageSurface) in logical window coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -402,44 +403,191 @@ impl PageSurfaceTracker {
     }
 }
 
+/// Coordinates `RefCell`-backed surface focus state without holding any borrow across nested mutations or Freya calls.
+#[derive(Clone)]
+struct SurfaceFocusCoordinator<Id: Copy + PartialEq = AccessibilityId> {
+    tracker: Rc<RefCell<PageSurfaceTracker>>,
+    surface_a11y: Rc<RefCell<HashMap<u64, Id>>>,
+    preferred_view: Rc<RefCell<Option<u64>>>,
+    pending_focus_view: Rc<RefCell<Option<u64>>>,
+    core: Rc<RefCell<Option<Arc<dyn zendia_browser_core::BrowserCore>>>>,
+}
+
+impl<Id: Copy + PartialEq> SurfaceFocusCoordinator<Id> {
+    fn new(sink: Rc<dyn PageHubSink>) -> Self {
+        Self {
+            tracker: Rc::new(RefCell::new(PageSurfaceTracker::new(sink))),
+            surface_a11y: Rc::new(RefCell::new(HashMap::new())),
+            preferred_view: Rc::new(RefCell::new(None)),
+            pending_focus_view: Rc::new(RefCell::new(None)),
+            core: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    fn set_core(&self, core: Arc<dyn zendia_browser_core::BrowserCore>) {
+        *self.core.borrow_mut() = Some(core);
+    }
+
+    fn record_focused_surface(&self, view_id: u64) {
+        *self.preferred_view.borrow_mut() = Some(view_id);
+        self.tracker.borrow_mut().set_focused_view(Some(view_id));
+    }
+
+    fn register_view_surface(&self, view_id: u64, a11y_id: Id, has_last_focused: bool) -> bool {
+        self.surface_a11y.borrow_mut().insert(view_id, a11y_id);
+        let pending_matches = *self.pending_focus_view.borrow() == Some(view_id);
+        let none_focused = !has_last_focused && self.tracker.borrow().focused_view().is_none();
+        if pending_matches || none_focused {
+            *self.pending_focus_view.borrow_mut() = None;
+            self.record_focused_surface(view_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn unregister_view_surface(&self, view_id: u64, a11y_id: Id) {
+        let mut map = self.surface_a11y.borrow_mut();
+        if map.get(&view_id) == Some(&a11y_id) {
+            map.remove(&view_id);
+        }
+    }
+
+    fn focus_view(&self, view_id: u64) -> Option<Id> {
+        *self.preferred_view.borrow_mut() = Some(view_id);
+        let existing_a11y = self.surface_a11y.borrow().get(&view_id).copied();
+        if let Some(a11y_id) = existing_a11y {
+            *self.pending_focus_view.borrow_mut() = None;
+            self.record_focused_surface(view_id);
+            Some(a11y_id)
+        } else {
+            *self.pending_focus_view.borrow_mut() = Some(view_id);
+            None
+        }
+    }
+
+    fn active_model_view_id(&self) -> Option<u64> {
+        let core = self.core.borrow().clone()?;
+        let model = core.model();
+        let tid = model.effective_keyed_tab()?;
+        Some(model.tab(tid).and_then(|t| t.view_id).unwrap_or(tid.0))
+    }
+
+    fn request_focus_active_surface(&self) -> Option<(u64, Id)> {
+        if let Some(vid) = self.active_model_view_id() {
+            return self.focus_view(vid).map(|a11y_id| (vid, a11y_id));
+        }
+        let preferred = {
+            let vid = *self.preferred_view.borrow();
+            vid.and_then(|v| self.surface_a11y.borrow().get(&v).copied().map(|id| (v, id)))
+        };
+        if let Some((vid, a11y_id)) = preferred {
+            self.record_focused_surface(vid);
+            return Some((vid, a11y_id));
+        }
+        None
+    }
+
+    fn remove_closed_view(&self, view_id: u64) {
+        self.surface_a11y.borrow_mut().remove(&view_id);
+        let clear_pref = *self.preferred_view.borrow() == Some(view_id);
+        if clear_pref {
+            *self.preferred_view.borrow_mut() = None;
+        }
+        let clear_pend = *self.pending_focus_view.borrow() == Some(view_id);
+        if clear_pend {
+            *self.pending_focus_view.borrow_mut() = None;
+        }
+        self.tracker.borrow_mut().remove_closed_view(view_id);
+    }
+}
+
 /// Freya context shared by all [`PageSurface`](crate::ui::page::PageSurface) instances and the Hub message handler.
 #[derive(Clone)]
 pub struct PageSurfaceContext {
     surfaces: State<HashMap<u64, PageSurfaceData>>,
-    tracker: Rc<RefCell<PageSurfaceTracker>>,
     last_focused_a11y: State<Option<AccessibilityId>>,
+    focus_coord: SurfaceFocusCoordinator,
 }
 
 impl PartialEq for PageSurfaceContext {
     fn eq(&self, other: &Self) -> bool {
         self.surfaces == other.surfaces
-            && Rc::ptr_eq(&self.tracker, &other.tracker)
+            && Rc::ptr_eq(&self.focus_coord.tracker, &other.focus_coord.tracker)
             && self.last_focused_a11y == other.last_focused_a11y
     }
 }
 
 impl PageSurfaceContext {
+    pub fn set_core(&self, core: Arc<dyn zendia_browser_core::BrowserCore>) {
+        self.focus_coord.set_core(core);
+    }
+
     pub fn surfaces(&self) -> State<HashMap<u64, PageSurfaceData>> {
         self.surfaces
     }
 
     pub fn tracker(&self) -> &Rc<RefCell<PageSurfaceTracker>> {
-        &self.tracker
+        &self.focus_coord.tracker
     }
 
     pub fn record_focused_surface(&self, a11y_id: AccessibilityId, view_id: u64) {
         let mut last = self.last_focused_a11y;
         last.set_if_modified(Some(a11y_id));
-        self.tracker.borrow_mut().set_focused_view(Some(view_id));
+        self.focus_coord.record_focused_surface(view_id);
     }
 
     pub fn clear_focused_view_if(&self, view_id: u64) {
-        self.tracker.borrow_mut().clear_focused_view_if(view_id);
+        self.focus_coord.tracker.borrow_mut().clear_focused_view_if(view_id);
     }
 
-    /// Requests Freya focus on the most recently active page surface (e.g. after submitting a URL in the toolbar).
+    /// Registers a mounted [`PageSurface`]'s `a11y_id` for `view_id`, granting focus immediately if `view_id` was
+    /// queued for focus or if no surface in the window has been focused yet (`INS-04`, `EXT-03`).
+    pub fn register_view_surface(&self, view_id: u64, a11y_id: AccessibilityId) {
+        let has_last = self.last_focused_a11y.peek().is_some();
+        if self.focus_coord.register_view_surface(view_id, a11y_id, has_last) {
+            a11y_id.request_focus();
+            let mut last = self.last_focused_a11y;
+            last.set_if_modified(Some(a11y_id));
+        }
+    }
+
+    pub fn unregister_view_surface(&self, view_id: u64, a11y_id: AccessibilityId) {
+        self.focus_coord.unregister_view_surface(view_id, a11y_id);
+    }
+
+    /// Moves keyboard focus to `view_id`'s [`PageSurface`] (or queues it if the surface mounts on the next render).
+    pub fn focus_view(&self, view_id: u64) {
+        if let Some(a11y_id) = self.focus_coord.focus_view(view_id) {
+            a11y_id.request_focus();
+            let mut last = self.last_focused_a11y;
+            last.set_if_modified(Some(a11y_id));
+        }
+    }
+
+    /// Moves keyboard focus to the surface displaying `model.effective_keyed_tab()` (`INS-04`, `PG-02`, `EXT-03`).
+    pub fn focus_effective_model_surface(&self, model: &zendia_browser_core::model::BrowserModel) {
+        let target_view = model
+            .effective_keyed_tab()
+            .and_then(|tid| model.tab(tid).and_then(|t| t.view_id).or(Some(tid.0)));
+        if let Some(view_id) = target_view {
+            self.focus_view(view_id);
+        }
+    }
+
+    /// Requests Freya focus on the active mounted page surface (e.g. after closing a picker, panel, library, or URL bar).
     pub fn request_focus_active_surface(&self) {
-        if let Some(a11y_id) = *self.last_focused_a11y.peek() {
+        if let Some((_vid, a11y_id)) = self.focus_coord.request_focus_active_surface() {
+            a11y_id.request_focus();
+            let mut last = self.last_focused_a11y;
+            last.set_if_modified(Some(a11y_id));
+            return;
+        }
+        if self.focus_coord.active_model_view_id().is_some() {
+            return;
+        }
+        let fallback = *self.last_focused_a11y.peek();
+        if let Some(a11y_id) = fallback {
             a11y_id.request_focus();
         }
     }
@@ -452,7 +600,7 @@ impl PageSurfaceContext {
     }
 
     pub fn remove_closed_view(&self, view_id: u64) {
-        self.tracker.borrow_mut().remove_closed_view(view_id);
+        self.focus_coord.remove_closed_view(view_id);
         let mut surfaces = self.surfaces;
         surfaces.write().remove(&view_id);
     }
@@ -462,12 +610,12 @@ impl PageSurfaceContext {
 pub fn use_provide_page_surfaces() -> PageSurfaceContext {
     let surfaces = use_state(HashMap::<u64, PageSurfaceData>::new);
     let last_focused_a11y = use_state(|| None::<AccessibilityId>);
-    let tracker = use_hook(|| Rc::new(RefCell::new(PageSurfaceTracker::new(Rc::new(LiveHubSink)))));
+    let focus_coord = use_hook(|| SurfaceFocusCoordinator::new(Rc::new(LiveHubSink)));
 
     use_provide_context(|| PageSurfaceContext {
         surfaces,
-        tracker,
         last_focused_a11y,
+        focus_coord,
     })
 }
 
@@ -601,5 +749,41 @@ mod tests {
         tracker.remove_closed_view(20);
         assert_eq!(tracker.focused_view(), None);
         assert!(sink.take_calls().is_empty());
+    }
+
+    #[test]
+    fn focus_coordinator_never_double_borrows_on_panel_close_refocus() {
+        let sink = Rc::new(MockHubSink::default());
+        let coord = SurfaceFocusCoordinator::<u64>::new(Rc::clone(&sink) as Rc<dyn PageHubSink>);
+        coord.tracker.borrow_mut().mount_surface(1);
+        let _ = sink.take_calls();
+
+        let a11y_1 = 101u64;
+        assert!(coord.register_view_surface(1, a11y_1, false));
+        assert_eq!(sink.take_calls(), vec!["focus:1:true", "active:Some(1)"]);
+
+        // Without `core` attached (hits the `preferred_view` fallback path that previously panicked on panel close).
+        coord.tracker.borrow_mut().clear_focused_view_if(1);
+        let _ = sink.take_calls();
+        assert_eq!(coord.request_focus_active_surface(), Some((1, a11y_1)));
+        assert_eq!(sink.take_calls(), vec!["focus:1:true", "active:Some(1)"]);
+
+        // With `StubBackend` attached as `core` (resolves the active tab's view and focuses it cleanly).
+        use zendia_browser_core::BrowserCore;
+        let stub = Arc::new(zendia_browser_core::stub::StubBackend::new());
+        let active_vid = {
+            let model = stub.model();
+            let tid = model.effective_keyed_tab().expect("active tab");
+            model.tab(tid).and_then(|t| t.view_id).unwrap_or(tid.0)
+        };
+        coord.tracker.borrow_mut().mount_surface(active_vid);
+        let a11y_active = 102u64;
+        let _ = coord.register_view_surface(active_vid, a11y_active, true);
+        coord.set_core(stub);
+        let _ = sink.take_calls();
+
+        assert_eq!(coord.request_focus_active_surface(), Some((active_vid, a11y_active)));
+        coord.remove_closed_view(active_vid);
+        assert_eq!(*coord.preferred_view.borrow(), None);
     }
 }

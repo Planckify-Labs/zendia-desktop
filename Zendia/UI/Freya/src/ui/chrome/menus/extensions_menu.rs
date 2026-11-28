@@ -204,7 +204,12 @@ impl Component for ExtensionsMenuPanel {
             let core = core.clone();
             let extensions = extensions.clone();
             move |e: Event<KeyboardEventData>| {
-                let Some(action) = classify_list_key(&e, ListNavConfig::default()) else {
+                let vim_enabled = core.model().peek().vim_mode_enabled;
+                let Some(action) = classify_list_key(&e, ListNavConfig::default().with_vim_keys(vim_enabled)) else {
+                    if vim_enabled {
+                        e.stop_propagation();
+                        e.prevent_default();
+                    }
                     return;
                 };
                 e.stop_propagation();

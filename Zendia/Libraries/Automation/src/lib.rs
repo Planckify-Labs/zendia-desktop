@@ -38,6 +38,8 @@ pub enum JumpKind {
     Inputs,
     /// The controls of the page's CAPTCHA (`gc`, `<leader>cc`).
     Captcha,
+    /// Only the active CAPTCHA challenge's controls (when `s` transitions into a staying jump on a challenge pick).
+    Challenge,
 }
 
 impl JumpKind {
@@ -122,6 +124,24 @@ pub struct PageTarget {
     pub distance: f32,
     #[serde(default)]
     pub href: Option<String>,
+    /// Whether this target belongs to a CAPTCHA challenge (so picking it in `s` or `gc` keeps the jump open).
+    #[serde(default)]
+    pub challenge: bool,
+    /// Whether this CAPTCHA control is dragged rather than clicked (slider handle, puzzle piece, press-and-hold).
+    #[serde(default)]
+    pub drag: bool,
+    /// Whether this CAPTCHA control slides horizontally along a track.
+    #[serde(default)]
+    pub slider: bool,
+    /// The track box a slider handle slides along, in viewport CSS pixels.
+    #[serde(default)]
+    pub track: Option<ViewportRect>,
+    /// Whether this target is a CAPTCHA picture or canvas to open the keyboard cursor over.
+    #[serde(default)]
+    pub picture: bool,
+    /// What role this control plays inside a CAPTCHA (`verify`, `answer`, `reload`, `audio`, `visual`, `play`).
+    #[serde(default)]
+    pub purpose: Option<String>,
 }
 
 impl PageTarget {
@@ -139,11 +159,25 @@ impl PageTarget {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum AutomationRequest {
+    /// Installs the Automation World runtime into the document so focus, scroll, and yank listeners are active early.
+    Init {
+        #[serde(default)]
+        watch_mutations: bool,
+    },
     /// The targets of a jump; for [`JumpKind::Controls`] and [`JumpKind::Text`], those that match `pattern`.
     JumpScan {
         jump: JumpKind,
         #[serde(default)]
         pattern: String,
+        /// Scan only the top document without recursing into child frames (`EXT-01` popup hints).
+        #[serde(default)]
+        top_only: bool,
+        /// Include editable fields alongside other controls in [`JumpKind::Hints`] (`EXT-01` popup hints).
+        #[serde(default)]
+        include_fields: bool,
+        /// Observe DOM mutations in this document and push `page_moved` events (`EXT-01` popup hints).
+        #[serde(default)]
+        watch_mutations: bool,
     },
     /// Goes to a target of the last scan. `extend` grows the visual selection to a text target.
     JumpPick {
@@ -163,6 +197,10 @@ pub enum AutomationRequest {
         #[serde(default)]
         count: Option<u32>,
     },
+    InputFirst {
+        #[serde(default)]
+        count: Option<u32>,
+    },
     InputLast {
         #[serde(default)]
         count: Option<u32>,
@@ -172,9 +210,19 @@ pub enum AutomationRequest {
     },
     /// The focused field gives up the focus.
     BlurField,
+    /// `<C-u>`: deletes backward to the start of the current line without deleting a preceding line break.
+    EditDeleteToLineStart,
+    /// Deletes forward to the end of the current line without deleting a trailing line break.
+    EditDeleteToLineEnd,
+    /// Deletes one character forward in the focused field.
+    EditDeleteCharForward,
     VisualEnter,
     VisualExit,
     VisualYank,
+    /// Copies the active selection with full HTML and plain-text representations (`Ctrl+C`, `VIS-02`).
+    CopySelection,
+    /// Cuts the active editable selection via the page's clipboard handler (`Ctrl+X`, `YNK-02`).
+    CutSelection,
     VisualSwapEnds,
     VisualMove {
         motion: VisualMotion,
@@ -203,6 +251,24 @@ pub enum AutomationRequest {
     CaptchaAction {
         action: CaptchaOp,
     },
+    /// Queries the bounding areas of recognised CAPTCHAs on screen (`captchaAreas`) and solved token count.
+    CaptchaAreas,
+    /// Fills a local CAPTCHA answer field with `text` as user input (`captcha.fill`).
+    CaptchaFill {
+        text: String,
+    },
+    /// Dispatches a synthetic touch gesture stage (`start`, `move`, `end`) alongside mouse drag events (`CAP-05`, `CAP-06`).
+    DispatchTouch {
+        stage: String,
+        x: f32,
+        y: f32,
+        #[serde(default)]
+        reset_chain: bool,
+    },
+    /// Blurs any focused `iframe` in the top document and focuses the top window so keys stay on the page (`CAP-07`).
+    RefocusTop,
+    /// Toggles clean reader view on the current document (`<leader>uz`).
+    ToggleReaderMode,
 }
 
 fn default_count() -> u32 {
@@ -218,6 +284,23 @@ pub enum AutomationResponse {
         #[serde(default)]
         pattern: String,
         targets: Vec<PageTarget>,
+        /// Count of solved CAPTCHA token fields and visible solved widget marks on the page (`CAP-02`, `CAP-03`).
+        #[serde(default)]
+        captcha_tokens: u32,
+        /// Recognised CAPTCHA bounding boxes on screen when scanning a CAPTCHA jump (`CAP-05`).
+        #[serde(default)]
+        captcha_areas: Vec<ViewportRect>,
+        /// Top viewport `(innerWidth, innerHeight)` in CSS pixels.
+        #[serde(default)]
+        viewport: Option<(f32, f32)>,
+    },
+    /// Answer to [`AutomationRequest::CaptchaAreas`].
+    CaptchaAreas {
+        areas: Vec<ViewportRect>,
+        #[serde(default)]
+        captcha_tokens: u32,
+        #[serde(default)]
+        viewport: Option<(f32, f32)>,
     },
     /// A field took the focus (`mode` `i`), or a link is to open in a new tab (`url`).
     Activated {
@@ -228,15 +311,19 @@ pub enum AutomationResponse {
         #[serde(default)]
         message: Option<String>,
     },
-    /// A control to press where it is on top, at a point of the viewport in CSS pixels.
+    /// A control to press where it is on top, at a point of the viewport in CSS pixels (`ctrl` holds Ctrl for capital hints, `JMP-03`).
     Press {
         x: f32,
         y: f32,
+        #[serde(default)]
+        ctrl: bool,
     },
     VisualState {
         active: bool,
         #[serde(default)]
         yanked: Option<String>,
+        #[serde(default)]
+        copied_by_page: bool,
         #[serde(default)]
         caret: Option<ViewportRect>,
         /// `v` left the cursor collapsed: labels say where it lands.
@@ -256,6 +343,27 @@ pub enum AutomationResponse {
     },
     Cycle {
         index: usize,
+    },
+    /// Unsolicited or queried report of whether an editable element currently holds focus in the page.
+    EditableFocus {
+        editing: bool,
+    },
+    /// Unsolicited report that the page or one of its scrollers scrolled or resized.
+    PageMoved {
+        #[serde(default)]
+        scrolled: bool,
+    },
+    /// Unsolicited report of text copied or cut from a non-password context in the page.
+    PageYank {
+        text: String,
+        #[serde(default)]
+        host: String,
+    },
+    /// Result of toggling reader view (`<leader>uz`).
+    ReaderMode {
+        active: bool,
+        #[serde(default)]
+        message: Option<String>,
     },
     /// The runtime is not in this document yet: the request goes again with it.
     NeedRuntime,

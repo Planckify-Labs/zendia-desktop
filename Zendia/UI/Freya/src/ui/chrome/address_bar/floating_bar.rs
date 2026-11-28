@@ -18,7 +18,8 @@ use crate::ui::theme::{ResolvedScheme, ResolvedTheme, Rgba, ThemeRole, motion, u
 use freya::animation::*;
 use freya::prelude::*;
 use zendia_browser_core::address_bar::{
-    AddressBarResult, AddressBarResultKind, ResolvedPaletteItem, query_address_bar, query_palette,
+    AddressBarFilter, AddressBarResult, AddressBarResultKind, ResolvedPaletteItem, query_address_bar_filtered,
+    query_palette,
 };
 use zendia_browser_core::commands::Command;
 use zendia_keymap::KeyTable;
@@ -179,8 +180,12 @@ impl Component for FloatingAddressBarOverlay {
         let _ = theme;
         let on_close = {
             let page_ctx = page_ctx.clone();
+            let cancel_core = core.clone();
             move || {
                 state.close();
+                cancel_core.invoke_or_log(Command::Vim(
+                    zendia_browser_core::vim_keys::VimCommand::AddressBarCancelled,
+                ));
                 if let Some(ctx) = &page_ctx {
                     ctx.request_focus_active_surface();
                 }
@@ -211,6 +216,7 @@ impl Component for FloatingAddressBarOverlay {
             .on_backdrop_mouse_down(move |_| on_close_backdrop())
             .child(
                 FloatingAddressBarCard::new(state.query, state.highlighted, mode)
+                    .filter(state.filter)
                     .width(bar_width)
                     .input_a11y_id(state.input_a11y_id)
                     .auto_focus(is_open)
@@ -232,6 +238,7 @@ pub struct FloatingAddressBarCard {
     query: State<String>,
     highlighted: State<Option<usize>>,
     mode: AddressBarMode,
+    filter: Option<State<AddressBarFilter>>,
     width: f32,
     input_a11y_id: Option<AccessibilityId>,
     auto_focus: bool,
@@ -256,6 +263,7 @@ impl FloatingAddressBarCard {
             query,
             highlighted,
             mode,
+            filter: None,
             width: 750.0,
             input_a11y_id: None,
             auto_focus: false,
@@ -271,6 +279,11 @@ impl FloatingAddressBarCard {
 
     pub fn width(mut self, width: f32) -> Self {
         self.width = width;
+        self
+    }
+
+    pub fn filter(mut self, filter: State<AddressBarFilter>) -> Self {
+        self.filter = Some(filter);
         self
     }
 
@@ -348,25 +361,31 @@ impl Component for FloatingAddressBarCard {
         let pulse_strength = (1.0 - bounce_t).clamp(0.0, 1.0);
 
         let query_text = self.query.read().clone();
+        let current_filter = self.filter.map(|f| *f.read()).unwrap_or(AddressBarFilter::All);
         let mut last_query = use_state(|| query_text.clone());
 
-        let (address_results, palette_results) = {
+        let (address_results, palette_results, filter_chip_label) = {
             let model = core.model().read();
+            let chip_label = (!is_actions)
+                .then(|| current_filter.chip_label(&model.search_engine))
+                .flatten();
             if is_actions {
                 let commands = core.commands();
                 (
                     Vec::new(),
                     query_palette(&model, &commands, &query_text, Some(&key_table)),
+                    None,
                 )
             } else {
-                let cap = if query_text.trim().is_empty() {
+                let cap = if query_text.trim().is_empty() && current_filter == AddressBarFilter::All {
                     MAX_EMPTY_SUGGESTIONS
                 } else {
                     MAX_ADDRESS_BAR_RESULTS
                 };
                 (
-                    query_address_bar(&model, &query_text, Some(&key_table), cap),
+                    query_address_bar_filtered(&model, &query_text, current_filter, Some(&key_table), cap),
                     Vec::new(),
+                    chip_label,
                 )
             }
         };
@@ -445,6 +464,7 @@ impl Component for FloatingAddressBarCard {
         };
 
         let query_state = self.query;
+        let filter_state_opt = self.filter;
         let on_enter_actions = self.on_enter_actions.clone();
         let on_exit_actions = self.on_exit_actions.clone();
         let on_close_key = self.on_close.clone();
@@ -524,13 +544,26 @@ impl Component for FloatingAddressBarCard {
                         true
                     }
                 }
-                Key::Named(NamedKey::Backspace) if is_actions && query_state.peek().is_empty() => {
-                    e.stop_propagation();
-                    e.prevent_default();
-                    if let Some(handler) = &on_exit_actions {
-                        handler.call(());
+                Key::Named(NamedKey::Backspace) if query_state.peek().is_empty() => {
+                    if is_actions {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        if let Some(handler) = &on_exit_actions {
+                            handler.call(());
+                        }
+                        false
+                    } else if let Some(mut f_state) = filter_state_opt
+                        && *f_state.peek() != AddressBarFilter::All
+                    {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        f_state.set(AddressBarFilter::All);
+                        highlighted.set(None);
+                        false
+                    } else {
+                        e.stop_propagation();
+                        true
                     }
-                    false
                 }
                 Key::Named(NamedKey::Enter) => {
                     e.stop_propagation();
@@ -609,34 +642,66 @@ impl Component for FloatingAddressBarCard {
             ResolvedScheme::Light => Rgba::from_rgb_alpha(82, 108, 178, 0.96).to_color(),
         };
 
-        let actions_chip = is_actions.then(|| {
+        let mode_chip = if is_actions {
             let on_exit = self.on_exit_actions.clone();
-            rect()
-                .a11y_role(AccessibilityRole::Button)
-                .a11y_alt("Actions mode (press Backspace on empty input to exit)")
-                .height(Size::px(24.0))
-                .padding(Gaps::new(0.0, 9.0, 0.0, 9.0))
-                .corner_radius(CornerRadius::new_all(999.0))
-                .background(actions_chip_bg)
-                .main_align(Alignment::center())
-                .cross_align(Alignment::center())
-                .cursor(CursorIcon::Pointer)
-                .on_press(move |e: Event<PressEventData>| {
-                    e.stop_propagation();
-                    if let Some(handler) = &on_exit {
-                        handler.call(());
-                    }
-                })
-                .child(
-                    label()
-                        .text("Actions")
-                        .font_size(12.5)
-                        .font_weight(FontWeight::SEMI_BOLD)
-                        .color(Color::WHITE),
-                )
-        });
+            Some(
+                rect()
+                    .a11y_role(AccessibilityRole::Button)
+                    .a11y_alt("Actions mode (press Backspace on empty input to exit)")
+                    .height(Size::px(24.0))
+                    .padding(Gaps::new(0.0, 9.0, 0.0, 9.0))
+                    .corner_radius(CornerRadius::new_all(999.0))
+                    .background(actions_chip_bg)
+                    .main_align(Alignment::center())
+                    .cross_align(Alignment::center())
+                    .cursor(CursorIcon::Pointer)
+                    .on_press(move |e: Event<PressEventData>| {
+                        e.stop_propagation();
+                        if let Some(handler) = &on_exit {
+                            handler.call(());
+                        }
+                    })
+                    .child(
+                        label()
+                            .text("Actions")
+                            .font_size(12.5)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .color(Color::WHITE),
+                    ),
+            )
+        } else if let Some(chip_text) = filter_chip_label {
+            let filter_opt = self.filter;
+            Some(
+                rect()
+                    .a11y_role(AccessibilityRole::Button)
+                    .a11y_alt(format!("{chip_text} filter (press Backspace on empty input to clear)"))
+                    .height(Size::px(24.0))
+                    .padding(Gaps::new(0.0, 9.0, 0.0, 9.0))
+                    .corner_radius(CornerRadius::new_all(999.0))
+                    .background(actions_chip_bg)
+                    .main_align(Alignment::center())
+                    .cross_align(Alignment::center())
+                    .cursor(CursorIcon::Pointer)
+                    .on_press(move |e: Event<PressEventData>| {
+                        e.stop_propagation();
+                        if let Some(mut f) = filter_opt {
+                            f.set(AddressBarFilter::All);
+                            highlighted.set(None);
+                        }
+                    })
+                    .child(
+                        label()
+                            .text(chip_text)
+                            .font_size(12.5)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .color(Color::WHITE),
+                    ),
+            )
+        } else {
+            None
+        };
 
-        let show_results = !picker_items.is_empty() || is_actions;
+        let show_results = !picker_items.is_empty() || is_actions || current_filter != AddressBarFilter::All;
         let run_on_select = run_index;
         let run_on_submit = run_submit_or_highlighted;
 
@@ -655,7 +720,7 @@ impl Component for FloatingAddressBarCard {
                     .show_loader(false),
             )
             .child(Icon::new("search-glass").size(15.0).role(ThemeRole::TextMuted))
-            .maybe_child(actions_chip)
+            .maybe_child(mode_chip)
             .child(
                 rect().width(Size::flex(1.0)).font_size(17.0).child(
                     TextField::new(self.query)

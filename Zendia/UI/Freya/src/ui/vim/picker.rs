@@ -9,7 +9,7 @@
 
 use crate::ui::chrome::sidebar::state::favicon_badge_colors;
 use crate::ui::core_view::{CoreView, use_core};
-use crate::ui::kit::{Icon, PickerGrid, PickerItem as KitPickerItem, PickerList};
+use crate::ui::kit::{PickerGrid, PickerItem as KitPickerItem, PickerList};
 use crate::ui::page::PageSurfaceContext;
 use crate::ui::theme::{POPUP_OVERLAY_LEVEL, ResolvedScheme, ResolvedTheme, Rgba, ThemeRole, motion, use_theme};
 use crate::ui::vim::statusline::try_use_vim_statusline_state;
@@ -171,6 +171,9 @@ fn core_item_to_kit_item(item: &CorePickerItem, layout: PickerLayout, theme: &Re
     }
     if let Some(tooltip) = &item.tooltip {
         kit = kit.tooltip(tooltip.clone());
+    }
+    if let Some(icon_data) = &item.icon_data {
+        kit = kit.extension_icon(icon_data.clone());
     }
 
     if let Some(icon) = &item.icon {
@@ -425,7 +428,6 @@ impl Component for VimPickerCard {
         let theme = use_theme();
 
         let query_text = self.query.read().clone();
-        let is_filtering = *self.filter_active.read() || !query_text.is_empty();
         let filtered = filter_picker_items(&self.request, &query_text);
         let item_count = filtered.len();
 
@@ -478,25 +480,25 @@ impl Component for VimPickerCard {
         let handle_global_key = {
             let filtered = filtered.clone();
             let layout = self.request.layout;
-            let filterable = self.request.filterable;
             let capture = self.capture_keys;
-            let mut query_state = self.query;
-            let mut filter_state = self.filter_active;
             let choose_item = choose_item;
             let on_close = self.on_close.clone();
             move |e: Event<KeyboardEventData>| {
                 if !capture {
                     return;
                 }
+                // Swallow every key while the picker is open (`ZendiaPicker.sys.mjs:196-197`, `PIC-01`, `PIC-02`).
+                e.stop_propagation();
+                e.prevent_default();
+
                 let ctrl = e.modifiers.contains(Modifiers::CONTROL);
                 let alt = e.modifiers.contains(Modifiers::ALT);
                 let meta = e.modifiers.contains(Modifiers::META);
-                let filtering_now = *filter_state.peek() || !query_state.peek().is_empty();
 
-                let mut move_cursor = |dx: isize, dy: isize| {
+                let mut move_cursor = |delta: isize| {
                     let current = *cursor.peek();
                     if let Some(next) =
-                        step_picker_cursor(current, filtered.len(), layout, DEFAULT_GRID_COLUMNS, dx, dy)
+                        step_picker_cursor(current, filtered.len(), layout, DEFAULT_GRID_COLUMNS, 0, delta)
                     {
                         cursor.set(next);
                     }
@@ -504,7 +506,6 @@ impl Component for VimPickerCard {
 
                 match &e.key {
                     Key::Named(NamedKey::Escape) => {
-                        e.stop_propagation();
                         if let Some(close) = &on_close {
                             close.call(());
                         }
@@ -512,78 +513,32 @@ impl Component for VimPickerCard {
                     Key::Character(ch) if ctrl && !alt && !meta => {
                         let lower = ch.to_ascii_lowercase();
                         if lower == "c" || lower == "[" || e.code == Code::KeyC || e.code == Code::BracketLeft {
-                            e.stop_propagation();
                             if let Some(close) = &on_close {
                                 close.call(());
                             }
                         } else if lower == "n" || e.code == Code::KeyN {
-                            e.stop_propagation();
-                            move_cursor(0, 1);
+                            move_cursor(1);
                         } else if lower == "p" || e.code == Code::KeyP {
-                            e.stop_propagation();
-                            move_cursor(0, -1);
+                            move_cursor(-1);
                         }
                     }
                     Key::Named(NamedKey::Enter) => {
-                        e.stop_propagation();
                         let idx = (*cursor.peek()).min(filtered.len().saturating_sub(1));
                         if let Some(item) = filtered.get(idx) {
                             choose_item(item);
                         }
                     }
-                    Key::Named(NamedKey::ArrowDown) => {
-                        e.stop_propagation();
-                        move_cursor(0, 1);
+                    Key::Named(NamedKey::ArrowDown | NamedKey::ArrowRight) => {
+                        move_cursor(1);
                     }
-                    Key::Named(NamedKey::ArrowUp) => {
-                        e.stop_propagation();
-                        move_cursor(0, -1);
-                    }
-                    Key::Named(NamedKey::ArrowRight) => {
-                        e.stop_propagation();
-                        if layout == PickerLayout::Grid {
-                            move_cursor(1, 0);
-                        } else {
-                            move_cursor(0, 1);
-                        }
-                    }
-                    Key::Named(NamedKey::ArrowLeft) => {
-                        e.stop_propagation();
-                        if layout == PickerLayout::Grid {
-                            move_cursor(-1, 0);
-                        } else {
-                            move_cursor(0, -1);
-                        }
-                    }
-                    Key::Named(NamedKey::Backspace) if filtering_now => {
-                        e.stop_propagation();
-                        let mut text = query_state.peek().clone();
-                        if text.pop().is_some() {
-                            query_state.set(text);
-                            cursor.set(0);
-                        } else {
-                            filter_state.set(false);
-                        }
+                    Key::Named(NamedKey::ArrowUp | NamedKey::ArrowLeft) => {
+                        move_cursor(-1);
                     }
                     Key::Character(ch) if !ctrl && !alt && !meta => {
-                        e.stop_propagation();
-                        if filtering_now {
-                            if !ch.chars().any(char::is_control) {
-                                let mut text = query_state.peek().clone();
-                                text.push_str(ch);
-                                query_state.set(text);
-                                cursor.set(0);
-                            }
-                        } else if ch == "/" && filterable {
-                            filter_state.set(true);
-                        } else if ch == "j" {
-                            move_cursor(0, 1);
+                        if ch == "j" {
+                            move_cursor(1);
                         } else if ch == "k" {
-                            move_cursor(0, -1);
-                        } else if ch == "h" && layout == PickerLayout::Grid {
-                            move_cursor(-1, 0);
-                        } else if ch == "l" && layout == PickerLayout::Grid {
-                            move_cursor(1, 0);
+                            move_cursor(-1);
                         } else if let Some(jump_idx) = find_item_by_key_badge(&filtered, ch) {
                             cursor.set(jump_idx);
                             if let Some(item) = filtered.get(jump_idx) {
@@ -617,74 +572,6 @@ impl Component for VimPickerCard {
             .stop((theme.glass.sheen_top.to_color(), 0.0))
             .stop((Color::from_argb(0, 255, 255, 255), 100.0));
 
-        let filter_row = is_filtering.then(|| {
-            let mut clear_query = self.query;
-            let mut clear_filter = self.filter_active;
-            let filter_bg = match theme.scheme {
-                ResolvedScheme::Dark => Color::from_argb(24, 255, 255, 255),
-                ResolvedScheme::Light => Color::from_argb(18, 0, 0, 0),
-            };
-            let filter_text = match theme.scheme {
-                ResolvedScheme::Dark => Color::from_argb(238, 251, 251, 254),
-                ResolvedScheme::Light => Color::from_argb(230, 21, 20, 26),
-            };
-            let count_label = format!("{item_count}/{}", self.request.items.len());
-            rect()
-                .width(Size::fill())
-                .height(Size::px(30.0))
-                .margin(Gaps::new(0.0, 4.0, 6.0, 4.0))
-                .padding(Gaps::new(0.0, 10.0, 0.0, 10.0))
-                .spacing(8.0)
-                .direction(Direction::Horizontal)
-                .content(Content::Flex)
-                .cross_align(Alignment::center())
-                .corner_radius(CornerRadius::new_all(9.0))
-                .background(filter_bg)
-                .border(
-                    Border::new()
-                        .width(1.0)
-                        .alignment(BorderAlignment::Inner)
-                        .fill(theme.rgba(ThemeRole::Accent).with_alpha(0.55).to_color()),
-                )
-                .child(Icon::new("search-glass").size(13.0).role(ThemeRole::Accent))
-                .child(
-                    rect().width(Size::flex(1.0)).overflow(Overflow::Clip).child(
-                        label()
-                            .text(if query_text.is_empty() {
-                                "Type to filter...".to_string()
-                            } else {
-                                query_text.clone()
-                            })
-                            .font_size(12.5)
-                            .color(if query_text.is_empty() { text_muted } else { filter_text })
-                            .max_lines(1)
-                            .text_overflow(TextOverflow::Ellipsis),
-                    ),
-                )
-                .child(
-                    label()
-                        .text(count_label)
-                        .font_size(11.0)
-                        .font_family("monospace")
-                        .color(text_muted),
-                )
-                .child(
-                    rect()
-                        .a11y_role(AccessibilityRole::Button)
-                        .a11y_alt("Clear filter")
-                        .width(Size::px(18.0))
-                        .height(Size::px(18.0))
-                        .center()
-                        .cursor(CursorIcon::Pointer)
-                        .on_press(move |e: Event<PressEventData>| {
-                            e.stop_propagation();
-                            clear_query.set(String::new());
-                            clear_filter.set(false);
-                        })
-                        .child(Icon::new("close").size(11.0).role(ThemeRole::TextMuted)),
-                )
-        });
-
         // Hover applies only a subtle row/tile hover tint inside `PickerList`/`PickerGrid` without moving the
         // keyboard selection cursor (`VIM-PK-06`).
         let body: Element = match self.request.layout {
@@ -706,11 +593,7 @@ impl Component for VimPickerCard {
                 .into_element(),
         };
 
-        let hint_text = if is_filtering {
-            "Type to filter · Arrows move · Enter pick · Backspace clear · Esc cancel".to_string()
-        } else {
-            self.request.hint.clone()
-        };
+        let hint_text = self.request.hint.clone();
 
         let inner_ring_color = match theme.scheme {
             ResolvedScheme::Dark => Rgba::from_rgb_alpha(255, 255, 255, 0.05).to_color(),
@@ -768,7 +651,6 @@ impl Component for VimPickerCard {
                                     .text_overflow(TextOverflow::Ellipsis),
                             ),
                     )
-                    .maybe_child(filter_row)
                     .child(body)
                     .child(
                         rect()

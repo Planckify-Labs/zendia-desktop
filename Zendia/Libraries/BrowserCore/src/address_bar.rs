@@ -262,6 +262,22 @@ pub fn resolve_navigation_url(input: &str, engine: &SearchEngine) -> Option<Stri
     }
 }
 
+/// Resolves clipboard text for `url.paste` (`p` / `P`), matching the old fork's `ZendiaNavigation.sys.mjs`:
+/// trims surrounding whitespace, rejects empty or multi-line text, classifies URL vs search with `engine`, and allows
+/// only `http://` and `https://` destinations.
+pub fn resolve_clipboard_paste_url(raw: &str, engine: &SearchEngine) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') || trimmed.contains('\r') {
+        return None;
+    }
+    let resolved = resolve_navigation_url(trimmed, engine)?;
+    if resolved.starts_with("http://") || resolved.starts_with("https://") {
+        Some(resolved)
+    } else {
+        None
+    }
+}
+
 /// Formats a URL for concise display inside the in-sidebar address bar (Zen's domain-only single-toolbar style).
 pub fn display_url_for_sidebar(url: &str) -> String {
     let trimmed = url.trim();
@@ -285,6 +301,57 @@ pub fn display_url_for_result(url: &str) -> String {
         .unwrap_or(trimmed);
     let without_www = without_scheme.strip_prefix("www.").unwrap_or(without_scheme);
     without_www.strip_suffix('/').unwrap_or(without_www).to_string()
+}
+
+/// Semantic filter applied when opening the floating address bar from a restricted vim key (`<leader>,`,
+/// `<leader>fb`, `<leader>fr`, `find.bookmarks`, `<leader>/`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum AddressBarFilter {
+    /// Standard omnibox searching URLs, default search engine, open tabs, bookmarks, history, and inline actions.
+    #[default]
+    All,
+    /// Open tabs across all spaces (`<leader>,`, `<leader>fb`, `find.tabs`).
+    Tabs,
+    /// Browsing history (`<leader>fr`, `find.recent`).
+    History,
+    /// Bookmarks (`find.bookmarks`).
+    Bookmarks,
+    /// Forced web search using the default search engine (`<leader>/`, `search.web`).
+    Search,
+}
+
+impl AddressBarFilter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Tabs => "tabs",
+            Self::History => "history",
+            Self::Bookmarks => "bookmarks",
+            Self::Search => "search",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "all" => Some(Self::All),
+            "tabs" | "openpage" => Some(Self::Tabs),
+            "history" | "recent" => Some(Self::History),
+            "bookmarks" | "bookmark" => Some(Self::Bookmarks),
+            "search" | "web" => Some(Self::Search),
+            _ => None,
+        }
+    }
+
+    /// Label shown on the leading mode chip in the floating address bar, or `None` for standard `All` mode.
+    pub fn chip_label(self, engine: &SearchEngine) -> Option<String> {
+        match self {
+            Self::All => None,
+            Self::Tabs => Some("Tabs".to_string()),
+            Self::History => Some("History".to_string()),
+            Self::Bookmarks => Some("Bookmarks".to_string()),
+            Self::Search => Some(engine.name.clone()),
+        }
+    }
 }
 
 /// Semantic kind of one row returned by the address bar result providers.
@@ -497,11 +564,190 @@ pub fn query_address_bar(
     key_table: Option<&KeyTable>,
     max_results: usize,
 ) -> Vec<AddressBarResult> {
+    query_address_bar_filtered(model, query, AddressBarFilter::All, key_table, max_results)
+}
+
+/// Computes ranked address bar results restricted to `filter` (`NAV-18`).
+pub fn query_address_bar_filtered(
+    model: &BrowserModel,
+    query: &str,
+    filter: AddressBarFilter,
+    key_table: Option<&KeyTable>,
+    max_results: usize,
+) -> Vec<AddressBarResult> {
     if max_results == 0 {
         return Vec::new();
     }
 
     let trimmed = query.trim();
+    let tokens: Vec<String> = trimmed.split_whitespace().map(|part| part.to_lowercase()).collect();
+
+    match filter {
+        AddressBarFilter::Search => {
+            if trimmed.is_empty() {
+                return Vec::new();
+            }
+            return vec![AddressBarResult {
+                id: format!("search:{trimmed}"),
+                kind: AddressBarResultKind::Search {
+                    query: trimmed.to_string(),
+                    engine_name: model.search_engine.name.clone(),
+                    search_url: model.search_engine.search_url_for(trimmed),
+                },
+                title: trimmed.to_string(),
+                subtitle: Some(format!("Search with {}", model.search_engine.name)),
+                icon: Some("search-glass".to_string()),
+                score: EXACT_MATCH_SCORE,
+                heuristic: true,
+                shortcut_hint: None,
+                badge_text: None,
+                badge_accent: None,
+            }];
+        }
+        AddressBarFilter::Tabs => {
+            let active_tab_id = model.active_tab;
+            let active_space_id = model.active_space;
+            let mut candidate_tabs: Vec<_> = model.tabs.iter().collect();
+            candidate_tabs.sort_by_key(|tab| {
+                let is_active = Some(tab.id) == active_tab_id;
+                let same_space = tab.space_id == active_space_id || tab.space_id.is_none();
+                (is_active, !same_space, tab.id.0)
+            });
+            let mut out = Vec::new();
+            for tab in candidate_tabs {
+                if model.is_glance_tab(tab.id) {
+                    continue;
+                }
+                if tab.url.is_empty() || tab.url == "about:blank" || tab.url == "about:newtab" {
+                    continue;
+                }
+                let title = tab.display_title();
+                let match_score = if tokens.is_empty() {
+                    200
+                } else {
+                    let s = token_match_score(&tokens, &title, &tab.url);
+                    if s == 0 {
+                        continue;
+                    }
+                    s
+                };
+                let space_name = tab
+                    .space_id
+                    .filter(|&sid| Some(sid) != active_space_id)
+                    .and_then(|sid| model.space(sid))
+                    .map(|space| space.name.clone());
+                let space_bonus = if tab.space_id == active_space_id || tab.space_id.is_none() {
+                    60
+                } else {
+                    0
+                };
+                out.push(AddressBarResult {
+                    id: format!("tab:{}", tab.id.0),
+                    kind: AddressBarResultKind::SwitchToTab {
+                        tab_id: tab.id,
+                        space_id: tab.space_id,
+                        space_name: space_name.clone(),
+                        url: tab.url.clone(),
+                    },
+                    title,
+                    subtitle: Some(space_name.unwrap_or_else(|| display_url_for_result(&tab.url))),
+                    icon: tab.favicon.clone().or_else(|| Some("globe".to_string())),
+                    score: 800 + match_score + space_bonus,
+                    heuristic: false,
+                    shortcut_hint: None,
+                    badge_text: Some("Switch to Tab".to_string()),
+                    badge_accent: None,
+                });
+            }
+            out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
+            out.truncate(max_results);
+            return out;
+        }
+        AddressBarFilter::History => {
+            let mut history: Vec<_> = model.history.iter().collect();
+            history.sort_by(|a, b| {
+                b.visited_at_unix
+                    .cmp(&a.visited_at_unix)
+                    .then_with(|| b.visit_count.cmp(&a.visit_count))
+            });
+            let mut seen_urls = HashSet::new();
+            let mut out = Vec::new();
+            for entry in history {
+                let match_score = if tokens.is_empty() {
+                    200
+                } else {
+                    let s = token_match_score(&tokens, &entry.title, &entry.url);
+                    if s == 0 {
+                        continue;
+                    }
+                    s
+                };
+                if !seen_urls.insert(normalize_url_key(&entry.url)) {
+                    continue;
+                }
+                let visit_bonus = (entry.visit_count as i32 * 4).min(120);
+                out.push(AddressBarResult {
+                    id: format!("history:{}", entry.id.0),
+                    kind: AddressBarResultKind::History {
+                        entry_id: entry.id,
+                        url: entry.url.clone(),
+                    },
+                    title: entry.title.clone(),
+                    subtitle: Some(display_url_for_result(&entry.url)),
+                    icon: Some("history".to_string()),
+                    score: 400 + match_score + visit_bonus,
+                    heuristic: false,
+                    shortcut_hint: None,
+                    badge_text: None,
+                    badge_accent: None,
+                });
+            }
+            if !tokens.is_empty() {
+                out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
+            }
+            out.truncate(max_results);
+            return out;
+        }
+        AddressBarFilter::Bookmarks => {
+            let mut seen_urls = HashSet::new();
+            let mut out = Vec::new();
+            for bookmark in &model.bookmarks {
+                let match_score = if tokens.is_empty() {
+                    200
+                } else {
+                    let s = token_match_score(&tokens, &bookmark.title, &bookmark.url);
+                    if s == 0 {
+                        continue;
+                    }
+                    s
+                };
+                if !seen_urls.insert(normalize_url_key(&bookmark.url)) {
+                    continue;
+                }
+                out.push(AddressBarResult {
+                    id: format!("bookmark:{}", bookmark.id.0),
+                    kind: AddressBarResultKind::Bookmark {
+                        bookmark_id: bookmark.id,
+                        url: bookmark.url.clone(),
+                    },
+                    title: bookmark.title.clone(),
+                    subtitle: Some(display_url_for_result(&bookmark.url)),
+                    icon: bookmark.favicon.clone().or_else(|| Some("bookmark".to_string())),
+                    score: 600 + match_score,
+                    heuristic: false,
+                    shortcut_hint: None,
+                    badge_text: None,
+                    badge_accent: None,
+                });
+            }
+            if !tokens.is_empty() {
+                out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
+            }
+            out.truncate(max_results);
+            return out;
+        }
+        AddressBarFilter::All => {}
+    }
 
     // Empty query: show top sites / bookmarks and most-visited history entries (as Zen's floating empty bar does).
     if trimmed.is_empty() {

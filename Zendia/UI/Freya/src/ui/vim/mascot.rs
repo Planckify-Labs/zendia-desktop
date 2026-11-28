@@ -28,10 +28,14 @@ pub const MASCOT_REST_SCALE: f32 = 0.4;
 pub const MASCOT_MORPH_DURATION: Duration = Duration::from_millis(640);
 /// Ink outline width on the 1024 emblem grid (half shows outside each filled cell).
 const MASCOT_EDGE_WIDTH: f32 = 40.0;
-/// Spring oscillation frequency in cycles per normalized duration.
+/// Spring oscillation frequency in cycles per normalized duration (wobble).
 const SPRING_FREQUENCY: f32 = 2.4;
-/// Exponential damping factor for the jelly spring.
-const SPRING_DAMPING: f32 = 6.5;
+/// Exact fork 2nd-order spring `(stiffness, damping)` pairs (`ZendiaMascot.sys.mjs`, `SL-04`).
+pub const SPRING_HEAD: (f32, f32) = (560.0, 20.0);
+pub const SPRING_CELLS: (f32, f32) = (500.0, 18.0);
+pub const SPRING_LETTER: (f32, f32) = (600.0, 21.0);
+pub const SPRING_WHOLE: (f32, f32) = (300.0, 31.0);
+pub const SPRING_SIZES: (f32, f32) = (320.0, 21.0);
 /// Blink duration in milliseconds.
 const BLINK_DURATION: Duration = Duration::from_millis(180);
 /// Minimum randomized eye blink delay (`2600 ms`, matching `ZendiaStatusline.sys.mjs:953`).
@@ -125,15 +129,31 @@ fn cubic_ease(t: f32) -> f32 {
     }
 }
 
-/// Underdamped jelly spring that overshoots and settles gently.
-pub fn jelly_spring(t: f32) -> f32 {
+/// Evaluates the exact closed-form 2nd-order damped harmonic oscillator step response for `(stiffness, damping)` over
+/// `duration_s` seconds at normalized progress `t` in `0.0..=1.0` (`SL-04`).
+pub fn spring_response(t: f32, (k, c): (f32, f32), duration_s: f32) -> f32 {
     if t <= 0.0 {
-        0.0
-    } else if t >= 1.0 {
-        1.0
-    } else {
-        1.0 - exp_f32(-SPRING_DAMPING * t) * cos_f32(2.0 * PI * SPRING_FREQUENCY * t)
+        return 0.0;
     }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let tau = t * duration_s;
+    let alpha = 0.5 * c;
+    let disc = k - alpha * alpha;
+    if disc > 1e-4 {
+        let omega_d = disc.sqrt();
+        let env = exp_f32(-alpha * tau);
+        1.0 - env * (cos_f32(omega_d * tau) + (alpha / omega_d) * sin_f32(omega_d * tau))
+    } else {
+        let env = exp_f32(-alpha * tau);
+        1.0 - env * (1.0 + alpha * tau)
+    }
+}
+
+/// Underdamped jelly spring that overshoots and settles gently (uses the fork's cell spring `500/18`).
+pub fn jelly_spring(t: f32) -> f32 {
+    spring_response(t, SPRING_CELLS, 0.64)
 }
 
 /// Decaying sine wobble driving squash-and-stretch during a morph.
@@ -230,7 +250,7 @@ pub fn part_pop_scale(pop_t: f32, entering: bool, part_idx: usize) -> f32 {
         if local <= 0.0 {
             0.0
         } else {
-            jelly_spring(local).max(0.0)
+            spring_response(local, SPRING_SIZES, 0.52).max(0.0)
         }
     } else {
         // Exiting: pop_t moves 1.0 -> 0.0; map elapsed = 1.0 - t with 15 + k*14ms stagger.
@@ -291,7 +311,11 @@ pub fn compute_mascot_frame_with_motion(
     let still = from_idx == to_idx;
     let a = DRAWINGS[from_idx];
     let b = DRAWINGS[to_idx];
-    let moved = if still { 1.0 } else { jelly_spring(t) };
+    let moved = if still {
+        1.0
+    } else {
+        spring_response(t, SPRING_HEAD, 0.64)
+    };
 
     let head_pop = part_pop_scale(pop_t, pop_entering, 0);
     let mut head: Vec<[f32; 2]> = a
@@ -388,7 +412,7 @@ pub fn compute_mascot_frame_with_motion(
                     scale: a.letter.size * out_k,
                 });
             }
-            let in_k = jelly_spring(((t - 0.18) / 0.82).clamp(0.0, 1.0)) * letter_pop;
+            let in_k = spring_response(((t - 0.18) / 0.82).clamp(0.0, 1.0), SPRING_LETTER, 0.52) * letter_pop;
             if in_k > 0.001 {
                 letters.push(LetterFrame {
                     spec: &b.letter,

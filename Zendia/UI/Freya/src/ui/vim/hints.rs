@@ -33,7 +33,7 @@ pub fn hint_badge_for_row(
             .layer(Layer::Relative(8))
             .position(Position::new_absolute().right(4.0).top(top))
             .interactive(false)
-            .child(hint_pill(prefix, suffix, HINT_BADGE_HEIGHT, 11.0, 4.0, 4.5, theme))
+            .child(hint_pill(prefix, suffix, HINT_BADGE_HEIGHT, 11.0, 4.0, 5.0, theme))
             .into_element(),
     )
 }
@@ -72,7 +72,7 @@ fn hint_pill(
 ) -> Element {
     let bg = theme.color(ThemeRole::Hint);
     let fg = theme.color(ThemeRole::HintText);
-    let matched_fg = theme.rgba(ThemeRole::HintText).with_alpha(0.50).to_color();
+    let shown = if suffix.is_empty() { prefix } else { suffix };
 
     let mut pill = rect()
         .min_width(Size::px(height))
@@ -85,21 +85,10 @@ fn hint_pill(
         .cross_align(Alignment::center())
         .overflow(Overflow::Clip);
 
-    if !prefix.is_empty() {
+    if !shown.is_empty() {
         pill = pill.child(
             label()
-                .text(prefix.to_string())
-                .font_size(font_size)
-                .font_weight(FontWeight::BOLD)
-                .font_family("monospace")
-                .color(matched_fg)
-                .max_lines(1),
-        );
-    }
-    if !suffix.is_empty() {
-        pill = pill.child(
-            label()
-                .text(suffix.to_string())
+                .text(shown.to_string())
                 .font_size(font_size)
                 .font_weight(FontWeight::BOLD)
                 .font_family("monospace")

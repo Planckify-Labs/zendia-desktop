@@ -20,6 +20,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use zendia_browser_core::commands::Command;
 use zendia_browser_core::model::TabId;
+use zendia_browser_core::vim_keys::VimCommand;
 
 /// Identifies which Hub view a [`PageSurface`] displays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -152,15 +153,20 @@ impl Component for PageSurface {
         {
             let mut current_mounted = mounted_view.borrow_mut();
             if *current_mounted != view_id {
-                let mut tracker = page_ctx.tracker().borrow_mut();
                 if let Some(old_id) = *current_mounted {
-                    tracker.unmount_surface(old_id);
+                    page_ctx.unregister_view_surface(old_id, a11y_id);
+                    page_ctx.tracker().borrow_mut().unmount_surface(old_id);
                 }
                 if let Some(new_id) = view_id {
-                    tracker.mount_surface(new_id);
-                    if let Some(rect) = *last_rect.borrow() {
-                        tracker.set_surface_rect(new_id, rect);
+                    let cached_rect = *last_rect.borrow();
+                    {
+                        let mut tracker = page_ctx.tracker().borrow_mut();
+                        tracker.mount_surface(new_id);
+                        if let Some(rect) = cached_rect {
+                            tracker.set_surface_rect(new_id, rect);
+                        }
                     }
+                    page_ctx.register_view_surface(new_id, a11y_id);
                 }
                 *current_mounted = view_id;
             }
@@ -169,20 +175,29 @@ impl Component for PageSurface {
         // Unmount on component drop so off-screen views transition to Hidden and stop producing frames.
         use_drop({
             let mounted_view = Rc::clone(&mounted_view);
-            let tracker = Rc::clone(page_ctx.tracker());
+            let page_ctx = page_ctx.clone();
             move || {
-                if let Some(old_id) = mounted_view.borrow_mut().take() {
-                    tracker.borrow_mut().unmount_surface(old_id);
+                let prev_id = mounted_view.borrow_mut().take();
+                if let Some(old_id) = prev_id {
+                    page_ctx.unregister_view_surface(old_id, a11y_id);
+                    page_ctx.tracker().borrow_mut().unmount_surface(old_id);
                 }
             }
         });
 
-        // Keep Hub system focus aligned with Freya focus for this surface.
+        // Keep Hub system focus and core keyed_page aligned with Freya focus for this surface (`RT-02`, `EXT-02`).
         let focus = use_focus(a11y_id);
         let is_focused = focus() != Focus::Not;
         if let Some(view_id) = view_id {
             if is_focused {
                 page_ctx.record_focused_surface(a11y_id, view_id);
+                let desired_keyed = match self.target {
+                    SurfaceTarget::View(vid) => Some(TabId(vid)),
+                    SurfaceTarget::Tab(_) => None,
+                };
+                if core.model().peek().keyed_page != desired_keyed {
+                    core.invoke_or_log(Command::Vim(VimCommand::KeyedPageChanged { tab_id: desired_keyed }));
+                }
             } else {
                 page_ctx.clear_focused_view_if(view_id);
             }
@@ -213,13 +228,31 @@ impl Component for PageSurface {
                 if let Some(view_id) = view_id {
                     page_ctx.record_focused_surface(a11y_id, view_id);
                 }
-                if let SurfaceTarget::Tab(tab_id) = target
-                    && core.model().peek().active_tab != Some(tab_id)
-                {
-                    core.invoke_or_log(Command::TabActivate { tab_id });
+                match target {
+                    SurfaceTarget::Tab(tab_id) => {
+                        if core.model().peek().keyed_page.is_some() {
+                            core.invoke_or_log(Command::Vim(VimCommand::KeyedPageChanged { tab_id: None }));
+                        }
+                        if core.model().peek().active_tab != Some(tab_id) {
+                            core.invoke_or_log(Command::TabActivate { tab_id });
+                        }
+                    }
+                    SurfaceTarget::View(vid) => {
+                        if core.model().peek().keyed_page != Some(TabId(vid)) {
+                            core.invoke_or_log(Command::Vim(VimCommand::KeyedPageChanged {
+                                tab_id: Some(TabId(vid)),
+                            }));
+                        }
+                    }
                 }
-                // A click ends a jump, or its labels would go on taking the keys.
-                if core.model().peek().page_hints.is_some() {
+                // A click ends a jump, unless it is staying inside a CAPTCHA challenge (`ZendiaJumpContent:1009`, `CAP-03`).
+                if core
+                    .model()
+                    .peek()
+                    .page_hints
+                    .as_ref()
+                    .is_some_and(|hints| !hints.staying)
+                {
                     core.invoke_or_log(Command::Page(
                         zendia_browser_core::page_actions::PageAction::PageHintCancel,
                     ));
@@ -307,7 +340,12 @@ impl Component for PageSurface {
             let tracker = Rc::clone(page_ctx.tracker());
             move |e: Event<KeyboardEventData>| {
                 let model = core.model().peek();
-                if crate::ui::vim::surface_keeps_keys(&model) {
+                if crate::ui::vim::surface_keeps_keys(&model) || model.mode_transition_pending {
+                    keymap.consume_key_up(e.code);
+                    return;
+                }
+                if crate::ui::extensions::popup_hints_will_consume(&e, &model) {
+                    keymap.consume_key_up(e.code);
                     return;
                 }
                 if keymap.will_consume_key_down(&e, &model) {

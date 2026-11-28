@@ -65,8 +65,11 @@ Generic embedder channel (`view_embedder_message` / `view_embedder_reply` for Au
 `connect_embedder_channel` forwarding engine extension hooks to Zendia's sandboxed `ExtensionServer` process). No
 `cgx-webext` code or C ABI lives in upstream C++. Two small additions for the embedder's look and vim mode:
 `view_set_user_style` / `set_user_style` give every page of a view a user style sheet (Zendia's scrollbar colors),
-resent with the other preferences when a view gets a new page, and `PageClient` reports the input method state after
-a rendering update that moved the focus, so a field a page focuses by itself (autofocus) reaches the UI too.
+resent with the other preferences when a view gets a new page; `PageClient` reports the input method state and
+editable-element focus (`email`, `number`, `date`, `select`, `textarea`, `contenteditable`, `designMode`) after each
+rendering update that moved focus; and `PageClient`'s isolated embedder worlds expose unsolicited event posting,
+closed-shadow-root inspection, user-triggered selection copying, and same-process child-frame evaluation over the
+generic embedder channel.
 
 - `Libraries/LibWebView/Application.cpp`
 - `Libraries/LibWebView/Application.h`

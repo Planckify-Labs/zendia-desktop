@@ -302,6 +302,11 @@ impl Component for SplitGroupChip {
             .a11y_role(AccessibilityRole::Tab)
             .a11y_alt(self.tab.display_title())
             .a11y_focusable(true)
+            .on_sized(move |e: Event<SizedEventData>| {
+                if let Some(state) = sidebar_state {
+                    state.set_tab_anchor(tab_id, crate::ui::chrome::menus::AnchorRect::from_area(e.area));
+                }
+            })
             .on_pointer_enter(feedback.on_pointer_enter())
             .on_pointer_leave(feedback.on_pointer_leave())
             .on_pointer_down(on_pointer_down)

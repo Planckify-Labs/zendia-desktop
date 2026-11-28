@@ -15,6 +15,7 @@
 
 pub mod address_bar;
 pub mod agent;
+pub mod captcha;
 pub mod chrome_actions;
 pub mod commands;
 pub mod downloads;
@@ -34,6 +35,7 @@ pub mod onboarding;
 pub mod page_actions;
 pub mod picker;
 pub mod region;
+pub mod session;
 pub mod settings;
 pub mod share;
 pub mod shell_layout;

@@ -257,7 +257,7 @@ fn parse_modifier(token: &str) -> Option<KeyModifiers> {
     }
 }
 
-fn parse_named_key(token: &str) -> Result<KeyCode, NotationError> {
+fn parse_named_key(token: &str, allow_single_char: bool) -> Result<KeyCode, NotationError> {
     let lower = token.to_ascii_lowercase();
     let code = match lower.as_str() {
         "cr" | "enter" | "return" => KeyCode::Enter,
@@ -295,9 +295,11 @@ fn parse_named_key(token: &str) -> Result<KeyCode, NotationError> {
                 }
                 return Err(NotationError::InvalidFunctionKey(token.to_string()));
             }
-            let mut chars = token.chars();
-            if let (Some(ch), None) = (chars.next(), chars.next()) {
-                return Ok(KeyCode::Char(ch));
+            if allow_single_char {
+                let mut chars = token.chars();
+                if let (Some(ch), None) = (chars.next(), chars.next()) {
+                    return Ok(KeyCode::Char(ch));
+                }
             }
             return Err(NotationError::UnknownKey(token.to_string()));
         }
@@ -322,7 +324,7 @@ fn parse_angle_token(inner: &str) -> Result<KeyStroke, NotationError> {
 
     let parts: Vec<&str> = inner.split('-').collect();
     if parts.len() == 1 {
-        let key = parse_named_key(parts[0])?;
+        let key = parse_named_key(parts[0], false)?;
         return Ok(KeyStroke::new(KeyModifiers::NONE, key));
     }
 
@@ -331,7 +333,7 @@ fn parse_angle_token(inner: &str) -> Result<KeyStroke, NotationError> {
         let modifier = parse_modifier(part).ok_or_else(|| NotationError::UnknownModifier((*part).to_string()))?;
         modifiers |= modifier;
     }
-    let key = parse_named_key(parts[parts.len() - 1])?;
+    let key = parse_named_key(parts[parts.len() - 1], true)?;
     Ok(KeyStroke::new(modifiers, key))
 }
 
@@ -349,7 +351,8 @@ impl FromStr for KeyStroke {
 
 /// Ordered sequence of one or more key strokes (e.g. `<C-t>`, `gt`, `<Leader>ff`).
 ///
-/// ASCII whitespace between tokens is ignored during parsing; use `<Space>` to denote the spacebar.
+/// Mirrors `ZendiaKeys.parse` (`CFG-06`): ASCII spaces (`' '`) parse as `<Space>`, and any `<` that does not form a
+/// valid bracketed key name parses as a literal `'<'` (`<lt>`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeySequence(Vec<KeyStroke>);
 
@@ -361,24 +364,36 @@ impl KeySequence {
         Ok(Self(strokes))
     }
 
-    /// Parses a key sequence written in Zendia/Vim notation.
+    /// Parses a key sequence written in Zendia/Vim notation (`CFG-06`).
     pub fn parse(input: &str) -> Result<Self, NotationError> {
+        if input.is_empty() {
+            return Err(NotationError::Empty);
+        }
         let chars: Vec<char> = input.chars().collect();
         let mut strokes = Vec::new();
         let mut i = 0;
 
         while i < chars.len() {
-            if chars[i].is_ascii_whitespace() {
+            if chars[i] == '<' {
+                if i + 2 < chars.len()
+                    && let Some(rel_end) = chars[i + 2..].iter().position(|&c| c == '>')
+                {
+                    let end = i + 2 + rel_end;
+                    let inner: String = chars[i + 1..end].iter().collect();
+                    if let Ok(stroke) = parse_angle_token(&inner) {
+                        strokes.push(stroke);
+                        i = end + 1;
+                        continue;
+                    }
+                }
+                // A `<` that does not start a valid key name is the literal `<` key itself (`CFG-06`).
+                strokes.push(KeyStroke::char('<'));
                 i += 1;
                 continue;
             }
-            if chars[i] == '<' {
-                let Some(rel_end) = chars[i + 1..].iter().position(|&c| c == '>') else {
-                    return Err(NotationError::UnclosedAngleBracket);
-                };
-                let inner: String = chars[i + 1..i + 1 + rel_end].iter().collect();
-                strokes.push(parse_angle_token(&inner)?);
-                i += rel_end + 2;
+            if chars[i] == ' ' {
+                strokes.push(KeyStroke::new(KeyModifiers::NONE, KeyCode::Space));
+                i += 1;
                 continue;
             }
             strokes.push(KeyStroke::char(chars[i]));
@@ -405,17 +420,22 @@ impl KeySequence {
 
     /// Replaces any `<Leader>` stroke in the sequence with the configured leader stroke.
     pub fn expand_leader(&self, leader: KeyStroke) -> Self {
-        let strokes = self
-            .0
-            .iter()
-            .map(|stroke| {
-                if stroke.key == KeyCode::Leader && stroke.modifiers.is_empty() {
-                    leader
-                } else {
-                    *stroke
-                }
-            })
-            .collect();
+        self.expand_leader_strokes(std::slice::from_ref(&leader))
+    }
+
+    /// Replaces any `<Leader>` stroke in the sequence with the configured leader key sequence (`CFG-05`).
+    pub fn expand_leader_strokes(&self, leader: &[KeyStroke]) -> Self {
+        if leader.is_empty() {
+            return self.clone();
+        }
+        let mut strokes = Vec::with_capacity(self.0.len());
+        for stroke in &self.0 {
+            if stroke.key == KeyCode::Leader && stroke.modifiers.is_empty() {
+                strokes.extend_from_slice(leader);
+            } else {
+                strokes.push(*stroke);
+            }
+        }
         Self(strokes)
     }
 
@@ -552,26 +572,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_notation() {
+    fn parses_spaces_and_literal_angle_brackets() {
         assert_eq!(KeySequence::parse(""), Err(NotationError::Empty));
-        assert_eq!(KeySequence::parse("   "), Err(NotationError::Empty));
-        assert_eq!(KeySequence::parse("<C-t"), Err(NotationError::UnclosedAngleBracket));
-        assert_eq!(KeySequence::parse("<>"), Err(NotationError::EmptyAngleBracket));
-        assert!(matches!(
-            KeySequence::parse("<X-t>"),
-            Err(NotationError::UnknownModifier(_))
-        ));
-        assert!(matches!(
-            KeySequence::parse("<Nope>"),
-            Err(NotationError::UnknownKey(_))
-        ));
-        assert!(matches!(
-            KeySequence::parse("<F0>"),
-            Err(NotationError::InvalidFunctionKey(_))
-        ));
-        assert!(matches!(
-            KeySequence::parse("<F25>"),
-            Err(NotationError::InvalidFunctionKey(_))
-        ));
+        assert_eq!(KeySequence::parse("   ").unwrap().to_string(), "<Space><Space><Space>");
+        assert_eq!(KeySequence::parse(" a b").unwrap().to_string(), "<Space>a<Space>b");
+        assert_eq!(KeySequence::parse("<C-t").unwrap().to_string(), "<lt>C-t");
+        assert_eq!(KeySequence::parse("<>").unwrap().to_string(), "<lt><gt>");
+        assert_eq!(KeySequence::parse("<X-t>").unwrap().to_string(), "<lt>X-t<gt>");
+        assert_eq!(KeySequence::parse("<Nope>").unwrap().to_string(), "<lt>Nope<gt>");
+        assert_eq!(KeySequence::parse("<x>").unwrap().to_string(), "<lt>x<gt>");
+        assert_eq!(KeySequence::parse("<F0>").unwrap().to_string(), "<lt>F0<gt>");
+        assert_eq!(KeySequence::parse("<F25>").unwrap().to_string(), "<lt>F25<gt>");
     }
 }

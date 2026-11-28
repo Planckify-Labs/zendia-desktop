@@ -1064,6 +1064,33 @@ impl Component for AgentPanel {
                                 stop_for_key();
                                 false
                             }
+                            _ if (ctrl
+                                && !alt
+                                && !meta
+                                && (e.code == Code::KeyV
+                                    || matches!(&e.key, Key::Character(c) if c.eq_ignore_ascii_case("v"))))
+                                || (shift && !ctrl && !alt && !meta && e.code == Code::Insert) =>
+                            {
+                                if let Some(mut ds) = dock_state
+                                    && let Ok(raw_clip) = freya::clipboard::Clipboard::get()
+                                {
+                                    let pasted = parse_clipboard_file_attachments(&raw_clip);
+                                    if !pasted.is_empty() {
+                                        e.stop_propagation();
+                                        e.prevent_default();
+                                        let mut files = ds.staged_attachments.peek().clone();
+                                        for item in pasted {
+                                            if !files.iter().any(|f| f.path == item.path && !item.path.is_empty()) {
+                                                files.push(item);
+                                            }
+                                        }
+                                        ds.staged_attachments.set(files);
+                                        return false;
+                                    }
+                                }
+                                e.stop_propagation();
+                                true
+                            }
                             Key::Named(NamedKey::Escape) => {
                                 e.stop_propagation();
                                 e.prevent_default();
@@ -1434,21 +1461,16 @@ impl Component for AgentPanel {
                 )
         });
 
-        // DC-01: Global <A-Space> (Alt+Space) hold-to-dictate keyboard handler.
-        let panel_focused = self.resolved.focused;
+        // DC-01 & AGK-03: Configurable hold-to-dictate keyboard handler (`model.settings.dictation_hold_key`).
+        let core_dict_key = core.clone();
         rect()
             .width(Size::fill())
             .height(Size::fill())
             .content(Content::Flex)
             .on_pointer_down(on_panel_press)
             .on_global_key_down(move |e: Event<KeyboardEventData>| {
-                if !panel_focused {
-                    return;
-                }
-                let is_alt_space = e.modifiers.contains(Modifiers::ALT)
-                    && !e.modifiers.intersects(Modifiers::CONTROL | Modifiers::META)
-                    && (e.code == Code::Space || matches!(&e.key, Key::Character(c) if c == " "));
-                if is_alt_space {
+                let hold_spec = core_dict_key.model().peek().settings.dictation_hold_key.clone();
+                if matches_dictation_hold_key(&e, &hold_spec) {
                     e.stop_propagation();
                     e.prevent_default();
                     if !*hold_active.peek() && dictation_phase == AgentDictationPhase::Idle {
@@ -1461,15 +1483,16 @@ impl Component for AgentPanel {
                 if !*hold_active.peek() {
                     return;
                 }
-                let released = e.code == Code::Space
-                    || matches!(&e.key, Key::Named(NamedKey::Alt))
-                    || matches!(&e.key, Key::Character(c) if c == " ");
+                let released = matches!(
+                    e.key,
+                    Key::Named(NamedKey::Alt | NamedKey::Control | NamedKey::Meta | NamedKey::Shift)
+                ) || crate::input::key_stroke_from_event(&e.key, e.code, Modifiers::empty()).is_some();
                 if released {
                     hold_active.set(false);
                     if *dictation_connecting.peek() {
                         cancel_dictation();
                         notice_text.set(Some(
-                            "Hold Alt+Space until it says \u{201c}Speak now\u{201d}.".to_string(),
+                            "Hold dictation key until it says \u{201c}Speak now\u{201d}.".to_string(),
                         ));
                     } else if dock_state.is_some_and(|ds| *ds.dictation.peek() == DictationState::Listening) {
                         finish_for_hold();
@@ -3852,4 +3875,71 @@ impl Component for ComposerSendButton {
     fn render_key(&self) -> DiffKey {
         self.key.clone().or(self.default_key())
     }
+}
+
+/// Returns whether `e` matches a configured `zendia.dictation.hold-key` token such as `<A-Space>` (`AGK-03`).
+pub fn matches_dictation_hold_key(e: &KeyboardEventData, hold_key: &str) -> bool {
+    let Ok(expected) = hold_key.trim().parse::<zendia_keymap::KeyStroke>() else {
+        return false;
+    };
+    crate::input::key_stroke_from_event(&e.key, e.code, e.modifiers) == Some(expected)
+}
+
+fn percent_decode_uri_path(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = ((bytes[i + 1] as char).to_digit(16), (bytes[i + 2] as char).to_digit(16))
+        {
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parses clipboard text containing copied file paths or `file://` URIs into [`InstructionAttachment`]s (`AGK-04`).
+/// Returns empty if any non-comment line is not an existing regular file so ordinary text pastes stay untouched.
+pub fn parse_clipboard_file_attachments(raw: &str) -> Vec<InstructionAttachment> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let path_str = if let Some(rest) = trimmed.strip_prefix("file://localhost") {
+            percent_decode_uri_path(rest)
+        } else if let Some(rest) = trimmed.strip_prefix("file://") {
+            percent_decode_uri_path(rest)
+        } else if trimmed.starts_with('/') {
+            trimmed.to_string()
+        } else {
+            return Vec::new();
+        };
+        let path = std::path::Path::new(&path_str);
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Vec::new();
+        };
+        if !meta.is_file() {
+            return Vec::new();
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| path_str.clone());
+        out.push(InstructionAttachment {
+            kind: AttachmentKind::from_filename(&name),
+            name,
+            path: path_str,
+            size_bytes: meta.len(),
+        });
+    }
+    out
 }

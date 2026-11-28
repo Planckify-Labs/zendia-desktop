@@ -206,13 +206,13 @@ description = "Delete Char Before Cursor"
 mode = "i"
 keys = "<A-p>"
 command = "yank.put_prev"
-description = "Cycle Previous Yank"
+description = "Put Previous Yank"
 
 [[bindings]]
 mode = "i"
 keys = "<A-n>"
 command = "yank.put_next"
-description = "Cycle Next Yank"
+description = "Put Next Yank"
 
 [[bindings]]
 mode = "i"
@@ -364,7 +364,7 @@ description = "Toggle Pin"
 mode = "n"
 keys = "<leader>bP"
 command = "tab.close_unpinned"
-description = "Delete Unpinned Tabs"
+description = "Delete Non-Pinned Tabs"
 
 [[bindings]]
 mode = "n"
@@ -411,7 +411,7 @@ description = "Toggle Mute"
 [[bindings]]
 mode = "n"
 keys = "<leader>bf"
-command = "tab.move_to_folder"
+command = "tab.move_to_folder_pick"
 description = "Move to Folder"
 
 [[bindings]]
@@ -425,7 +425,7 @@ mode = "n"
 keys = "<leader>fn"
 command = "address_bar.open"
 args = { new_tab = true }
-description = "New Tab (URL bar)"
+description = "New Tab"
 
 # ---------------------------------------------------------------------------
 # Normal mode — navigation, URL & yank
@@ -467,7 +467,7 @@ description = "Open Parent Path"
 mode = "n"
 keys = "yy"
 command = "address_bar.copy_current_url"
-description = "Yank Page URL"
+description = "Copy URL"
 
 [[bindings]]
 mode = "n"
@@ -622,7 +622,7 @@ description = "Prev Space"
 [[bindings]]
 mode = "n"
 keys = "<leader><Tab><Tab>"
-command = "space.new"
+command = "space.create_form.open"
 description = "New Space"
 
 [[bindings]]
@@ -653,7 +653,7 @@ description = "Rename Space"
 mode = "n"
 keys = "<leader><Tab>i"
 command = "space.icon"
-description = "Space Icon"
+description = "Change Space Icon"
 
 [[bindings]]
 mode = "n"
@@ -673,30 +673,60 @@ description = "Unload Space"
 
 [[bindings]]
 mode = "n"
-keys = ["<C-h>", "<leader>wh"]
+keys = "<C-h>"
+command = "panes.focus_left"
+description = "Go to Left Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wh"
 command = "split.focus_left"
 description = "Go to Left Window"
 
 [[bindings]]
 mode = "n"
-keys = ["<C-j>", "<leader>wj"]
+keys = "<C-j>"
+command = "panes.focus_down"
+description = "Go to Lower Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wj"
 command = "split.focus_down"
 description = "Go to Lower Window"
 
 [[bindings]]
 mode = "n"
-keys = ["<C-k>", "<leader>wk"]
+keys = "<C-k>"
+command = "panes.focus_up"
+description = "Go to Upper Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wk"
 command = "split.focus_up"
 description = "Go to Upper Window"
 
 [[bindings]]
 mode = "n"
-keys = ["<C-l>", "<leader>wl"]
+keys = "<C-l>"
+command = "panes.focus_right"
+description = "Go to Right Window"
+
+[[bindings]]
+mode = "n"
+keys = "<leader>wl"
 command = "split.focus_right"
 description = "Go to Right Window"
 
 [[bindings]]
 mode = "n"
+keys = "<C-Bslash>"
+command = "panes.last"
+description = "Go to Last Window"
+
+[[bindings]]
+mode = "i"
 keys = "<C-Bslash>"
 command = "panes.last"
 description = "Go to Last Window"
@@ -728,28 +758,26 @@ description = "Decrease Window Width"
 [[bindings]]
 mode = "n"
 keys = "<leader>-"
-command = "split.set_layout"
+command = "split.horizontal"
 description = "Split Window Below"
-args = { direction = "vertical" }
 
 [[bindings]]
 mode = "n"
 keys = "<leader>|"
-command = "split.set_layout"
+command = "split.vertical"
 description = "Split Window Right"
-args = { direction = "horizontal" }
 
 [[bindings]]
 mode = "n"
 keys = "<leader>ww"
 command = "split.next"
-description = "Next Window"
+description = "Go to Next Window"
 
 [[bindings]]
 mode = "n"
 keys = "<leader>wp"
 command = "split.last"
-description = "Last Window"
+description = "Go to Last Used Window"
 
 [[bindings]]
 mode = "n"
@@ -773,13 +801,13 @@ description = "Close Other Windows"
 mode = "n"
 keys = "<leader>wm"
 command = "split.zoom"
-description = "Maximize Window"
+description = "Fill View with Window"
 
 [[bindings]]
 mode = "n"
 keys = "<leader>w="
 command = "split.equalize"
-description = "Equalize Windows"
+description = "Make Windows Equal"
 
 [[bindings]]
 mode = "n"
@@ -797,43 +825,43 @@ description = "Rotate Windows"
 mode = "n"
 keys = "<leader>wR"
 command = "split.rotate_back"
-description = "Rotate Windows Backward"
+description = "Rotate Windows Back"
 
 [[bindings]]
 mode = "n"
 keys = "<leader>wH"
 command = "split.edge_left"
-description = "Move Window to Left Edge"
+description = "Move Window to Far Left"
 
 [[bindings]]
 mode = "n"
 keys = "<leader>wJ"
 command = "split.edge_down"
-description = "Move Window to Bottom Edge"
+description = "Move Window to Bottom"
 
 [[bindings]]
 mode = "n"
 keys = "<leader>wK"
 command = "split.edge_up"
-description = "Move Window to Top Edge"
+description = "Move Window to Top"
 
 [[bindings]]
 mode = "n"
 keys = "<leader>wL"
 command = "split.edge_right"
-description = "Move Window to Right Edge"
+description = "Move Window to Far Right"
 
 [[bindings]]
 mode = "n"
 keys = "<leader>wg"
 command = "split.grab"
-description = "Move Window..."
+description = "Move Window…"
 
 [[bindings]]
 mode = "n"
 keys = "<leader>wa"
-command = "split.new_empty"
-description = "Add Tab to Split..."
+command = "split.add"
+description = "Add Tab to Split…"
 
 [[bindings]]
 mode = "n"
@@ -854,35 +882,35 @@ description = "Toggle Library"
 [[bindings]]
 mode = "n"
 keys = "<leader>oh"
-command = "library.open"
+command = "library.toggle"
 description = "History"
 args = { section = "history" }
 
 [[bindings]]
 mode = "n"
 keys = "<leader>od"
-command = "library.open"
+command = "library.toggle"
 description = "Downloads"
 args = { section = "downloads" }
 
 [[bindings]]
 mode = "n"
 keys = "<leader>os"
-command = "library.open"
+command = "library.toggle"
 description = "Spaces"
 args = { section = "spaces" }
 
 [[bindings]]
 mode = "n"
 keys = "<leader>om"
-command = "library.open"
+command = "library.toggle"
 description = "Media"
 args = { section = "media" }
 
 [[bindings]]
 mode = "n"
 keys = "<leader>or"
-command = "library.open"
+command = "library.toggle"
 description = "Space Routing"
 args = { section = "routing" }
 
@@ -1244,37 +1272,37 @@ description = "Ask Web Chat About the Selection or Page"
 mode = "v"
 keys = "<leader>ae"
 command = "webchat.explain"
-description = "Explain Selection"
+description = "Explain the Selection"
 
 [[bindings]]
 mode = "v"
 keys = "<leader>as"
 command = "webchat.summarize"
-description = "Summarize Selection"
+description = "Summarize the Selection"
 
 [[bindings]]
 mode = "v"
 keys = "<leader>at"
 command = "webchat.translate"
-description = "Translate Selection"
+description = "Translate the Selection"
 
 [[bindings]]
 mode = "v"
 keys = "<leader>ad"
 command = "webchat.define"
-description = "Define Selection"
+description = "Define the Selection"
 
 [[bindings]]
 mode = "v"
 keys = "<leader>af"
 command = "webchat.fact_check"
-description = "Fact Check Selection"
+description = "Fact-Check the Selection"
 
 [[bindings]]
 mode = "v"
 keys = "<leader>aa"
 command = "webchat.ask_about"
-description = "Ask About Selection"
+description = "Ask About the Selection…"
 
 # ---------------------------------------------------------------------------
 # Explorer mode
@@ -1284,13 +1312,13 @@ description = "Ask About Selection"
 mode = "e"
 keys = ["j", "<Down>"]
 command = "explorer.down"
-description = "Next Row"
+description = "Down"
 
 [[bindings]]
 mode = "e"
 keys = ["k", "<Up>"]
 command = "explorer.up"
-description = "Prev Row"
+description = "Up"
 
 [[bindings]]
 mode = "e"
@@ -1326,19 +1354,19 @@ description = "Open"
 mode = "e"
 keys = "l"
 command = "explorer.right"
-description = "Open / Expand"
+description = "Open, or Right on the Foot"
 
 [[bindings]]
 mode = "e"
 keys = "o"
 command = "explorer.preview"
-description = "Preview"
+description = "Open, Keep Explorer"
 
 [[bindings]]
 mode = "e"
 keys = "h"
 command = "explorer.collapse"
-description = "Collapse"
+description = "Close Folder"
 
 [[bindings]]
 mode = "e"
@@ -1362,43 +1390,43 @@ description = "Close Folder"
 mode = "e"
 keys = "zR"
 command = "folder.expand_all"
-description = "Expand All Folders"
+description = "Open All Folders"
 
 [[bindings]]
 mode = "e"
 keys = ["zM", "Z"]
 command = "folder.collapse_all"
-description = "Collapse All Folders"
+description = "Close All Folders"
 
 [[bindings]]
 mode = "e"
 keys = "s"
 command = "explorer.jump"
-description = "Jump Hints"
+description = "Jump"
 
 [[bindings]]
 mode = "e"
 keys = "/"
 command = "explorer.find"
-description = "Filter Rows"
+description = "Find Tab"
 
 [[bindings]]
 mode = "e"
 keys = "a"
-command = "tab.new"
+command = "explorer.add"
 description = "New Tab"
 
 [[bindings]]
 mode = "e"
 keys = "A"
-command = "folder.create"
+command = "explorer.add_folder"
 description = "New Folder"
 
 [[bindings]]
 mode = "e"
 keys = "d"
-command = "tab.close"
-description = "Close Tab"
+command = "explorer.delete"
+description = "Delete"
 
 [[bindings]]
 mode = "e"
@@ -1409,13 +1437,13 @@ description = "Reopen Closed Tab"
 [[bindings]]
 mode = "e"
 keys = "r"
-command = "tab.start_rename"
+command = "explorer.rename"
 description = "Rename"
 
 [[bindings]]
 mode = "e"
 keys = "c"
-command = "tab.duplicate"
+command = "explorer.duplicate"
 description = "Duplicate"
 
 [[bindings]]
@@ -1433,26 +1461,26 @@ description = "Yank Markdown Link"
 [[bindings]]
 mode = "e"
 keys = "p"
-command = "tab.toggle_pin"
+command = "explorer.toggle_pin"
 description = "Toggle Pin"
 
 [[bindings]]
 mode = "e"
 keys = "e"
-command = "tab.toggle_essential"
+command = "explorer.toggle_essential"
 description = "Toggle Essential"
 
 [[bindings]]
 mode = "e"
 keys = ">"
-command = "tab.move_to_folder"
+command = "explorer.move_to_folder"
 description = "Move to Folder"
 
 [[bindings]]
 mode = "e"
 keys = "<lt>"
 command = "explorer.move_out_of_folder"
-description = "Move Out of Folder"
+description = "Move out of Folder"
 
 [[bindings]]
 mode = "e"
@@ -1470,49 +1498,49 @@ description = "Move Up"
 mode = "e"
 keys = "<C-v>"
 command = "explorer.split_vertical"
-description = "Split Right"
+description = "Open in Vertical Split"
 
 [[bindings]]
 mode = "e"
 keys = "<C-s>"
 command = "explorer.split_horizontal"
-description = "Split Below"
+description = "Open in Horizontal Split"
 
 [[bindings]]
 mode = "e"
 keys = "R"
-command = "navigation.reload"
-description = "Reload Tab"
+command = "explorer.reload"
+description = "Reload"
 
 [[bindings]]
 mode = "e"
 keys = "U"
-command = "tab.unload"
-description = "Unload Tab"
+command = "explorer.unload"
+description = "Unload"
 
 [[bindings]]
 mode = "e"
 keys = "M"
-command = "tab.toggle_mute"
+command = "explorer.toggle_mute"
 description = "Toggle Mute"
 
 [[bindings]]
 mode = "e"
 keys = "m"
 command = "explorer.menu"
-description = "Context Menu"
+description = "Menu"
 
 [[bindings]]
 mode = "e"
 keys = "+"
 command = "explorer.create"
-description = "New"
+description = "Create Menu"
 
 [[bindings]]
 mode = "e"
 keys = "<Tab>"
 command = "explorer.toggle_select"
-description = "Toggle Selection"
+description = "Select"
 
 [[bindings]]
 mode = "e"
@@ -1540,9 +1568,15 @@ description = "Keymaps (which-key)"
 
 [[bindings]]
 mode = "e"
-keys = ["q", "<Esc>", "<leader>e"]
+keys = ["q", "<leader>e"]
 command = "explorer.quit"
-description = "Leave Explorer"
+description = "Close Explorer"
+
+[[bindings]]
+mode = "e"
+keys = "<Esc>"
+command = "explorer.escape"
+description = "Clear Selection or Close"
 
 # ---------------------------------------------------------------------------
 # Toolbar mode
@@ -1552,49 +1586,49 @@ description = "Leave Explorer"
 mode = "t"
 keys = ["h", "<Left>"]
 command = "toolbar.left"
-description = "Previous Button"
+description = "Left"
 
 [[bindings]]
 mode = "t"
 keys = ["l", "<Right>"]
 command = "toolbar.right"
-description = "Next Button"
+description = "Right"
 
 [[bindings]]
 mode = "t"
 keys = ["0", "^"]
 command = "toolbar.first"
-description = "First Button"
+description = "First Item"
 
 [[bindings]]
 mode = "t"
 keys = "$"
 command = "toolbar.last"
-description = "Last Button"
+description = "Last Item"
 
 [[bindings]]
 mode = "t"
 keys = ["<CR>", "o"]
 command = "toolbar.press"
-description = "Activate Button"
+description = "Press"
 
 [[bindings]]
 mode = "t"
 keys = "m"
 command = "toolbar.menu"
-description = "Button Menu"
+description = "Menu"
 
 [[bindings]]
 mode = "t"
 keys = "s"
 command = "toolbar.jump"
-description = "Jump Hints"
+description = "Jump"
 
 [[bindings]]
 mode = "t"
 keys = "i"
-command = "location.focus"
-description = "Focus Address Bar"
+command = "toolbar.urlbar"
+description = "Edit Address"
 
 [[bindings]]
 mode = "t"
@@ -1606,7 +1640,7 @@ description = "Keymaps (which-key)"
 mode = "t"
 keys = ["q", "<Esc>", "<leader>m"]
 command = "toolbar.quit"
-description = "Leave Toolbar"
+description = "Close Toolbar"
 
 # ---------------------------------------------------------------------------
 # Library mode
@@ -1824,13 +1858,13 @@ description = "Go to Right Window"
 mode = "w"
 keys = "w"
 command = "split.next"
-description = "Next Window"
+description = "Go to Next Window"
 
 [[bindings]]
 mode = "w"
 keys = "p"
 command = "split.last"
-description = "Last Window"
+description = "Go to Last Used Window"
 
 [[bindings]]
 mode = "w"
@@ -1841,16 +1875,14 @@ description = "Pick Window"
 [[bindings]]
 mode = "w"
 keys = "s"
-command = "split.set_layout"
+command = "split.horizontal"
 description = "Split Window Below"
-args = { direction = "vertical" }
 
 [[bindings]]
 mode = "w"
 keys = "v"
-command = "split.set_layout"
+command = "split.vertical"
 description = "Split Window Right"
-args = { direction = "horizontal" }
 
 [[bindings]]
 mode = "w"
@@ -1868,13 +1900,13 @@ description = "Close Other Windows"
 mode = "w"
 keys = "m"
 command = "split.zoom"
-description = "Maximize Window"
+description = "Fill View with Window"
 
 [[bindings]]
 mode = "w"
 keys = "="
 command = "split.equalize"
-description = "Equalize Windows"
+description = "Make Windows Equal"
 
 [[bindings]]
 mode = "w"
@@ -1892,31 +1924,31 @@ description = "Rotate Windows"
 mode = "w"
 keys = "R"
 command = "split.rotate_back"
-description = "Rotate Windows Backward"
+description = "Rotate Windows Back"
 
 [[bindings]]
 mode = "w"
 keys = "H"
 command = "split.edge_left"
-description = "Move Window to Left Edge"
+description = "Move Window to Far Left"
 
 [[bindings]]
 mode = "w"
 keys = "J"
 command = "split.edge_down"
-description = "Move Window to Bottom Edge"
+description = "Move Window to Bottom"
 
 [[bindings]]
 mode = "w"
 keys = "K"
 command = "split.edge_up"
-description = "Move Window to Top Edge"
+description = "Move Window to Top"
 
 [[bindings]]
 mode = "w"
 keys = "L"
 command = "split.edge_right"
-description = "Move Window to Right Edge"
+description = "Move Window to Far Right"
 
 [[bindings]]
 mode = "w"
@@ -1946,13 +1978,13 @@ description = "Decrease Window Width"
 mode = "w"
 keys = "g"
 command = "split.grab"
-description = "Move Window..."
+description = "Move Window…"
 
 [[bindings]]
 mode = "w"
 keys = "a"
-command = "split.new_empty"
-description = "Add Tab to Split..."
+command = "split.add"
+description = "Add Tab to Split…"
 
 [[bindings]]
 mode = "w"

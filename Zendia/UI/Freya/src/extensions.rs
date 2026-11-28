@@ -548,13 +548,16 @@ impl ExtensionAdapter {
             "host.tabs.navigateHistory" => {
                 let target_id = resolve_tab_id(&self.core, args)?;
                 let delta = args.get("delta").and_then(Value::as_i64).unwrap_or(0);
+                let steps = Some((delta.unsigned_abs().min(u64::from(u32::MAX)) as u32).max(1));
                 if delta < 0 {
                     let _ = self.core.invoke(Command::NavigationBack {
                         tab_id: Some(target_id),
+                        count: steps,
                     });
                 } else if delta > 0 {
                     let _ = self.core.invoke(Command::NavigationForward {
                         tab_id: Some(target_id),
+                        count: steps,
                     });
                 }
                 Ok(Value::Null)
@@ -1148,6 +1151,9 @@ fn parse_ui_snapshot(snapshot: &Value) -> (Vec<ExtensionInfo>, Vec<ExtensionComm
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
             let icon_data = parse_icon_data(item.get("iconData"));
+            let has_action = action.is_some();
+            let is_system = item.get("isSystem").and_then(Value::as_bool).unwrap_or(false)
+                || item.get("hidden").and_then(Value::as_bool).unwrap_or(false);
 
             extensions.push(ExtensionInfo {
                 id: ExtensionId::new(id_str.to_string()),
@@ -1158,6 +1164,8 @@ fn parse_ui_snapshot(snapshot: &Value) -> (Vec<ExtensionInfo>, Vec<ExtensionComm
                 icon_data,
                 enabled,
                 pinned_to_toolbar,
+                has_action,
+                is_system,
                 has_site_access,
                 site_access,
                 permissions,

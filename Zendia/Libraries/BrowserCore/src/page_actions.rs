@@ -20,8 +20,12 @@
 //! - `<CR>` takes the first target, `<BS>` takes back a key (or ends the jump), `<Esc>` ends it, and a key with Ctrl,
 //!   Alt or Super ends it and goes on to the keymap.
 
+use crate::captcha::{
+    CHALLENGE_POLL_MS, CURSOR_NOTICE_MS, PadStepOutcome, PointerPadOptions, PointerPadState, STAYING_NOTICE_MS,
+    STAYING_PROMPT, lattice, purpose_display_name, sticky_labels,
+};
 use crate::commands::{Command, CommandDescriptor, CommandError};
-use crate::focus::hint_labels;
+use crate::focus::{HINT_ALPHABET, hint_labels};
 use crate::model::TabId;
 use std::collections::{BTreeMap, VecDeque};
 use zendia_automation::{CaptchaOp, JumpKind, PageTarget, ViewportRect, VisualMotion};
@@ -39,6 +43,12 @@ pub struct PageHintItem {
     /// `control`, `field`, `match`, `word` or `paragraph`.
     pub kind: String,
     pub href: Option<String>,
+    pub challenge: bool,
+    pub drag: bool,
+    pub slider: bool,
+    pub track: Option<ViewportRect>,
+    pub picture: bool,
+    pub purpose: Option<String>,
 }
 
 /// A jump in progress on one tab's page.
@@ -56,10 +66,42 @@ pub struct PageHintSession {
     pub extend: bool,
     /// The text the page is being asked about, while its answer is on the way.
     pub awaiting: Option<String>,
+    /// True when the page scrolled or resized while `awaiting` was in flight so a fresh scan runs on completion (`JMP-04`).
+    pub refresh_queued: bool,
     /// Keys typed while the page was being asked, handled in order once it answers.
     pub queued: VecDeque<HintKey>,
     /// The label each target had, which it keeps while it is free.
     previous: BTreeMap<String, String>,
+    /// Whether this jump stays open across picks (`gc`, `<leader>cc`, or `s` after picking inside a challenge, `CAP-03`).
+    pub staying: bool,
+    /// Whether `jump.captcha` was invoked with `orPage: true` so 0 CAPTCHAs falls back to `jump.hints`.
+    pub or_page: bool,
+    /// True while switching from `s` into challenge-only labels so keys wait until new labels settle (`CAP-03`).
+    pub switching: bool,
+    /// Baseline `captchaTokens` count when the jump started; an increase means the CAPTCHA was solved (`CAP-02`, `CAP-03`).
+    pub initial_tokens: u32,
+    pub tokens_recorded: bool,
+    /// Consecutive empty polls in a staying jump (`VACANT_POLLS = 3` ends it, `CAP-03`).
+    pub vacant_polls: u8,
+    /// Sticky label map keeping each challenge target's label across re-reads (`CAP-03`).
+    pub kept: BTreeMap<String, String>,
+    /// Cached gobang board places inferred from challenge pieces (`CAP-06`).
+    pub board_places: Option<Vec<ViewportRect>>,
+    /// Latest recognised CAPTCHA bounding boxes on the page (`CAP-05`).
+    pub captcha_areas: Vec<ViewportRect>,
+    /// Top viewport `(innerWidth, innerHeight)` in CSS pixels.
+    pub viewport: (f32, f32),
+    /// Active keyboard cursor (`PointerPad`) when `.` / `,` / drag / picture / 0-control `gc` opened it (`CAP-05`, `CAP-06`).
+    pub cursor_pad: Option<Box<PointerPadState>>,
+    /// Temporary flash notice shown in the staying prompt (`"no verify button here"`, etc., `CAP-04`, `CAP-09`).
+    pub notice: Option<String>,
+    pub notice_seq: u64,
+    pub notice_duration_ms: u64,
+    /// Poll timer coordination for the UI shell (`350 ms` settle, `700 ms` click check, `900 ms` poll).
+    pub poll_seq: u64,
+    pub poll_delay_ms: Option<u64>,
+    /// Purpose list waiting on a fresh re-read before flashing `"no <purpose> here"` (`CAP-04`).
+    pub pending_purpose: Option<Vec<String>>,
 }
 
 /// A key given to a jump.
@@ -68,20 +110,44 @@ pub enum HintKey {
     /// A printable character, as typed (a capital letter keeps its case).
     Char(char),
     Enter,
+    Tab,
     Backspace,
     Escape,
     Space,
-    /// A key with Ctrl, Alt or Super: the jump ends and the key goes to the keymap.
-    Chord,
+    /// Arrow or shifted-arrow token (`<Left>`, `<S-Right>`, …) for the keyboard cursor (`CAP-05`).
+    Arrow(String),
+    /// A key with Ctrl, Alt or Super (`<C-r>`, `<C-l>`, …).
+    Chord(String),
     /// Any other key, which a jump has no use for.
     Other,
 }
 
+impl HintKey {
+    pub fn to_token(&self) -> String {
+        match self {
+            Self::Char(ch) => ch.to_string(),
+            Self::Enter => "<CR>".to_string(),
+            Self::Tab => "<Tab>".to_string(),
+            Self::Backspace => "<BS>".to_string(),
+            Self::Escape => "<Esc>".to_string(),
+            Self::Space => "<Space>".to_string(),
+            Self::Arrow(tok) | Self::Chord(tok) => tok.clone(),
+            Self::Other => String::new(),
+        }
+    }
+}
+
 /// What a key did to a jump.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum HintOutcome {
-    /// A target was picked: the jump ends and the page goes to it.
+    /// A target was picked: the page goes to it (ending non-challenge jumps, or staying open inside challenges).
     Pick { id: String, new_tab: bool },
+    /// Press the first CAPTCHA control matching one of `purposes` (`<CR>`, `<Tab>`, `<C-r>`, `<C-a>`, `<C-p>`, `CAP-04`).
+    PressPurpose { purposes: Vec<String> },
+    /// Open the keyboard cursor over the CAPTCHA (`.` clicks, `,` drags on first jump, `CAP-05`).
+    OpenCursor { drag: bool },
+    /// The keyboard cursor handled a key (`CAP-05`, `CAP-06`).
+    CursorAct { outcome: PadStepOutcome },
     /// The page is to be asked for the targets of this text.
     Ask { pattern: String },
     /// The labels changed.
@@ -96,6 +162,7 @@ pub enum HintOutcome {
 
 impl PageHintSession {
     pub fn new(tab_id: TabId, kind: JumpKind, extend: bool) -> Self {
+        let staying = matches!(kind, JumpKind::Captcha | JumpKind::Challenge);
         Self {
             tab_id,
             kind,
@@ -104,9 +171,61 @@ impl PageHintSession {
             pattern: String::new(),
             extend,
             awaiting: None,
+            refresh_queued: false,
             queued: VecDeque::new(),
             previous: BTreeMap::new(),
+            staying,
+            or_page: false,
+            switching: false,
+            initial_tokens: 0,
+            tokens_recorded: false,
+            vacant_polls: 0,
+            kept: BTreeMap::new(),
+            board_places: None,
+            captcha_areas: Vec::new(),
+            viewport: (1280.0, 800.0),
+            cursor_pad: None,
+            notice: None,
+            notice_seq: 0,
+            notice_duration_ms: 0,
+            poll_seq: 0,
+            poll_delay_ms: staying.then_some(CHALLENGE_POLL_MS),
+            pending_purpose: None,
         }
+    }
+
+    /// Whether `.` / `,` cursor keys and challenge staying transitions apply (`s`, `gc`, `<leader>cc`).
+    pub fn supports_challenge(&self) -> bool {
+        self.staying || matches!(self.kind, JumpKind::Hints | JumpKind::Captcha | JumpKind::Challenge)
+    }
+
+    /// Whether `key` ends this jump and passes through to the keymap (`VimParity.md:477, 491`).
+    pub fn key_passes_to_keymap(&self, key: &HintKey) -> bool {
+        if self.cursor_pad.is_some() {
+            return false;
+        }
+        if !self.staying {
+            return matches!(key, HintKey::Chord(_));
+        }
+        self.items.is_empty() && !self.switching && self.awaiting.is_none() && *key != HintKey::Escape
+    }
+
+    /// Schedules the next poll delay (`350 ms`, `700 ms`, `900 ms`) and bumps `poll_seq`.
+    pub fn schedule_poll(&mut self, delay_ms: u64) {
+        self.poll_seq = self.poll_seq.wrapping_add(1);
+        self.poll_delay_ms = Some(delay_ms);
+    }
+
+    /// Sets a temporary flash notice on the staying prompt (`1500 ms`) or cursor pad (`600 ms`).
+    pub fn flash_staying_notice(&mut self, message: String) {
+        self.notice = Some(message);
+        self.notice_seq = self.notice_seq.wrapping_add(1);
+        self.notice_duration_ms = STAYING_NOTICE_MS;
+    }
+
+    pub fn flash_cursor_click(&mut self) {
+        self.notice_seq = self.notice_seq.wrapping_add(1);
+        self.notice_duration_ms = CURSOR_NOTICE_MS;
     }
 
     /// Takes the targets the page found for `pattern` and labels them.
@@ -117,6 +236,21 @@ impl PageHintSession {
             // Then in reading order: rows of 8 pixels, top to bottom, then left to right.
             let row = |target: &PageTarget| (target.y / 8.0 + 0.5).floor() as i64;
             targets.sort_by(|a, b| row(a).cmp(&row(b)).then(a.x.total_cmp(&b.x)));
+            if self.staying {
+                let keys: Vec<String> = targets.iter().map(|t| t.id.clone()).collect();
+                let sticky = sticky_labels(&keys, &self.kept, HINT_ALPHABET);
+                for (target, maybe_label) in targets.iter().zip(&sticky) {
+                    if let Some(lbl) = maybe_label {
+                        self.kept.insert(target.id.clone(), lbl.clone());
+                    }
+                }
+                self.items = targets
+                    .into_iter()
+                    .zip(sticky)
+                    .map(|(target, label)| item(target, label))
+                    .collect();
+                return;
+            }
             let labels = hint_labels(targets.len());
             self.items = targets
                 .into_iter()
@@ -161,23 +295,156 @@ impl PageHintSession {
         })
     }
 
-    /// Whether the jump labels text (the prompt shows what was typed).
+    /// Whether the jump shows a bottom/top prompt bar (`gs`, `S`, or staying CAPTCHA jump).
     pub fn shows_prompt(&self) -> bool {
-        !self.kind.labels_at_once()
+        self.cursor_pad.is_none() && (!self.kind.labels_at_once() || self.staying)
+    }
+
+    /// Text displayed in the jump prompt bar (`› pattern` or staying CAPTCHA prompt / notice).
+    pub fn prompt_text(&self) -> String {
+        if !self.kind.labels_at_once() {
+            format!("\u{203a} {}", self.pattern)
+        } else {
+            self.notice.clone().unwrap_or_else(|| STAYING_PROMPT.to_string())
+        }
+    }
+
+    /// Infers a gobang board lattice from pieces of the same size (`ZendiaJumpContent.#boardOf`, `CAP-06`).
+    pub fn board_of(&mut self, target: &PageHintItem) -> Option<(Vec<ViewportRect>, usize)> {
+        let w = target.rect.width;
+        let h = target.rect.height;
+        let alike: Vec<ViewportRect> = self
+            .items
+            .iter()
+            .filter(|each| {
+                each.challenge
+                    && !each.picture
+                    && (each.rect.width - w).abs() <= w * 0.15
+                    && (each.rect.height - h).abs() <= h * 0.15
+            })
+            .map(|each| each.rect)
+            .collect();
+        let mut places = lattice(&alike);
+        let near = |place: ViewportRect, rect: ViewportRect| -> bool {
+            (place.x - rect.x).abs() < rect.width / 2.0 && (place.y - rect.y).abs() < rect.height / 2.0
+        };
+        if let Some(prev_board) = self.board_places.as_ref()
+            && !alike.is_empty()
+            && alike.iter().all(|r| prev_board.iter().any(|p| near(*p, *r)))
+        {
+            places = Some(prev_board.clone());
+        } else if let Some(ref found) = places {
+            self.board_places = Some(found.clone());
+        }
+        places.map(|p| (p, alike.len()))
+    }
+
+    /// Finds a slider puzzle piece directly above `handle` (`ZendiaJumpContent.#pieceOf`, `CAP-06`).
+    pub fn piece_of(&self, handle: &PageHintItem) -> Option<ViewportRect> {
+        let cx = handle.rect.x + handle.rect.width / 2.0;
+        let mut candidates: Vec<ViewportRect> = self
+            .items
+            .iter()
+            .filter(|each| {
+                each.id != handle.id
+                    && each.challenge
+                    && !each.picture
+                    && each.purpose.is_none()
+                    && (each.rect.y + each.rect.height) <= handle.rect.y + 2.0
+                    && each.rect.width <= handle.rect.width * 3.0
+                    && ((each.rect.x + each.rect.width / 2.0) - cx).abs()
+                        <= handle.rect.width.max(each.rect.width) / 2.0
+            })
+            .map(|each| each.rect)
+            .collect();
+        candidates.sort_by(|a, b| b.y.total_cmp(&a.y));
+        candidates.into_iter().next()
+    }
+
+    /// Opens the keyboard cursor (`PointerPad`) inside this session and returns initial pointer steps.
+    pub fn open_cursor_pad(&mut self, opts: PointerPadOptions) -> Vec<crate::tab_source::PointerStep> {
+        let watches = opts.watches_captcha;
+        let (pad, steps) = PointerPadState::new(opts);
+        self.cursor_pad = Some(Box::new(pad));
+        self.vacant_polls = 0;
+        if watches {
+            self.schedule_poll(CHALLENGE_POLL_MS);
+        }
+        steps
+    }
+
+    /// Formats `"no <purpose> here"` for the first requested purpose (`CAP-04`, `CAP-09`).
+    pub fn missing_purpose_notice(purposes: &[String]) -> String {
+        let first = purposes.first().map_or("verify", String::as_str);
+        format!("no {} here", purpose_display_name(first))
     }
 
     /// Feeds one key. While the page is being asked about some text, keys wait their turn.
     pub fn feed(&mut self, key: HintKey) -> HintOutcome {
+        if let Some(pad) = self.cursor_pad.as_mut() {
+            let token = key.to_token();
+            if token.is_empty() {
+                return HintOutcome::Ignored;
+            }
+            let outcome = pad.handle_token(&token, self.staying);
+            return HintOutcome::CursorAct { outcome };
+        }
+        if !self.staying && matches!(key, HintKey::Chord(_)) {
+            return HintOutcome::FinishedPassingKey;
+        }
+        if self.staying && self.items.is_empty() && !self.switching && self.awaiting.is_none() && key != HintKey::Escape
+        {
+            return HintOutcome::FinishedPassingKey;
+        }
         if key == HintKey::Escape {
             return HintOutcome::Finished;
+        }
+        if self.switching {
+            return HintOutcome::Ignored;
         }
         if self.awaiting.is_some() {
             self.queued.push_back(key);
             return HintOutcome::Ignored;
         }
+        if self.supports_challenge()
+            && let HintKey::Char(ch @ ('.' | ',')) = key
+        {
+            return HintOutcome::OpenCursor { drag: ch == ',' };
+        }
+        if self.staying {
+            match &key {
+                HintKey::Enter => {
+                    return HintOutcome::PressPurpose {
+                        purposes: vec!["verify".to_string()],
+                    };
+                }
+                HintKey::Tab => {
+                    return HintOutcome::PressPurpose {
+                        purposes: vec!["answer".to_string()],
+                    };
+                }
+                HintKey::Chord(c) if c == "<C-r>" => {
+                    return HintOutcome::PressPurpose {
+                        purposes: vec!["reload".to_string()],
+                    };
+                }
+                HintKey::Chord(c) if c == "<C-a>" => {
+                    return HintOutcome::PressPurpose {
+                        purposes: vec!["audio".to_string(), "visual".to_string()],
+                    };
+                }
+                HintKey::Chord(c) if c == "<C-p>" => {
+                    return HintOutcome::PressPurpose {
+                        purposes: vec!["play".to_string()],
+                    };
+                }
+                HintKey::Chord(_) => return HintOutcome::Ignored,
+                _ => {}
+            }
+        }
         match key {
             HintKey::Escape => HintOutcome::Finished,
-            HintKey::Chord => HintOutcome::FinishedPassingKey,
+            HintKey::Chord(_) => HintOutcome::FinishedPassingKey,
             HintKey::Enter => match self.items.first() {
                 Some(first) => HintOutcome::Pick {
                     id: first.id.clone(),
@@ -188,7 +455,7 @@ impl PageHintSession {
             HintKey::Backspace => self.backspace(),
             HintKey::Space if !self.kind.labels_at_once() => self.type_char(' '),
             HintKey::Char(ch) => self.type_char(ch),
-            HintKey::Space | HintKey::Other => HintOutcome::Ignored,
+            HintKey::Tab | HintKey::Arrow(_) | HintKey::Space | HintKey::Other => HintOutcome::Ignored,
         }
     }
 
@@ -276,6 +543,12 @@ fn item(target: PageTarget, label: Option<String>) -> PageHintItem {
         label,
         kind: target.kind,
         href: target.href,
+        challenge: target.challenge,
+        drag: target.drag,
+        slider: target.slider,
+        track: target.track,
+        picture: target.picture,
+        purpose: target.purpose,
     }
 }
 
@@ -329,6 +602,7 @@ pub enum PageAction {
     /// Labels on the page (`s`, `gs`, `S`, `gc`, the words of visual mode).
     Jump {
         kind: JumpKind,
+        or_page: bool,
     },
     /// A key typed while a jump has the keys.
     PageHintInput {
@@ -336,9 +610,21 @@ pub enum PageAction {
     },
     /// The page moved under a jump: its targets are found again.
     PageHintRefresh,
+    /// Periodic poll of a staying CAPTCHA jump or keyboard cursor (`350 ms` / `700 ms` / `900 ms`, `CAP-03`, `CAP-05`).
+    PageHintPoll {
+        seq: Option<u64>,
+    },
+    /// Clears an expired temporary notice in the staying jump or cursor prompt (`CAP-04`, `CAP-09`).
+    PageHintClearNotice {
+        seq: u64,
+    },
     PageHintCancel,
     /// `i`: the field to type in, by label when there are several.
     InputChoose {
+        count: Option<u32>,
+    },
+    /// `input.first`: the first (or count-th) field of the page.
+    InputFirst {
         count: Option<u32>,
     },
     /// `gi`: the field typed in last.
@@ -356,6 +642,10 @@ pub enum PageAction {
     Captcha {
         op: CaptchaOp,
     },
+    /// `captcha.fill`: fills a local CAPTCHA answer field with `text`.
+    CaptchaFill {
+        text: String,
+    },
 }
 
 impl PageAction {
@@ -367,19 +657,22 @@ impl PageAction {
             Self::VisualSwapEnds => "visual.swap_ends",
             Self::VisualMove { motion, .. } => motion_name(*motion),
             Self::VisualObject { .. } => "visual.object",
-            Self::Jump { kind } => match kind {
+            Self::Jump { kind, .. } => match kind {
                 JumpKind::Hints => "jump.hints",
                 JumpKind::Controls => "jump.controls",
                 JumpKind::Text => "jump.text",
                 JumpKind::Words => "jump.words",
                 JumpKind::Land => "jump.land",
                 JumpKind::Inputs => "jump.inputs",
-                JumpKind::Captcha => "jump.captcha",
+                JumpKind::Captcha | JumpKind::Challenge => "jump.captcha",
             },
             Self::PageHintInput { .. } => "page_hint.input",
             Self::PageHintRefresh => "page_hint.refresh",
+            Self::PageHintPoll { .. } => "page_hint.poll",
+            Self::PageHintClearNotice { .. } => "page_hint.clear_notice",
             Self::PageHintCancel => "page_hint.cancel",
             Self::InputChoose { .. } => "input.choose",
+            Self::InputFirst { .. } => "input.first",
             Self::InputLast { .. } => "input.last",
             Self::InputNext { .. } => "input.next",
             Self::InputPrev { .. } => "input.prev",
@@ -390,6 +683,7 @@ impl PageAction {
                 CaptchaOp::Audio => "captcha.audio",
                 CaptchaOp::Play => "captcha.play",
             },
+            Self::CaptchaFill { .. } => "captcha.fill",
         }
     }
 }
@@ -440,18 +734,24 @@ fn parse_count(name: &str, args: &[(String, String)]) -> Result<Option<u32>, Com
         .transpose()
 }
 
-/// A key's notation (`a`, `A`, `<CR>`, `<BS>`, `<Esc>`, `<Space>`, `<C-l>`) as a jump takes it.
+/// A key's notation (`a`, `A`, `<CR>`, `<Tab>`, `<BS>`, `<Esc>`, `<Space>`, `<Left>`, `<C-r>`) as a jump takes it.
 pub fn hint_key_from_notation(raw: &str) -> HintKey {
     match raw {
         "<CR>" | "<Enter>" => HintKey::Enter,
+        "<Tab>" => HintKey::Tab,
         "<BS>" => HintKey::Backspace,
         "<Esc>" => HintKey::Escape,
         "<Space>" | " " => HintKey::Space,
+        "<Left>" | "<Right>" | "<Up>" | "<Down>" | "<S-Left>" | "<S-Right>" | "<S-Up>" | "<S-Down>" => {
+            HintKey::Arrow(raw.to_string())
+        }
         _ => {
             let mut chars = raw.chars();
             match (chars.next(), chars.next()) {
                 (Some(ch), None) => HintKey::Char(ch),
-                _ if raw.starts_with("<C-") || raw.starts_with("<A-") || raw.starts_with("<D-") => HintKey::Chord,
+                _ if raw.starts_with("<C-") || raw.starts_with("<A-") || raw.starts_with("<D-") => {
+                    HintKey::Chord(raw.to_string())
+                }
                 _ if raw == "<lt>" => HintKey::Char('<'),
                 _ => HintKey::Other,
             }
@@ -465,6 +765,9 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
     if let Some((motion, _, _)) = MOTIONS.iter().find(|(_, each, _)| *each == name) {
         return Ok(Some(Command::Page(PageAction::VisualMove { motion: *motion, count })));
     }
+    let or_page = find_arg(args, "or_page")
+        .or_else(|| find_arg(args, "orPage"))
+        .is_some_and(|v| matches!(v, "true" | "1" | "yes"));
     let action = match name {
         "visual.enter" => PageAction::VisualEnter,
         "visual.exit" => PageAction::VisualExit,
@@ -474,22 +777,43 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
             keys: find_arg(args, "keys").unwrap_or("iw").to_string(),
             count,
         },
-        "jump.hints" => PageAction::Jump { kind: JumpKind::Hints },
+        "jump.hints" => PageAction::Jump {
+            kind: JumpKind::Hints,
+            or_page: false,
+        },
         "jump.controls" => PageAction::Jump {
             kind: JumpKind::Controls,
+            or_page: false,
         },
-        "jump.text" => PageAction::Jump { kind: JumpKind::Text },
-        "jump.words" => PageAction::Jump { kind: JumpKind::Words },
-        "jump.land" => PageAction::Jump { kind: JumpKind::Land },
+        "jump.text" => PageAction::Jump {
+            kind: JumpKind::Text,
+            or_page: false,
+        },
+        "jump.words" => PageAction::Jump {
+            kind: JumpKind::Words,
+            or_page: false,
+        },
+        "jump.land" => PageAction::Jump {
+            kind: JumpKind::Land,
+            or_page: false,
+        },
         "jump.captcha" => PageAction::Jump {
             kind: JumpKind::Captcha,
+            or_page,
         },
         "page_hint.input" => PageAction::PageHintInput {
             key: hint_key_from_notation(find_arg(args, "key").unwrap_or_default()),
         },
         "page_hint.refresh" => PageAction::PageHintRefresh,
+        "page_hint.poll" => PageAction::PageHintPoll {
+            seq: find_arg(args, "seq").and_then(|s| s.parse::<u64>().ok()),
+        },
+        "page_hint.clear_notice" => PageAction::PageHintClearNotice {
+            seq: find_arg(args, "seq").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0),
+        },
         "page_hint.cancel" => PageAction::PageHintCancel,
         "input.choose" => PageAction::InputChoose { count },
+        "input.first" => PageAction::InputFirst { count },
         "input.last" => PageAction::InputLast { count },
         "input.next" => PageAction::InputNext { count },
         "input.prev" => PageAction::InputPrev { count },
@@ -498,6 +822,9 @@ pub fn parse_command(name: &str, args: &[(String, String)]) -> Result<Option<Com
         "captcha.reload" => PageAction::Captcha { op: CaptchaOp::Reload },
         "captcha.audio" => PageAction::Captcha { op: CaptchaOp::Audio },
         "captcha.play" => PageAction::Captcha { op: CaptchaOp::Play },
+        "captcha.fill" => PageAction::CaptchaFill {
+            text: find_arg(args, "text").unwrap_or_default().to_string(),
+        },
         _ => return Ok(None),
     };
     Ok(Some(Command::Page(action)))
@@ -566,6 +893,7 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             "Insert in a Field, by Label if There are Several",
             "Focus a field of the page",
         ),
+        ("input.first", "First Field", "Focus the first field of the page"),
         (
             "input.last",
             "Insert in Last Used Field",
@@ -598,6 +926,11 @@ pub fn descriptors() -> Vec<CommandDescriptor> {
             "Play the CAPTCHA's Audio",
             "Play the CAPTCHA's audio challenge",
         ),
+        (
+            "captcha.fill",
+            "Fill the CAPTCHA's Answer Field",
+            "Fill a local CAPTCHA answer field with text",
+        ),
     ];
     for (_, name, title) in MOTIONS {
         items.push((name, title, "Move the end of the visual selection"));
@@ -628,6 +961,12 @@ mod tests {
             nexts: nexts.iter().map(|next| next.to_string()).collect(),
             distance,
             href: None,
+            challenge: false,
+            drag: false,
+            slider: false,
+            track: None,
+            picture: false,
+            purpose: None,
         }
     }
 
@@ -738,8 +1077,9 @@ mod tests {
     fn notation_to_hint_keys() {
         assert_eq!(hint_key_from_notation("A"), HintKey::Char('A'));
         assert_eq!(hint_key_from_notation("<CR>"), HintKey::Enter);
-        assert_eq!(hint_key_from_notation("<C-l>"), HintKey::Chord);
-        assert_eq!(hint_key_from_notation("<Tab>"), HintKey::Other);
+        assert_eq!(hint_key_from_notation("<C-l>"), HintKey::Chord("<C-l>".to_string()));
+        assert_eq!(hint_key_from_notation("<Tab>"), HintKey::Tab);
+        assert_eq!(hint_key_from_notation("<Left>"), HintKey::Arrow("<Left>".to_string()));
     }
 
     #[test]

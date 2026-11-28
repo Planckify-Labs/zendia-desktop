@@ -188,6 +188,9 @@ impl Component for SiteDataPanelCard {
         let sec_focus = use_focus(sec_a11y);
         let reader_focus = use_focus(reader_a11y);
         let more_focus = use_focus(more_a11y);
+        let mut vim_cursor = use_state(|| 0usize);
+        let mut vim_kbd_active = use_state(|| false);
+        let mut sub_cursor = use_state(|| 0usize);
 
         let ext_hover_state = *ext_section_hovered.read();
         let ext_link_anim = use_animation_with_dependencies(&ext_hover_state, move |conf, hovered| {
@@ -1105,6 +1108,18 @@ impl Component for SiteDataPanelCard {
                 })
         });
 
+        let core_vim = core.clone();
+        let close_vim = self.on_close.clone();
+        let vim_origin = self.site_info.origin.clone();
+        let vim_perms: Vec<(zendia_browser_core::site_info::SitePermissionKind, PermissionState)> = self
+            .site_info
+            .visible_permissions()
+            .into_iter()
+            .map(|p| (p.kind, p.state))
+            .collect();
+        let vim_exts: Vec<SiteExtension> = self.extensions.clone();
+        let vim_reader_avail = is_web && self.site_info.reader_mode_available;
+
         rect()
             .a11y_role(AccessibilityRole::Dialog)
             .a11y_alt("Site Data Panel")
@@ -1120,20 +1135,313 @@ impl Component for SiteDataPanelCard {
             .shadow(theme.shadows.float_drop.to_shadow())
             .on_mouse_down(move |e: Event<MouseEventData>| {
                 e.stop_propagation();
+                vim_kbd_active.set_if_modified(false);
                 if e.button != Some(MouseButton::Right) {
                     ext_ctx_menu.set_if_modified(None);
                     more_open.set_if_modified(false);
                 }
             })
             .on_global_key_down(move |e: Event<KeyboardEventData>| {
+                let vim_enabled = core_vim.model().peek().vim_mode_enabled;
                 if e.key == Key::Named(NamedKey::Escape) {
                     if ext_ctx_menu.peek().is_some() {
                         e.stop_propagation();
                         ext_ctx_menu.set(None);
-                    } else if *more_open.peek() {
+                        return;
+                    }
+                    if *more_open.peek() {
                         e.stop_propagation();
                         more_open.set(false);
+                        return;
                     }
+                    if vim_enabled {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        if let Some(close) = &close_vim {
+                            close.call(());
+                        }
+                        return;
+                    }
+                }
+                if !vim_enabled {
+                    return;
+                }
+
+                let nav = crate::ui::kit::list_nav::classify_list_key(
+                    &e,
+                    crate::ui::kit::list_nav::ListNavConfig::menu().with_vim_keys(true),
+                );
+                // Sub-popup navigation (`ext_ctx_menu` or `more_open`, `MN-01`).
+                let ext_ctx = ext_ctx_menu.peek().clone();
+                if let Some((ctx_id, _, _)) = ext_ctx {
+                    let has_opt = core_vim
+                        .model()
+                        .peek()
+                        .extension(&ctx_id)
+                        .and_then(|ex| ex.options_url.as_ref())
+                        .is_some();
+                    let n = if has_opt { 4 } else { 3 };
+                    e.stop_propagation();
+                    e.prevent_default();
+                    match nav {
+                        Some(crate::ui::kit::list_nav::ListNavAction::MoveNext) => {
+                            let c = *sub_cursor.peek();
+                            sub_cursor.set((c + 1) % n);
+                        }
+                        Some(crate::ui::kit::list_nav::ListNavAction::MovePrev) => {
+                            let c = *sub_cursor.peek();
+                            sub_cursor.set((c + n - 1) % n);
+                        }
+                        Some(
+                            crate::ui::kit::list_nav::ListNavAction::Dismiss
+                            | crate::ui::kit::list_nav::ListNavAction::CloseSubmenu,
+                        ) => {
+                            ext_ctx_menu.set(None);
+                        }
+                        Some(crate::ui::kit::list_nav::ListNavAction::Activate) => {
+                            let c = (*sub_cursor.peek()).min(n - 1);
+                            ext_ctx_menu.set(None);
+                            match (has_opt, c) {
+                                (_, 0) => {
+                                    core_vim.invoke_or_log(Command::ExtensionSetToolbarPinned {
+                                        extension_id: ctx_id,
+                                        pinned: true,
+                                    });
+                                }
+                                (true, 1) => {
+                                    core_vim.invoke_or_log(Command::ExtensionOpenOptions { extension_id: ctx_id });
+                                    if let Some(close) = &close_vim {
+                                        close.call(());
+                                    }
+                                }
+                                (true, 2) | (false, 1) => {
+                                    core_vim.invoke_or_log(Command::SettingsOpen {
+                                        group: Some(SettingsGroupId::Extensions),
+                                    });
+                                    if let Some(close) = &close_vim {
+                                        close.call(());
+                                    }
+                                }
+                                _ => {
+                                    core_vim.invoke_or_log(Command::ExtensionRemove { extension_id: ctx_id });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                if *more_open.peek() {
+                    let n = 4usize;
+                    e.stop_propagation();
+                    e.prevent_default();
+                    match nav {
+                        Some(crate::ui::kit::list_nav::ListNavAction::MoveNext) => {
+                            let c = *sub_cursor.peek();
+                            sub_cursor.set((c + 1) % n);
+                        }
+                        Some(crate::ui::kit::list_nav::ListNavAction::MovePrev) => {
+                            let c = *sub_cursor.peek();
+                            sub_cursor.set((c + n - 1) % n);
+                        }
+                        Some(
+                            crate::ui::kit::list_nav::ListNavAction::Dismiss
+                            | crate::ui::kit::list_nav::ListNavAction::CloseSubmenu,
+                        ) => {
+                            more_open.set(false);
+                        }
+                        Some(crate::ui::kit::list_nav::ListNavAction::Activate) => {
+                            let c = (*sub_cursor.peek()).min(n - 1);
+                            more_open.set(false);
+                            match c {
+                                0 => {
+                                    core_vim.invoke_or_log(Command::SiteClearData {
+                                        origin: Some(vim_origin.clone()),
+                                    });
+                                }
+                                1 | 2 => {
+                                    core_vim.invoke_or_log(Command::SettingsOpen {
+                                        group: Some(SettingsGroupId::Extensions),
+                                    });
+                                    if let Some(close) = &close_vim {
+                                        close.call(());
+                                    }
+                                }
+                                _ => {
+                                    core_vim.invoke_or_log(Command::SettingsOpen { group: None });
+                                    if let Some(close) = &close_vim {
+                                        close.call(());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
+                // Main Site Data Panel items in reading order (`MN-01`).
+                #[derive(Clone)]
+                enum PanelSlot {
+                    Share,
+                    Screenshot,
+                    Bookmark,
+                    Extension(SiteExtension),
+                    AddExtension,
+                    TrackingProtection,
+                    Permission(zendia_browser_core::site_info::SitePermissionKind, PermissionState),
+                    ClearData,
+                    Security,
+                    ReaderMode,
+                    MoreMenu,
+                }
+                let mut slots = Vec::new();
+                let mut hdr = Vec::new();
+                if is_web {
+                    hdr.push(PanelSlot::Share);
+                }
+                hdr.push(PanelSlot::Screenshot);
+                if is_web {
+                    hdr.push(PanelSlot::Bookmark);
+                }
+                if reverse_header {
+                    hdr.reverse();
+                }
+                slots.extend(hdr);
+                for ext in &vim_exts {
+                    if ext.enabled && !extensions_paused {
+                        slots.push(PanelSlot::Extension(ext.clone()));
+                    }
+                }
+                slots.push(PanelSlot::AddExtension);
+                if is_web {
+                    slots.push(PanelSlot::TrackingProtection);
+                    for &(kind, st) in &vim_perms {
+                        slots.push(PanelSlot::Permission(kind, st));
+                    }
+                    slots.push(PanelSlot::ClearData);
+                }
+                if show_security_badge {
+                    slots.push(PanelSlot::Security);
+                }
+                if vim_reader_avail {
+                    slots.push(PanelSlot::ReaderMode);
+                }
+                slots.push(PanelSlot::MoreMenu);
+
+                let total = slots.len();
+                if total == 0 {
+                    return;
+                }
+                e.stop_propagation();
+                e.prevent_default();
+                vim_kbd_active.set_if_modified(true);
+
+                match nav {
+                    Some(
+                        crate::ui::kit::list_nav::ListNavAction::MoveNext
+                        | crate::ui::kit::list_nav::ListNavAction::OpenSubmenu,
+                    ) => {
+                        let c = *vim_cursor.peek();
+                        vim_cursor.set((c + 1) % total);
+                    }
+                    Some(
+                        crate::ui::kit::list_nav::ListNavAction::MovePrev
+                        | crate::ui::kit::list_nav::ListNavAction::CloseSubmenu,
+                    ) => {
+                        let c = *vim_cursor.peek();
+                        vim_cursor.set((c + total - 1) % total);
+                    }
+                    Some(crate::ui::kit::list_nav::ListNavAction::First) => {
+                        vim_cursor.set(0);
+                    }
+                    Some(crate::ui::kit::list_nav::ListNavAction::Last) => {
+                        vim_cursor.set(total - 1);
+                    }
+                    Some(crate::ui::kit::list_nav::ListNavAction::Dismiss) => {
+                        if let Some(close) = &close_vim {
+                            close.call(());
+                        }
+                    }
+                    Some(crate::ui::kit::list_nav::ListNavAction::Activate) => {
+                        let idx = (*vim_cursor.peek()).min(total - 1);
+                        match &slots[idx] {
+                            PanelSlot::Share => {
+                                core_vim.invoke_or_log(Command::ShareOpen {
+                                    tab_id: None,
+                                    space_id: None,
+                                    folder_id: None,
+                                });
+                                if let Some(close) = &close_vim {
+                                    close.call(());
+                                }
+                            }
+                            PanelSlot::Screenshot => {
+                                core_vim.invoke_or_log(Command::SiteScreenshot { tab_id: None });
+                                if let Some(close) = &close_vim {
+                                    close.call(());
+                                }
+                            }
+                            PanelSlot::Bookmark => {
+                                core_vim.invoke_or_log(Command::SiteBookmarkToggle { tab_id: None });
+                            }
+                            PanelSlot::Extension(ext) => {
+                                if let Some(id) = ext.extension_id() {
+                                    core_vim
+                                        .invoke_or_log(Command::ExtensionInvokeActionFromKeyboard { extension_id: id });
+                                } else if let Ok(parsed) = Command::from_name_and_args(&ext.command, &[]) {
+                                    core_vim.invoke_or_log(parsed);
+                                }
+                                if let Some(close) = &close_vim {
+                                    close.call(());
+                                }
+                            }
+                            PanelSlot::AddExtension => {
+                                core_vim.invoke_or_log(Command::SettingsOpen {
+                                    group: Some(SettingsGroupId::Extensions),
+                                });
+                                if let Some(close) = &close_vim {
+                                    close.call(());
+                                }
+                            }
+                            PanelSlot::TrackingProtection => {
+                                core_vim.invoke_or_log(Command::SiteTrackingProtectionToggle {
+                                    origin: Some(vim_origin.clone()),
+                                });
+                            }
+                            PanelSlot::Permission(kind, state) => {
+                                let next_state = match state {
+                                    PermissionState::Allow => PermissionState::Block,
+                                    _ => PermissionState::Allow,
+                                };
+                                core_vim.invoke_or_log(Command::SitePermissionSet {
+                                    origin: Some(vim_origin.clone()),
+                                    permission: *kind,
+                                    state: next_state,
+                                });
+                            }
+                            PanelSlot::ClearData => {
+                                core_vim.invoke_or_log(Command::SiteClearData {
+                                    origin: Some(vim_origin.clone()),
+                                });
+                            }
+                            PanelSlot::Security => {
+                                let next = !*security_open.peek();
+                                security_open.set(next);
+                            }
+                            PanelSlot::ReaderMode => {
+                                core_vim.invoke_or_log(Command::SiteReaderModeToggle { tab_id: None });
+                                if let Some(close) = &close_vim {
+                                    close.call(());
+                                }
+                            }
+                            PanelSlot::MoreMenu => {
+                                sub_cursor.set(0);
+                                more_open.set(true);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             })
             .child(action_row)

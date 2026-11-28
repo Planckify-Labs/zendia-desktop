@@ -29,6 +29,61 @@ use crate::split::{DropZone, parse_direction};
 use crate::toasts::ToastId;
 use std::fmt;
 
+/// Built-in uBlock Origin keyboard commands (`ZendiaUblockSpec.sys.mjs`, `EXT-06`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UblockAction {
+    Popup,
+    Zapper,
+    Picker,
+    Logger,
+    Dashboard,
+    Relax,
+    ToggleCosmetic,
+    ToggleJavascript,
+}
+
+impl UblockAction {
+    pub fn command_name(self) -> &'static str {
+        match self {
+            Self::Popup => "ublock.popup",
+            Self::Zapper => "ublock.zapper",
+            Self::Picker => "ublock.picker",
+            Self::Logger => "ublock.logger",
+            Self::Dashboard => "ublock.dashboard",
+            Self::Relax => "ublock.relax",
+            Self::ToggleCosmetic => "ublock.toggle_cosmetic",
+            Self::ToggleJavascript => "ublock.toggle_javascript",
+        }
+    }
+
+    pub fn manifest_command(self) -> Option<&'static str> {
+        match self {
+            Self::Popup => None,
+            Self::Zapper => Some("launch-element-zapper"),
+            Self::Picker => Some("launch-element-picker"),
+            Self::Logger => Some("launch-logger"),
+            Self::Dashboard => Some("open-dashboard"),
+            Self::Relax => Some("relax-blocking-mode"),
+            Self::ToggleCosmetic => Some("toggle-cosmetic-filtering"),
+            Self::ToggleJavascript => Some("toggle-javascript"),
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "ublock.popup" => Some(Self::Popup),
+            "ublock.zapper" => Some(Self::Zapper),
+            "ublock.picker" => Some(Self::Picker),
+            "ublock.logger" => Some(Self::Logger),
+            "ublock.dashboard" => Some(Self::Dashboard),
+            "ublock.relax" => Some(Self::Relax),
+            "ublock.toggle_cosmetic" | "ublock.toggleCosmetic" => Some(Self::ToggleCosmetic),
+            "ublock.toggle_javascript" | "ublock.toggleJavascript" => Some(Self::ToggleJavascript),
+            _ => None,
+        }
+    }
+}
+
 /// Context-menu action applied to an HTML audio or video element.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaAction {
@@ -87,6 +142,7 @@ pub enum Command {
     AddressBarOpen {
         new_tab: bool,
         initial_query: Option<String>,
+        filter: crate::address_bar::AddressBarFilter,
     },
     AddressBarSubmit {
         input: String,
@@ -136,9 +192,15 @@ pub enum Command {
     FolderExpandAll,
     NavigationBack {
         tab_id: Option<TabId>,
+        count: Option<u32>,
     },
     NavigationForward {
         tab_id: Option<TabId>,
+        count: Option<u32>,
+    },
+    NavigationHistoryStep {
+        tab_id: Option<TabId>,
+        step: i32,
     },
     NavigationReload {
         tab_id: Option<TabId>,
@@ -300,6 +362,9 @@ pub enum Command {
     AgentSelect {
         agent_id: Option<AgentId>,
     },
+    AgentSelectAndOpen {
+        agent_id: AgentId,
+    },
     AgentCycle {
         direction: i8,
     },
@@ -387,6 +452,9 @@ pub enum Command {
         scheme: Option<ThemeScheme>,
         overrides: Option<ThemeOverrides>,
     },
+    ThemeSetSystemDark {
+        prefers_dark: bool,
+    },
     LayoutSetToolbarLayout {
         layout: ToolbarLayout,
     },
@@ -396,6 +464,10 @@ pub enum Command {
     SidebarToggleExpanded,
     SidebarSetExpanded {
         expanded: bool,
+    },
+    SidebarSetPinnedCollapsed {
+        space_id: SpaceId,
+        collapsed: Option<bool>,
     },
     SidebarSetSide {
         side: SidebarSide,
@@ -543,6 +615,10 @@ pub enum Command {
     StatuslineSetShow {
         show: StatuslineShow,
     },
+    /// Enables or disables showing the vim mode indicator (`zendia.statusline.enabled`).
+    StatuslineSetEnabled {
+        enabled: bool,
+    },
     /// Shows a short transient announcement beside the vim mode indicator.
     StatuslineAnnounce {
         message: String,
@@ -561,6 +637,7 @@ pub enum Command {
     ExplorerClose,
     ExplorerMove {
         direction: FocusDirection,
+        count: Option<u32>,
     },
     ExplorerSelect {
         range: bool,
@@ -576,6 +653,7 @@ pub enum Command {
     ToolbarFocusClose,
     ToolbarFocusMove {
         direction: FocusDirection,
+        count: Option<u32>,
     },
     ToolbarFocusActivate,
     /// Enters window mode over split panes in vim mode.
@@ -991,6 +1069,14 @@ pub enum Command {
     ExtensionInvokeAction {
         extension_id: ExtensionId,
     },
+    /// Triggers an installed WebExtension's toolbar action from the keyboard (enabling popup hint labels, `EXT-01`).
+    ExtensionInvokeActionFromKeyboard {
+        extension_id: ExtensionId,
+    },
+    /// Invokes a built-in uBlock Origin action (`EXT-06`).
+    UblockInvoke {
+        action: UblockAction,
+    },
     /// Removes an installed WebExtension.
     ExtensionRemove {
         extension_id: ExtensionId,
@@ -1038,6 +1124,26 @@ pub enum Command {
     ServiceRestart {
         service: ServiceId,
     },
+    /// Agent page-access action: inspects visible controls and document state (`agent.observe`).
+    AgentObserve {
+        tab_id: Option<TabId>,
+    },
+    /// Agent page-access action: performs an element interaction (`agent.act`).
+    AgentAct {
+        tab_id: Option<TabId>,
+        action: Option<String>,
+    },
+    /// Agent page-access action: extracts structured text from the page (`agent.extract`).
+    AgentExtract {
+        tab_id: Option<TabId>,
+        selector: Option<String>,
+    },
+    /// Agent page-access action: fetches a resource in page context (`agent.fetch`).
+    AgentFetch {
+        url: Option<String>,
+    },
+    /// Agent harness version query (`agent.version`).
+    AgentVersion,
     /// The vim key engine's own commands: modes, pending keys, scrolling and field edits.
     Vim(crate::vim_keys::VimCommand),
     /// Tab, space and page actions of the vim profile.
@@ -1149,6 +1255,7 @@ impl Command {
             Self::FolderExpandAll => "folder.expand_all",
             Self::NavigationBack { .. } => "navigation.back",
             Self::NavigationForward { .. } => "navigation.forward",
+            Self::NavigationHistoryStep { .. } => "navigation.history_step",
             Self::NavigationReload { .. } => "navigation.reload",
             Self::NavigationStop { .. } => "navigation.stop",
             Self::NavigationLoadUrl { .. } => "navigation.load_url",
@@ -1198,6 +1305,7 @@ impl Command {
             Self::AgentStop { .. } => "agent.stop",
             Self::AgentNew { .. } => "agent.new",
             Self::AgentSelect { .. } => "agent.select",
+            Self::AgentSelectAndOpen { .. } => "agent.select_and_open",
             Self::AgentCycle { .. } => "agent.cycle",
             Self::AgentModel { .. } => "agent.model",
             Self::AgentSetEffort { .. } => "agent.set_effort",
@@ -1214,6 +1322,11 @@ impl Command {
             Self::AgentLog { .. } => "agent.log",
             Self::AgentList => "agent.list",
             Self::AgentDismiss { .. } => "agent.dismiss",
+            Self::AgentObserve { .. } => "agent.observe",
+            Self::AgentAct { .. } => "agent.act",
+            Self::AgentExtract { .. } => "agent.extract",
+            Self::AgentFetch { .. } => "agent.fetch",
+            Self::AgentVersion => "agent.version",
             Self::DebugSampleAgent => "debug.sample_agent",
             Self::DebugToggleAgentService => "debug.toggle_agent_service",
             Self::WebChatToggle => "webchat.toggle",
@@ -1226,10 +1339,12 @@ impl Command {
             Self::WebChatSetDictating { .. } => "webchat.set_dictating",
             Self::WebChatAsk { .. } => "webchat.ask",
             Self::ThemeSet { .. } => "theme.set",
+            Self::ThemeSetSystemDark { .. } => "theme.set_system_dark",
             Self::LayoutSetToolbarLayout { .. } => "layout.set_toolbar_layout",
             Self::LayoutSetCompactMode { .. } => "layout.set_compact_mode",
             Self::SidebarToggleExpanded => "sidebar.toggle_expanded",
             Self::SidebarSetExpanded { .. } => "sidebar.set_expanded",
+            Self::SidebarSetPinnedCollapsed { .. } => "sidebar.set_pinned_collapsed",
             Self::SidebarSetSide { .. } => "sidebar.set_side",
             Self::SidebarSetWidth { .. } => "sidebar.set_width",
             Self::DebugCycleInputState => "debug.cycle_input_state",
@@ -1289,6 +1404,7 @@ impl Command {
             Self::DebugSampleDownload => "debug.sample_download",
             Self::DebugSampleMedia => "debug.sample_media",
             Self::StatuslineSetShow { .. } => "statusline.set_show",
+            Self::StatuslineSetEnabled { .. } => "statusline.set_enabled",
             Self::StatuslineAnnounce { .. } => "statusline.announce",
             Self::StatuslineClearAnnouncement => "statusline.clear_announcement",
             Self::WhichKeyShowAll => "which_key.show_all",
@@ -1411,7 +1527,10 @@ impl Command {
             Self::ExtensionToggle { .. } => "extension.toggle",
             Self::ExtensionSetEnabled { .. } => "extension.set_enabled",
             Self::ExtensionSetToolbarPinned { .. } => "extension.set_toolbar_pinned",
-            Self::ExtensionInvokeAction { .. } => "extension.invoke_action",
+            Self::ExtensionInvokeAction { .. } | Self::ExtensionInvokeActionFromKeyboard { .. } => {
+                "extension.invoke_action"
+            }
+            Self::UblockInvoke { action } => action.command_name(),
             Self::ExtensionRemove { .. } => "extension.remove",
             Self::ExtensionReload { .. } => "extension.reload",
             Self::ExtensionInstallPath { .. } => "extension.install_path",
@@ -1452,10 +1571,22 @@ impl Command {
             "tab.next" => Ok(Self::TabNext),
             "tab.previous" => Ok(Self::TabPrevious),
             "location.focus" => Ok(Self::LocationFocus),
-            "address_bar.open" => Ok(Self::AddressBarOpen {
-                new_tab: parse_bool_arg(name, args, "new_tab", false)?,
-                initial_query: find_arg(args, "initial_query").map(str::to_string),
-            }),
+            "address_bar.open" => {
+                let filter = match find_arg(args, "filter") {
+                    None => crate::address_bar::AddressBarFilter::All,
+                    Some(raw) => crate::address_bar::AddressBarFilter::parse(raw).ok_or_else(|| {
+                        CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: format!("unknown address bar filter `{raw}`"),
+                        }
+                    })?,
+                };
+                Ok(Self::AddressBarOpen {
+                    new_tab: parse_bool_arg(name, args, "new_tab", false)?,
+                    initial_query: find_arg(args, "initial_query").map(str::to_string),
+                    filter,
+                })
+            }
             "address_bar.submit" => Ok(Self::AddressBarSubmit {
                 input: parse_required_string_arg(name, args, "input")?,
                 new_tab: parse_bool_arg(name, args, "new_tab", false)?,
@@ -1516,10 +1647,23 @@ impl Command {
             "folder.expand_all" => Ok(Self::FolderExpandAll),
             "navigation.back" => Ok(Self::NavigationBack {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                count: parse_optional_u64_arg(name, args, "count")?.map(|c| c.min(u64::from(u32::MAX)) as u32),
             }),
             "navigation.forward" => Ok(Self::NavigationForward {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                count: parse_optional_u64_arg(name, args, "count")?.map(|c| c.min(u64::from(u32::MAX)) as u32),
             }),
+            "navigation.history_step" => {
+                let raw_step = parse_required_string_arg(name, args, "step")?;
+                let step = raw_step.parse::<i32>().map_err(|_| CommandError::InvalidArgument {
+                    command: name.to_string(),
+                    message: format!("argument `step` expected i32, got `{raw_step}`"),
+                })?;
+                Ok(Self::NavigationHistoryStep {
+                    tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                    step,
+                })
+            }
             "navigation.reload" => Ok(Self::NavigationReload {
                 tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
                 bypass_cache: parse_bool_arg(name, args, "bypass_cache", false)?,
@@ -1656,6 +1800,9 @@ impl Command {
                 notification_id: NotificationId(parse_required_u64_arg(name, args, "notification_id")?),
             }),
             "split.add" => {
+                if find_arg(args, "tab_id").is_none() {
+                    return Ok(Self::Splits(crate::split_actions::SplitAction::AddPick));
+                }
                 let tab_id = TabId(parse_required_u64_arg(name, args, "tab_id")?);
                 let direction = match find_arg(args, "direction").unwrap_or("horizontal") {
                     "horizontal" => SplitDirection::Horizontal,
@@ -1762,6 +1909,9 @@ impl Command {
             "agent.select" => Ok(Self::AgentSelect {
                 agent_id: find_arg(args, "agent_id").map(AgentId::new),
             }),
+            "agent.select_and_open" => Ok(Self::AgentSelectAndOpen {
+                agent_id: AgentId::new(parse_required_string_arg(name, args, "agent_id")?),
+            }),
             "agent.cycle" => {
                 let direction = match find_arg(args, "direction") {
                     Some("previous") | Some("-1") => -1,
@@ -1833,6 +1983,21 @@ impl Command {
             "agent.dismiss" => Ok(Self::AgentDismiss {
                 conversation_id: ConversationId(parse_required_u64_arg(name, args, "conversation_id")?),
             }),
+            "agent.observe" => Ok(Self::AgentObserve {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+            }),
+            "agent.act" => Ok(Self::AgentAct {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                action: find_arg(args, "action").map(str::to_string),
+            }),
+            "agent.extract" => Ok(Self::AgentExtract {
+                tab_id: parse_optional_u64_arg(name, args, "tab_id")?.map(TabId),
+                selector: find_arg(args, "selector").map(str::to_string),
+            }),
+            "agent.fetch" => Ok(Self::AgentFetch {
+                url: find_arg(args, "url").map(str::to_string),
+            }),
+            "agent.version" => Ok(Self::AgentVersion),
             "debug.sample_agent" => Ok(Self::DebugSampleAgent),
             "debug.toggle_agent_service" => Ok(Self::DebugToggleAgentService),
             "webchat.toggle" | "zendia.webchat.toggle" => Ok(Self::WebChatToggle),
@@ -2167,6 +2332,9 @@ impl Command {
                 })?;
                 Ok(Self::StatuslineSetShow { show })
             }
+            "statusline.set_enabled" => Ok(Self::StatuslineSetEnabled {
+                enabled: parse_bool_arg(name, args, "enabled", true)?,
+            }),
             "statusline.announce" => Ok(Self::StatuslineAnnounce {
                 message: parse_required_string_arg(name, args, "message")?,
                 timeout_ms: parse_optional_u64_arg(name, args, "timeout_ms")?,
@@ -2184,7 +2352,8 @@ impl Command {
                     command: name.to_string(),
                     message: format!("unknown focus direction `{raw}`"),
                 })?;
-                Ok(Self::ExplorerMove { direction })
+                let count = parse_optional_u64_arg(name, args, "count")?.map(|c| c.min(u64::from(u32::MAX)) as u32);
+                Ok(Self::ExplorerMove { direction, count })
             }
             "explorer.select" => Ok(Self::ExplorerSelect {
                 range: parse_bool_arg(name, args, "range", false)?,
@@ -2203,7 +2372,8 @@ impl Command {
                     command: name.to_string(),
                     message: format!("unknown focus direction `{raw}`"),
                 })?;
-                Ok(Self::ToolbarFocusMove { direction })
+                let count = parse_optional_u64_arg(name, args, "count")?.map(|c| c.min(u64::from(u32::MAX)) as u32);
+                Ok(Self::ToolbarFocusMove { direction, count })
             }
             "toolbar.focus_activate" => Ok(Self::ToolbarFocusActivate),
             "window.mode" | "window_mode.open" => Ok(Self::WindowModeOpen),
@@ -2429,6 +2599,24 @@ impl Command {
                 })
             }
             "region.cancel" => Ok(Self::RegionCancel),
+            "theme.set_system_dark" => Ok(Self::ThemeSetSystemDark {
+                prefers_dark: parse_bool_arg(name, args, "prefers_dark", true)?,
+            }),
+            "sidebar.set_pinned_collapsed" => {
+                let space_id = SpaceId(parse_required_u64_arg(name, args, "space_id")?);
+                let collapsed = match find_arg(args, "collapsed") {
+                    None => None,
+                    Some("true") => Some(true),
+                    Some("false") => Some(false),
+                    Some(other) => {
+                        return Err(CommandError::InvalidArgument {
+                            command: name.to_string(),
+                            message: format!("argument `collapsed` expected bool, got `{other}`"),
+                        });
+                    }
+                };
+                Ok(Self::SidebarSetPinnedCollapsed { space_id, collapsed })
+            }
             _ => {
                 if let Some(cmd) = crate::space_routing::parse_command(name, args)? {
                     return Ok(cmd);
@@ -2460,7 +2648,7 @@ impl Command {
                 if let Some(cmd) = crate::stub::settings_modules::parse_command(name, args)? {
                     return Ok(cmd);
                 }
-                Ok(Self::vim_profile_alias(name).unwrap_or_else(|| Self::Custom {
+                Ok(Self::vim_profile_alias(name, args)?.unwrap_or_else(|| Self::Custom {
                     name: name.to_string(),
                     args: args.to_vec(),
                 }))
@@ -2470,11 +2658,12 @@ impl Command {
 
     /// The vim profile, ported from the fork, names some focus actions its own way. Those names parse to the same
     /// typed commands so keys from either source reach one implementation.
-    fn vim_profile_alias(name: &str) -> Option<Self> {
+    fn vim_profile_alias(name: &str, args: &[(String, String)]) -> Result<Option<Self>, CommandError> {
         use crate::focus::FocusDirection as Dir;
-        let explorer = |direction| Self::ExplorerMove { direction };
-        let toolbar = |direction| Self::ToolbarFocusMove { direction };
-        Some(match name {
+        let count = parse_optional_u64_arg(name, args, "count")?.map(|c| c.min(u64::from(u32::MAX)) as u32);
+        let explorer = |direction| Self::ExplorerMove { direction, count };
+        let toolbar = |direction| Self::ToolbarFocusMove { direction, count };
+        Ok(Some(match name {
             "explorer.open" => Self::ExplorerActivate,
             "explorer.down" => explorer(Dir::Next),
             "explorer.up" => explorer(Dir::Previous),
@@ -2492,10 +2681,10 @@ impl Command {
             "toolbar.last" => toolbar(Dir::Last),
             "toolbar.press" => Self::ToolbarFocusActivate,
             "toolbar.quit" => Self::ToolbarFocusClose,
-            "window.quit" | "window.escape" => Self::WindowModeClose,
+            "window.quit" => Self::WindowModeClose,
             "window.drop" => Self::WindowModeDrop,
-            _ => return None,
-        })
+            _ => return Ok(None),
+        }))
     }
 }
 
@@ -4527,6 +4716,36 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             arguments: Vec::new(),
         },
         CommandDescriptor {
+            name: "agent.observe".to_string(),
+            title: "Observe Page for Agent".to_string(),
+            description: "Inspect interactive controls and page state for an agent".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "agent.act".to_string(),
+            title: "Act on Page for Agent".to_string(),
+            description: "Perform an agent element action on the page".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "agent.extract".to_string(),
+            title: "Extract Page Content for Agent".to_string(),
+            description: "Extract structured text from the page for an agent".to_string(),
+            arguments: vec![ArgumentSchema::new("tab_id", ArgumentType::TabId, false, "Target tab")],
+        },
+        CommandDescriptor {
+            name: "agent.fetch".to_string(),
+            title: "Fetch Resource for Agent".to_string(),
+            description: "Fetch a URL resource on behalf of an agent".to_string(),
+            arguments: vec![ArgumentSchema::new("url", ArgumentType::String, false, "Resource URL")],
+        },
+        CommandDescriptor {
+            name: "agent.version".to_string(),
+            title: "Agent Harness Version".to_string(),
+            description: "Return the Zendia agent harness protocol version".to_string(),
+            arguments: Vec::new(),
+        },
+        CommandDescriptor {
             name: "debug.sample_agent".to_string(),
             title: "Load Sample Agent Conversation".to_string(),
             description: "Populate the active tab with a sample Markdown, table, and confirmation agent run"
@@ -4577,29 +4796,7 @@ mod tests {
 
     /// Vim profile commands for phase 5's surfaces that have no implementation yet. Each one is a later feature;
     /// remove it here when it lands.
-    const NOT_YET: &[&str] = &[
-        "explorer.create",
-        "explorer.find",
-        "explorer.fold_close",
-        "explorer.fold_open",
-        "explorer.fold_toggle",
-        "explorer.half_page_down",
-        "explorer.half_page_up",
-        "explorer.menu",
-        "explorer.move_down",
-        "explorer.move_out_of_folder",
-        "explorer.move_up",
-        "explorer.preview",
-        "explorer.split_horizontal",
-        "explorer.split_vertical",
-        "explorer.yank",
-        "explorer.yank_markdown",
-        "toolbar.jump",
-        "toolbar.menu",
-        "window.close",
-        "window.minimize",
-        "window.toggle_maximize",
-    ];
+    const NOT_YET: &[&str] = &[];
 
     #[test]
     fn vim_profile_focus_commands_reach_typed_commands() {

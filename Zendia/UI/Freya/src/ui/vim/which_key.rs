@@ -503,21 +503,6 @@ impl Component for WhichKeyPopup {
                     state.close_all_keymaps();
                 }
                 dismiss_core.invoke_or_log(Command::WhichKeyHide);
-                return;
-            }
-            match &e.key {
-                Key::Named(NamedKey::Escape) => {
-                    e.stop_propagation();
-                    if let Some(state) = vim_state {
-                        state.close_all_keymaps();
-                    }
-                    dismiss_core.invoke_or_log(Command::WhichKeyHide);
-                }
-                Key::Named(NamedKey::Backspace) => {
-                    e.stop_propagation();
-                    dismiss_core.invoke_or_log(Command::WhichKeyBack);
-                }
-                _ => {}
             }
         };
 

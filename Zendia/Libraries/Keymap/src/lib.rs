@@ -26,5 +26,5 @@ pub use notation::{KeyCode, KeyModifiers, KeySequence, KeyStroke, NotationError}
 pub use resolver::{KeyResolver, NextKeyHint, Resolution};
 pub use table::{
     ArgValue, Binding, CHROME_MODES, CommandInvocation, GroupSpec, KeyTable, Profile, STANDARD_PROFILE_TOML,
-    TableError, TrieChild, VIM_PROFILE_TOML,
+    TableError, TrieChild, UserConfigMeta, VIM_PROFILE_TOML, translate_fork_action,
 };

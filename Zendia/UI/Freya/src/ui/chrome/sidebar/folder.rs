@@ -443,7 +443,11 @@ impl Component for FolderHeaderRow {
                         .center()
                         .cursor(CursorIcon::Pointer)
                         .on_sized(move |e: Event<SizedEventData>| {
-                            header_anchor.set_if_modified(AnchorRect::from_area(e.area));
+                            let rect = AnchorRect::from_area(e.area);
+                            header_anchor.set_if_modified(rect);
+                            if let Some(state) = sidebar_state {
+                                state.set_folder_anchor(folder_id, rect);
+                            }
                         })
                         .on_pointer_enter(on_enter_row)
                         .on_pointer_leave(on_leave_row)
@@ -554,7 +558,11 @@ impl Component for FolderHeaderRow {
                     .opacity(if is_being_dragged { 0.42 } else { 1.0 })
                     .cursor(CursorIcon::Pointer)
                     .on_sized(move |e: Event<SizedEventData>| {
-                        header_anchor.set_if_modified(AnchorRect::from_area(e.area));
+                        let rect = AnchorRect::from_area(e.area);
+                        header_anchor.set_if_modified(rect);
+                        if let Some(state) = sidebar_state {
+                            state.set_folder_anchor(folder_id, rect);
+                        }
                     })
                     .on_pointer_enter(on_enter_row)
                     .on_pointer_leave(on_leave_row)
